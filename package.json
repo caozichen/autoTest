@@ -1,0 +1,23 @@
+{
+  "name": "autotest-platform",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "dev": "concurrently --kill-others --names WEB,RUNNER \"npm:dev:web\" \"npm:dev:api\"",
+    "dev:web": "npm run dev --workspace @autotest/web",
+    "dev:api": "npm run dev --workspace @autotest/api",
+    "build": "npm run build --workspace @autotest/web",
+    "typecheck": "npm run typecheck --workspace @autotest/web && npm run typecheck --workspace @autotest/api",
+    "test": "npm run test --workspace @autotest/web && npm run test --workspace @autotest/api"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1",
+    "concurrently": "^10.0.4"
+  }
+}

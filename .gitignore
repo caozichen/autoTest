@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.vite/
+.env*
+!.env.example
+coverage/
+playwright-report/
+test-results/
+blob-report/
+*.tsbuildinfo
+*.log

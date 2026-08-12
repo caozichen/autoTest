@@ -1,0 +1,12 @@
+{
+  "name": "@autotest/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch server.mjs",
+    "start": "node server.mjs",
+    "test": "node --test",
+    "typecheck": "node --check server.mjs && node --check script-runner.mjs"
+  }
+}

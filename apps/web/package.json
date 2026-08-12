@@ -1,0 +1,32 @@
+{
+  "name": "@autotest/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "npm run typecheck && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "typecheck": "vue-tsc --build --force",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@element-plus/icons-vue": "^2.3.1",
+    "echarts": "^6.1.0",
+    "element-plus": "^2.9.6",
+    "pinia": "^3.0.1",
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.0"
+  },
+  "devDependencies": {
+    "@tsconfig/node22": "^22.0.0",
+    "@types/node": "^22.13.10",
+    "@vitejs/plugin-vue": "^5.2.3",
+    "@vue/tsconfig": "^0.7.0",
+    "jsdom": "^26.0.0",
+    "typescript": "~5.7.2",
+    "vite": "^6.2.2",
+    "vitest": "^3.0.8",
+    "vue-tsc": "^2.2.8"
+  }
+}

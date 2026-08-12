@@ -1,0 +1,94 @@
+:root {
+  --font-caption: 12px;
+  --font-xs: 14px;
+  --font-sm: 15px;
+  --font-md: 16px;
+  --font-base: 17px;
+  --font-lg: 20px;
+  --font-xl: 22px;
+  --font-brand: 25px;
+  --font-subtitle: 28px;
+  --font-section: 30px;
+  --font-title: 34px;
+  --font-display: 40px;
+  --font-hero: 58px;
+  --content-max-width: 2400px;
+  color: #26343b;
+  background: #f2f5f7;
+  font-family: Inter, "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  letter-spacing: 0;
+  --el-color-primary: #149f90;
+  --el-border-radius-base: 5px;
+  --el-font-size-extra-large: 25px;
+  --el-font-size-large: 20px;
+  --el-font-size-medium: 17px;
+  --el-font-size-base: 17px;
+  --el-font-size-small: 15px;
+  --el-font-size-extra-small: 14px;
+  --el-component-size-large: 48px;
+  --el-component-size: 42px;
+  --el-component-size-small: 34px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  min-width: 320px;
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  min-height: 100dvh;
+  font-size: var(--font-base);
+}
+
+.el-dialog__title {
+  font-size: var(--font-lg);
+  font-weight: 650;
+}
+
+.el-form-item__label,
+.el-input__inner,
+.el-textarea__inner,
+.el-select__placeholder,
+.el-button,
+.el-dropdown-menu__item {
+  font-size: var(--font-md);
+}
+
+.el-message,
+.el-message-box {
+  font-size: var(--font-md);
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+  letter-spacing: 0;
+}
+
+button:focus-visible,
+a:focus-visible {
+  outline: 2px solid #1ab6a5;
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
