@@ -36,6 +36,7 @@ export function buildScriptRunContext(
 
   return {
     environmentId: environment.id,
+    siteBaseUrl: environment.baseUrl,
     apiBaseUrl: environment.apiBaseUrl,
     ignoreHTTPSErrors: environment.ignoreHTTPSErrors ?? apiHostname === 'lx.admin.lingxi.tech',
     variables,

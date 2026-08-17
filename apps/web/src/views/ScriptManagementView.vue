@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   Delete,
@@ -11,9 +11,10 @@ import {
   RefreshRight,
   Search,
   Setting,
+  VideoPause,
   VideoPlay,
 } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 
 import ScriptEditorDialog from '@/components/ScriptEditorDialog.vue'
 import ScriptRunResultDialog from '@/components/ScriptRunResultDialog.vue'
@@ -22,6 +23,7 @@ import type { RunFailureStage, RunRecord } from '@/domain/run-record'
 import type { AutomationScript, ScriptDraft, ScriptStatus } from '@/domain/script'
 import { services } from '@/services/container'
 import { applyResponseVariable } from '@/services/environments/apply-response-variable'
+import { collectBatchStopScriptIds } from '@/services/scripts/script-batch-stop-plan'
 import { buildScriptRunContext } from '@/services/scripts/script-run-context'
 
 const scripts = ref<AutomationScript[]>([])
@@ -38,7 +40,9 @@ const editingScript = ref<AutomationScript | null>(null)
 const resultVisible = ref(false)
 const resultScript = ref<AutomationScript | null>(null)
 const runningScriptIds = ref<Set<string>>(new Set())
+const stoppingScriptIds = ref<Set<string>>(new Set())
 const router = useRouter()
+let liveRefreshTimer: number | null = null
 
 const statusOptions: Array<{ label: string; value: 'all' | ScriptStatus }> = [
   { label: '全部状态', value: 'all' },
@@ -46,6 +50,7 @@ const statusOptions: Array<{ label: string; value: 'all' | ScriptStatus }> = [
   { label: '执行中', value: 'running' },
   { label: '最近通过', value: 'passed' },
   { label: '最近失败', value: 'failed' },
+  { label: '已中断', value: 'interrupted' },
   { label: '已停用', value: 'disabled' },
 ]
 
@@ -54,13 +59,32 @@ const statusMap: Record<ScriptStatus, { label: string; type: 'success' | 'warnin
   running: { label: '执行中', type: 'warning' },
   passed: { label: '已通过', type: 'success' },
   failed: { label: '失败', type: 'danger' },
+  interrupted: { label: '已中断', type: 'info' },
   disabled: { label: '已停用', type: 'info' },
+}
+
+function isScriptRunning(script: AutomationScript): boolean {
+  return script.status === 'running' || runningScriptIds.value.has(script.id)
+}
+
+function displayStatus(script: AutomationScript): ScriptStatus {
+  return isScriptRunning(script) ? 'running' : script.status
+}
+
+function setRunningScripts(records: RunRecord[]): void {
+  runningScriptIds.value = new Set(records
+    .filter((record) => record.status === 'running')
+    .flatMap((record) => record.scripts.map((script) => script.id)))
+}
+
+async function refreshRunningScripts(): Promise<void> {
+  setRunningScripts(await services.runRecords.list())
 }
 
 const filteredScripts = computed(() => {
   const keyword = searchKeyword.value.trim().toLowerCase()
   return scripts.value.filter((script) => {
-    const matchesStatus = statusFilter.value === 'all' || script.status === statusFilter.value
+    const matchesStatus = statusFilter.value === 'all' || displayStatus(script) === statusFilter.value
     const matchesKeyword = !keyword || [script.name, script.description, script.directory, script.entryFile, ...script.tags]
       .some((value) => value.toLowerCase().includes(keyword))
     return matchesStatus && matchesKeyword
@@ -79,7 +103,7 @@ const summary = computed(() => ({
 }))
 const availableEnvironments = computed(() => environments.value.filter((environment) => environment.enabled))
 const selectedEnvironment = computed(() => environments.value.find((environment) => environment.id === selectedEnvironmentId.value) ?? null)
-const selectedRunLocked = computed(() => selectedScripts.value.some((script) => runningScriptIds.value.has(script.id)))
+const selectedRunLocked = computed(() => selectedScripts.value.some(isScriptRunning))
 
 watch([searchKeyword, statusFilter], () => {
   currentPage.value = 1
@@ -88,13 +112,39 @@ watch([searchKeyword, statusFilter], () => {
 async function loadScripts(showSuccess = false): Promise<void> {
   loading.value = true
   try {
-    scripts.value = await services.scripts.list()
+    const [latestScripts, records] = await Promise.all([
+      services.scripts.list(),
+      services.runRecords.list(),
+    ])
+    scripts.value = latestScripts
+    setRunningScripts(records)
     if (showSuccess) ElMessage.success('脚本列表已刷新')
   } catch {
     ElMessage.error('脚本列表加载失败')
   } finally {
     loading.value = false
   }
+}
+
+async function refreshLiveScripts(): Promise<void> {
+  const latest = await services.scripts.list()
+  scripts.value = latest
+  if (resultScript.value) {
+    resultScript.value = latest.find((script) => script.id === resultScript.value?.id) ?? resultScript.value
+  }
+}
+
+function startLiveRefresh(): void {
+  stopLiveRefresh()
+  liveRefreshTimer = window.setInterval(() => {
+    void refreshLiveScripts()
+  }, 500)
+}
+
+function stopLiveRefresh(): void {
+  if (liveRefreshTimer === null) return
+  window.clearInterval(liveRefreshTimer)
+  liveRefreshTimer = null
 }
 
 async function loadEnvironments(): Promise<void> {
@@ -150,6 +200,79 @@ async function removeScript(script: AutomationScript): Promise<void> {
   }
 }
 
+async function forceStop(script: AutomationScript): Promise<void> {
+  if (!isScriptRunning(script) || stoppingScriptIds.value.has(script.id)) return
+  let stopScriptIds = [script.id]
+  let stopRequestsSucceeded = false
+  stoppingScriptIds.value = new Set([...stoppingScriptIds.value, script.id])
+  try {
+    const records = await services.runRecords.list()
+    const batchScriptIds = collectBatchStopScriptIds(records, script.id)
+    if (batchScriptIds.length > 0) stopScriptIds = batchScriptIds
+    stoppingScriptIds.value = new Set([...stoppingScriptIds.value, ...stopScriptIds])
+
+    const stopSettled = await Promise.allSettled(
+      stopScriptIds.map((scriptId) => services.scripts.stop(scriptId)),
+    )
+    const failedStops = stopSettled.flatMap((result, index) => (
+      result.status === 'rejected'
+        ? [{ scriptId: stopScriptIds[index], reason: result.reason }]
+        : []
+    ))
+    if (failedStops.length > 0) {
+      const firstFailure = failedStops[0]
+      const reason = firstFailure?.reason instanceof Error
+        ? firstFailure.reason.message
+        : String(firstFailure?.reason ?? '未知错误')
+      throw new Error(`${failedStops.length} 个脚本停止失败（${firstFailure?.scriptId ?? script.id}：${reason}）`)
+    }
+
+    stopRequestsSucceeded = true
+    const stopResults = stopSettled.flatMap((result) => (
+      result.status === 'fulfilled' ? [result.value] : []
+    ))
+    const interruptedRecords = await services.runRecords.interruptByScriptId(script.id)
+    await Promise.allSettled([refreshLiveScripts(), refreshRunningScripts()])
+    if (stopResults.some((result) => result.runnerFound)) {
+      ElMessage.success(stopScriptIds.length > 1
+        ? `批次内 ${stopScriptIds.length} 个脚本已强制停止，运行批次已标记为中断`
+        : '脚本已强制停止，运行批次已标记为中断')
+    } else if (interruptedRecords.length > 0) {
+      ElMessage.success('Runner 中未发现活动任务，本地运行批次已解除锁定')
+    } else {
+      ElMessage.warning('未发现活动任务，页面运行状态已解除')
+    }
+  } catch (error) {
+    await Promise.allSettled([refreshLiveScripts(), refreshRunningScripts()])
+    const message = error instanceof Error ? error.message : '未知错误'
+    ElMessage.error(stopRequestsSucceeded
+      ? `脚本停止请求已完成，但运行批次状态更新失败：${message}；批次仍保持运行锁定`
+      : `强制停止失败：${message}；批次仍保持运行锁定`)
+  } finally {
+    const next = new Set(stoppingScriptIds.value)
+    for (const scriptId of stopScriptIds) next.delete(scriptId)
+    stoppingScriptIds.value = next
+  }
+}
+
+async function confirmForceStop(script: AutomationScript): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      '当前运行将立即中断，确定强制停止此脚本吗？',
+      '强制停止脚本',
+      {
+        confirmButtonText: '强制停止',
+        cancelButtonText: '取消',
+        confirmButtonClass: 'el-button--danger',
+        type: 'warning',
+      },
+    )
+  } catch {
+    return
+  }
+  await forceStop(script)
+}
+
 async function runScripts(targets: AutomationScript[]): Promise<void> {
   if (!selectedEnvironmentId.value) {
     ElMessage.warning('运行脚本前必须选择环境')
@@ -157,13 +280,13 @@ async function runScripts(targets: AutomationScript[]): Promise<void> {
   }
 
   const uniqueTargets = [...new Map(targets.map((script) => [script.id, script])).values()]
-  const lockedTargets = uniqueTargets.filter((script) => runningScriptIds.value.has(script.id))
+  const lockedTargets = uniqueTargets.filter(isScriptRunning)
   if (lockedTargets.length > 0) {
     ElMessage.warning(`${lockedTargets.map((script) => script.name).join('、')}正在运行，请等待当前批次结束`)
     return
   }
 
-  const runnable = uniqueTargets.filter((script) => script.status !== 'disabled' && script.status !== 'running')
+  const runnable = uniqueTargets.filter((script) => script.status !== 'disabled' && !isScriptRunning(script))
   if (runnable.length === 0) {
     ElMessage.warning('请选择可运行的脚本')
     return
@@ -234,24 +357,33 @@ async function runScripts(targets: AutomationScript[]): Promise<void> {
       buildScriptRunContext(environment, services.runtimeVariables),
     )
     scripts.value = await services.scripts.list()
+    startLiveRefresh()
     const completed = await runTask
-    runRecord = await services.runRecords.complete(runRecord.id, {
-      scripts: completed.map((script) => ({
-        scriptId: script.id,
-        ok: script.lastRunResult?.ok ?? script.status === 'passed',
-        durationMs: script.lastRunResult?.durationMs ?? 0,
-        logs: script.lastRunResult?.logs ?? [],
-        ...(script.lastRunResult?.output ? { output: script.lastRunResult.output } : {}),
-        ...(script.lastRunResult?.error ? { error: script.lastRunResult.error } : {}),
-      })),
-      secretValues: runSecretValues,
-    })
-    recordFinalized = true
+    stopLiveRefresh()
+    const currentRecord = await services.runRecords.get(runRecord.id)
+    if (currentRecord?.status === 'running') {
+      runRecord = await services.runRecords.complete(runRecord.id, {
+        scripts: completed.map((script) => ({
+          scriptId: script.id,
+          ok: script.lastRunResult?.ok ?? script.status === 'passed',
+          durationMs: script.lastRunResult?.durationMs ?? 0,
+          logs: script.lastRunResult?.logs ?? [],
+          ...(script.lastRunResult?.output ? { output: script.lastRunResult.output } : {}),
+          ...(script.lastRunResult?.error ? { error: script.lastRunResult.error } : {}),
+        })),
+        secretValues: runSecretValues,
+      })
+    } else if (currentRecord) {
+      runRecord = currentRecord
+    }
+    recordFinalized = runRecord.status !== 'running'
     scripts.value = await services.scripts.list()
     const firstResult = completed[0]
     if (firstResult) openResult(firstResult)
     const failedCount = completed.filter((script) => script.status === 'failed').length
-    if (failedCount > 0) {
+    if (runRecord.status === 'interrupted') {
+      ElMessage.warning('脚本运行已被强制停止')
+    } else if (failedCount > 0) {
       ElMessage.error(`${failedCount} 个脚本执行失败，请查看运行日志`)
     } else {
       ElMessage.success(`${runnable.length} 个脚本已在${environment.name}运行完成`)
@@ -270,9 +402,13 @@ async function runScripts(targets: AutomationScript[]): Promise<void> {
     }
     ElMessage.error(message)
   } finally {
-    const nextRunningIds = new Set(runningScriptIds.value)
-    for (const id of lockedIds) nextRunningIds.delete(id)
-    runningScriptIds.value = nextRunningIds
+    stopLiveRefresh()
+    await refreshLiveScripts().catch(() => undefined)
+    await refreshRunningScripts().catch(() => {
+      const nextRunningIds = new Set(runningScriptIds.value)
+      for (const id of lockedIds) nextRunningIds.delete(id)
+      runningScriptIds.value = nextRunningIds
+    })
   }
 }
 
@@ -288,6 +424,8 @@ function handleSelectionChange(rows: AutomationScript[]): void {
 onMounted(async () => {
   await Promise.all([loadScripts(), loadEnvironments()])
 })
+
+onBeforeUnmount(stopLiveRefresh)
 </script>
 
 <template>
@@ -406,13 +544,13 @@ onMounted(async () => {
         </el-table-column>
         <el-table-column label="状态" width="132">
           <template #default="scope">
-            <el-tag :type="statusMap[scope.row.status as ScriptStatus].type" size="small" effect="light">
-              {{ statusMap[scope.row.status as ScriptStatus].label }}
+            <el-tag :type="statusMap[displayStatus(scope.row)].type" size="small" effect="light">
+              {{ statusMap[displayStatus(scope.row)].label }}
             </el-tag>
           </template>
         </el-table-column>
         <el-table-column label="更新时间" prop="updatedAt" width="180" />
-        <el-table-column label="操作" width="200" fixed="right">
+        <el-table-column label="操作" width="238" fixed="right">
           <template #default="scope">
             <div class="row-actions">
               <el-tooltip content="运行" placement="top">
@@ -420,8 +558,19 @@ onMounted(async () => {
                   text
                   :icon="VideoPlay"
                   aria-label="运行脚本"
-                  :disabled="!selectedEnvironmentId || scope.row.status === 'disabled' || scope.row.status === 'running' || runningScriptIds.has(scope.row.id)"
+                  :disabled="!selectedEnvironmentId || scope.row.status === 'disabled' || isScriptRunning(scope.row)"
                   @click="runScripts([scope.row])"
+                />
+              </el-tooltip>
+              <el-tooltip content="强制停止" placement="top">
+                <el-button
+                  text
+                  type="danger"
+                  :icon="VideoPause"
+                  :loading="stoppingScriptIds.has(scope.row.id)"
+                  :disabled="!isScriptRunning(scope.row) || stoppingScriptIds.has(scope.row.id)"
+                  aria-label="强制停止脚本"
+                  @click="confirmForceStop(scope.row)"
                 />
               </el-tooltip>
               <el-tooltip content="运行日志" placement="top">

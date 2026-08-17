@@ -95,7 +95,7 @@ export interface CompleteRunScriptDraft {
   durationMs: number
   logs: Array<{
     timestamp: string
-    level: 'info' | 'success' | 'error'
+    level: 'info' | 'success' | 'warning' | 'error'
     message: string
     details?: Record<string, unknown>
   }>

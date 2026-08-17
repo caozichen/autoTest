@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { CircleCheck, CircleClose, Clock, Document } from '@element-plus/icons-vue'
+import { CircleCheck, CircleClose, Clock, Document, VideoPause } from '@element-plus/icons-vue'
 
 import type { AutomationScript, ScriptLogLevel } from '@/domain/script'
 
@@ -14,10 +14,13 @@ const emit = defineEmits<{
 }>()
 
 const result = computed(() => props.script?.lastRunResult ?? null)
+const isRunning = computed(() => props.script?.status === 'running')
+const isInterrupted = computed(() => props.script?.status === 'interrupted' || result.value?.cancelled === true)
 
-const logTypeMap: Record<ScriptLogLevel, 'success' | 'danger' | 'info'> = {
+const logTypeMap: Record<ScriptLogLevel, 'success' | 'warning' | 'danger' | 'info'> = {
   info: 'info',
   success: 'success',
+  warning: 'warning',
   error: 'danger',
 }
 
@@ -42,10 +45,10 @@ function formatDetails(details?: Record<string, unknown>): string {
     @update:model-value="emit('update:modelValue', $event)"
   >
     <div v-if="script && result" class="run-result">
-      <header :class="['result-summary', result.ok ? 'result-summary--passed' : 'result-summary--failed']">
-        <el-icon :size="28"><CircleCheck v-if="result.ok" /><CircleClose v-else /></el-icon>
+      <header :class="['result-summary', isRunning ? 'result-summary--running' : isInterrupted ? 'result-summary--interrupted' : result.ok ? 'result-summary--passed' : 'result-summary--failed']">
+        <el-icon :size="28"><Clock v-if="isRunning" /><VideoPause v-else-if="isInterrupted" /><CircleCheck v-else-if="result.ok" /><CircleClose v-else /></el-icon>
         <div>
-          <strong>{{ result.ok ? '执行通过' : '执行失败' }}</strong>
+          <strong>{{ isRunning ? '执行中' : isInterrupted ? '已强制停止' : result.ok ? '执行通过' : '执行失败' }}</strong>
           <span>{{ script.name }}</span>
         </div>
         <p><el-icon><Clock /></el-icon>{{ result.durationMs }} ms</p>
@@ -92,6 +95,8 @@ function formatDetails(details?: Record<string, unknown>): string {
 }
 
 .result-summary--passed { color: #137466; border-color: #1aa58f; background: #eef8f5; }
+.result-summary--running { color: #9a6a16; border-color: #d79a2b; background: #fff8e8; }
+.result-summary--interrupted { color: #786032; border-color: #c49a49; background: #fff9ed; }
 .result-summary--failed { color: #b33d3d; border-color: #d95858; background: #fff3f3; }
 .result-summary strong, .result-summary span { display: block; }
 .result-summary strong { font-size: 17px; }
@@ -116,7 +121,7 @@ function formatDetails(details?: Record<string, unknown>): string {
 .run-logs { margin-top: 18px; }
 .run-logs__heading { display: flex; align-items: center; gap: 7px; margin-bottom: 9px; color: #34444b; }
 .run-logs__heading span { margin-left: auto; color: #89969c; font-size: 12px; }
-.run-logs__body { max-height: 390px; overflow-y: auto; border: 1px solid #dfe6e8; background: #f8fafb; }
+.run-logs__body { overflow-y: auto; border: 1px solid #dfe6e8; background: #f8fafb; }
 .log-row { display: grid; grid-template-columns: 72px 66px 1fr; gap: 9px; padding: 10px 12px; border-bottom: 1px solid #e7ecee; }
 .log-row:last-child { border-bottom: 0; }
 .log-row time { color: #7e8b91; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
@@ -133,5 +138,22 @@ function formatDetails(details?: Record<string, unknown>): string {
 </style>
 
 <style>
-.script-result-dialog { max-width: calc(100vw - 28px); margin: 16px auto; }
+.script-result-dialog {
+  display: flex;
+  max-width: calc(100vw - 28px);
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
+  flex-direction: column;
+  margin: 16px auto;
+}
+
+.script-result-dialog .el-dialog__body {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.script-result-dialog .el-dialog__header,
+.script-result-dialog .el-dialog__footer {
+  flex: 0 0 auto;
+}
 </style>

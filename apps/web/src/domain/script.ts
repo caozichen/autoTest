@@ -1,5 +1,5 @@
-export type ScriptStatus = 'ready' | 'running' | 'passed' | 'failed' | 'disabled'
-export type ScriptLogLevel = 'info' | 'success' | 'error'
+export type ScriptStatus = 'ready' | 'running' | 'passed' | 'failed' | 'interrupted' | 'disabled'
+export type ScriptLogLevel = 'info' | 'success' | 'warning' | 'error'
 
 export interface ScriptRunLog {
   timestamp: string
@@ -10,6 +10,7 @@ export interface ScriptRunLog {
 
 export interface ScriptRunResult {
   ok: boolean
+  cancelled?: boolean
   durationMs: number
   logs: ScriptRunLog[]
   output?: Record<string, unknown>
@@ -41,6 +42,7 @@ export interface ScriptDraft {
 
 export interface ScriptRunContext {
   environmentId: string
+  siteBaseUrl: string
   apiBaseUrl: string
   ignoreHTTPSErrors: boolean
   variables: Record<string, string>

@@ -68,6 +68,7 @@ describe('buildScriptRunContext', () => {
       TEAM_ID: '10000',
     })
     expect(context.apiBaseUrl).toBe('https://lx.admin.lingxi.tech/api')
+    expect(context.siteBaseUrl).toBe('https://lx.admin.lingxi.tech/')
     expect(context.ignoreHTTPSErrors).toBe(true)
     expect(context.authorizationOrigin).toBe('https://lx.admin.lingxi.tech')
     expect(context.extraHTTPHeaders).toEqual({

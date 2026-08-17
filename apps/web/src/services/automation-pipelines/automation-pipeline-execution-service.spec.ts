@@ -159,6 +159,7 @@ function fakeScriptService(
     create: vi.fn(async () => { throw new Error('not implemented') }),
     update: vi.fn(async () => { throw new Error('not implemented') }),
     remove: vi.fn(async () => undefined),
+    stop: vi.fn(async () => ({ runnerFound: false, cancelledRunIds: [] })),
     run: vi.fn(async (ids, context) => {
       const id = ids[0]
       if (!id) throw new Error('missing script id')

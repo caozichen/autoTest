@@ -1,6 +1,9 @@
 const scriptRegistry = Object.freeze({
-  'form-contact-publish': new URL('../../scripts/form-contact-publish.api.spec.mjs', import.meta.url),
+  'form-all-fields-submit': new URL('../../scripts/form-all-fields-submit.ui.spec.mjs', import.meta.url),
+  'form-all-fields-publish': new URL('../../scripts/form-all-fields-publish.ui.spec.mjs', import.meta.url),
+  'form-contact-publish': new URL('../../scripts/form-contact-publish.ui.spec.mjs', import.meta.url),
 })
+const DEFAULT_ABORT_CLEANUP_TIMEOUT_MS = 3_000
 
 function assertHttpUrl(rawUrl, label) {
   let url
@@ -23,8 +26,12 @@ export function validateRunRequest(payload) {
   const context = payload.context
   if (!context || typeof context !== 'object') throw new Error('缺少脚本运行上下文')
 
+  const siteBaseUrl = assertHttpUrl(context.siteBaseUrl, 'Web 基址')
   const apiBaseUrl = assertHttpUrl(context.apiBaseUrl, 'API 基址')
   const authorizationOrigin = assertHttpUrl(context.authorizationOrigin, '授权来源')
+  if (siteBaseUrl.origin !== authorizationOrigin.origin) {
+    throw new Error('Web 基址与 Token 授权来源不同源')
+  }
   if (apiBaseUrl.origin !== authorizationOrigin.origin) {
     throw new Error('API 基址与 Token 授权来源不同源')
   }
@@ -45,6 +52,7 @@ export function validateRunRequest(payload) {
 
   return {
     scriptId: payload.scriptId,
+    siteBaseUrl: siteBaseUrl.toString(),
     apiBaseUrl: apiBaseUrl.toString(),
     ignoreHTTPSErrors: context.ignoreHTTPSErrors === true,
     variables: Object.fromEntries(variableEntries),
@@ -67,24 +75,95 @@ export function sanitizeErrorMessage(error, secrets = []) {
   return message
 }
 
-export async function executeRegisteredScript(payload) {
+function cancellationReason(signal) {
+  const reason = signal?.reason
+  if (reason instanceof Error && reason.message) return reason.message
+  if (typeof reason === 'string' && reason.trim()) return reason.trim()
+  return '用户强制停止运行'
+}
+
+function createAbortGate(signal, logger, secrets) {
+  if (!signal) return null
+
+  let rejectGate
+  let abortError = null
+  const promise = new Promise((_, reject) => {
+    rejectGate = reject
+  })
+  const abort = () => {
+    if (abortError) return
+    const reason = sanitizeErrorMessage(cancellationReason(signal), secrets)
+    abortError = new Error(reason)
+    abortError.name = 'AbortError'
+    logger('warning', `执行已取消：${reason}`)
+    rejectGate(abortError)
+  }
+
+  if (signal.aborted) abort()
+  else signal.addEventListener('abort', abort, { once: true })
+
+  return {
+    promise,
+    wasTriggered: (error) => error === abortError || signal.aborted,
+    error: () => abortError,
+    dispose: () => signal.removeEventListener('abort', abort),
+  }
+}
+
+async function waitWithAbort(promise, abortGate) {
+  return abortGate ? Promise.race([promise, abortGate.promise]) : promise
+}
+
+async function waitForSettlement(promise, timeoutMs) {
+  let timer
+  const outcome = await Promise.race([
+    Promise.resolve(promise).then(
+      () => ({ settled: true }),
+      () => ({ settled: true }),
+    ),
+    new Promise((resolve) => {
+      timer = setTimeout(() => resolve({ settled: false }), timeoutMs)
+    }),
+  ])
+  clearTimeout(timer)
+  return outcome.settled
+}
+
+export async function executeRegisteredScript(payload, {
+  onLog,
+  signal,
+  loadScript = (scriptUrl) => import(scriptUrl.href),
+  abortCleanupTimeoutMs = DEFAULT_ABORT_CLEANUP_TIMEOUT_MS,
+} = {}) {
   const context = validateRunRequest(payload)
   const scriptUrl = scriptRegistry[context.scriptId]
   const logs = []
   const startedAt = performance.now()
   const logger = (level, message, details) => {
-    logs.push({
+    const log = {
       timestamp: new Date().toISOString(),
       level,
       message,
       ...(details === undefined ? {} : { details }),
-    })
+    }
+    logs.push(log)
+    try {
+      onLog?.(structuredClone(log))
+    } catch {
+      // 实时日志订阅失败不能中断业务脚本。
+    }
   }
 
+  const secrets = [context.extraHTTPHeaders.Authorization]
+  const abortGate = createAbortGate(signal, logger, secrets)
+  let scriptRunPromise = null
+
   try {
-    const scriptModule = await import(scriptUrl.href)
+    const scriptModule = await waitWithAbort(loadScript(scriptUrl), abortGate)
     if (typeof scriptModule.run !== 'function') throw new Error('脚本入口未导出 run 函数')
-    const result = await scriptModule.run({ ...context, logger })
+    scriptRunPromise = Promise.resolve().then(() => scriptModule.run({ ...context, logger, signal }))
+    const result = await waitWithAbort(scriptRunPromise, abortGate)
+    if (signal?.aborted) throw abortGate?.error()
     return {
       ok: true,
       durationMs: Math.round(performance.now() - startedAt),
@@ -92,7 +171,26 @@ export async function executeRegisteredScript(payload) {
       result,
     }
   } catch (error) {
-    const message = sanitizeErrorMessage(error, [context.extraHTTPHeaders.Authorization])
+    if (abortGate?.wasTriggered(error)) {
+      if (scriptRunPromise) {
+        const cleanupSettled = await waitForSettlement(scriptRunPromise, abortCleanupTimeoutMs)
+        if (!cleanupSettled) {
+          logger(
+            'warning',
+            `脚本取消清理超过 ${abortCleanupTimeoutMs} ms，Runner 已停止等待`,
+          )
+        }
+      }
+      return {
+        ok: false,
+        cancelled: true,
+        status: 'interrupted',
+        durationMs: Math.round(performance.now() - startedAt),
+        logs,
+        error: sanitizeErrorMessage(cancellationReason(signal), secrets),
+      }
+    }
+    const message = sanitizeErrorMessage(error, secrets)
     logger('error', `执行失败：${message}`)
     return {
       ok: false,
@@ -100,5 +198,7 @@ export async function executeRegisteredScript(payload) {
       logs,
       error: message,
     }
+  } finally {
+    abortGate?.dispose()
   }
 }

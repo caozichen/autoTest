@@ -7,5 +7,6 @@ coverage/
 playwright-report/
 test-results/
 blob-report/
+outputs/
 *.tsbuildinfo
 *.log

@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node --watch server.mjs",
     "start": "node server.mjs",
-    "test": "node --test",
+    "test": "node --test --test-concurrency=1",
     "typecheck": "node --check server.mjs && node --check script-runner.mjs"
   }
 }

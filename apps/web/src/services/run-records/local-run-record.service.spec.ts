@@ -263,6 +263,38 @@ describe('LocalRunRecordService', () => {
       .toBe('interrupted')
   })
 
+  it('immediately interrupts running batches by script id and persists the unlock', async () => {
+    const storage = new MemoryStorage()
+    const service = new LocalRunRecordService(
+      storage,
+      nowFactory([firstTime, secondTime, thirdTime]),
+      idFactory(['run-force-stop', 'start-log', 'force-stop-log']),
+    )
+    const started = await service.start(startDraft())
+
+    const interrupted = await service.interruptByScriptId('login-regression')
+
+    expect(interrupted).toHaveLength(1)
+    expect(interrupted[0]).toMatchObject({
+      id: started.id,
+      status: 'interrupted',
+      failureStage: 'runner',
+      error: '用户已强制停止脚本“登录与权限回归”',
+      durationMs: 5_000,
+      counts: { total: 1, passed: 0, failed: 0, skipped: 1 },
+      scripts: [{ id: 'login-regression', status: 'skipped' }],
+    })
+    expect(interrupted[0]?.logs.at(-1)).toMatchObject({
+      id: 'force-stop-log',
+      level: 'warning',
+      scope: 'runner',
+    })
+    expect(await service.interruptByScriptId('login-regression')).toEqual([])
+    expect((await new LocalRunRecordService(storage, () => thirdTime, () => 'unused').get(started.id))?.status)
+      .toBe('interrupted')
+    await expect(service.complete(started.id, { scripts: [] })).rejects.toThrow('已经结束')
+  })
+
   it('ignores malformed storage entries without crashing', async () => {
     const storage = new MemoryStorage()
     const source = new LocalRunRecordService(storage, () => firstTime, idFactory(['valid', 'start']))

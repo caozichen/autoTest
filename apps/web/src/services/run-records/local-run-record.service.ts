@@ -403,6 +403,45 @@ export class LocalRunRecordService implements RunRecordService {
     return structuredClone(record)
   }
 
+  async interruptByScriptId(scriptId: string): Promise<RunRecord[]> {
+    this.refreshFromStorage()
+    const base = this.readPersistedRecords() ?? this.records
+    const matchingIds = new Set(base
+      .filter((record) => record.status === 'running' && record.scripts.some((script) => script.id === scriptId))
+      .map((record) => record.id))
+    if (matchingIds.size === 0) return []
+
+    const finishedAt = this.now().toISOString()
+    const interrupted = base.map((source) => {
+      if (!matchingIds.has(source.id)) return source
+      const record = structuredClone(source)
+      const scriptName = record.scripts.find((script) => script.id === scriptId)?.name ?? scriptId
+      record.status = 'interrupted'
+      record.failureStage = 'runner'
+      record.error = `用户已强制停止脚本“${scriptName}”`
+      record.finishedAt = finishedAt
+      record.updatedAt = finishedAt
+      record.revision += 1
+      record.durationMs = durationBetween(record.startedAt, finishedAt)
+      record.scripts = record.scripts.map((script) => script.status === 'queued'
+        ? { ...script, status: 'skipped' }
+        : script)
+      record.logs.push({
+        id: this.idFactory(),
+        timestamp: finishedAt,
+        level: 'warning',
+        scope: 'runner',
+        message: `运行批次已由用户强制停止（脚本：${scriptName}）`,
+      })
+      record.counts = createCounts(record.scripts)
+      record.analysis = createAnalysis(record.scripts, record.logs)
+      return record
+    })
+
+    this.commit(interrupted)
+    return structuredClone(interrupted.filter((record) => matchingIds.has(record.id)))
+  }
+
   private completeScript(
     batchId: string,
     script: RunScriptRecord,

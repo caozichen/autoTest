@@ -13,7 +13,7 @@ function dependencies(records: RunRecord[] = []) {
       name: '表单联系人收录并发布',
       description: '真实脚本',
       directory: 'D:\\CursorCode\\autotest',
-      entryFile: 'scripts/form-contact-publish.api.spec.mjs',
+      entryFile: 'scripts/form-contact-publish.ui.spec.mjs',
       tags: ['Playwright'],
       status: 'ready',
       updatedAt: '暂无数据',
