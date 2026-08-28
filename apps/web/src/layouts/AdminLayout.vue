@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { ArrowDown, Fold, Menu, SwitchButton } from '@element-plus/icons-vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -15,6 +15,10 @@ const mobileMenuOpen = ref(false)
 const displayName = computed(() => auth.user?.displayName ?? '管理员')
 const breadcrumbSection = computed(() => String(route.meta.section ?? '工作台'))
 const breadcrumbTitle = computed(() => String(route.meta.title ?? '运行概览'))
+
+watch(() => route.fullPath, () => {
+  mobileMenuOpen.value = false
+})
 
 async function handleCommand(command: string): Promise<void> {
   if (command !== 'logout') return
@@ -79,11 +83,12 @@ async function handleCommand(command: string): Promise<void> {
 .admin-shell {
   display: flex;
   min-height: 100dvh;
-  background: #f2f5f7;
+  background: var(--color-bg-page);
 }
 
 .admin-shell__desktop-sidebar {
   position: sticky;
+  z-index: 30;
   top: 0;
   height: 100dvh;
   flex: 0 0 auto;
@@ -92,6 +97,7 @@ async function handleCommand(command: string): Promise<void> {
 .admin-shell__body {
   min-width: 0;
   flex: 1;
+  min-height: 100dvh;
 }
 
 .topbar {
@@ -99,13 +105,14 @@ async function handleCommand(command: string): Promise<void> {
   z-index: 20;
   top: 0;
   display: flex;
-  height: 78px;
+  height: 60px;
   align-items: center;
   justify-content: space-between;
-  padding: 0 34px 0 24px;
-  border-bottom: 1px solid #e4e9ed;
-  background: rgb(255 255 255 / 96%);
-  backdrop-filter: blur(10px);
+  padding: 0 20px;
+  border-bottom: 1px solid var(--color-border-light);
+  background: rgb(255 255 255 / 97%);
+  box-shadow: 0 1px 0 rgb(31 42 68 / 3%);
+  backdrop-filter: blur(8px);
 }
 
 .topbar__leading,
@@ -115,24 +122,26 @@ async function handleCommand(command: string): Promise<void> {
 }
 
 .topbar__leading {
-  gap: 16px;
+  gap: 12px;
 }
 
 .icon-button {
   display: grid;
-  width: 44px;
-  height: 44px;
+  width: 34px;
+  height: 34px;
   place-items: center;
-  color: #5d6a72;
-  border: 0;
-  border-radius: 5px;
-  background: transparent;
+  color: var(--color-text-secondary);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: var(--color-bg-subtle);
   cursor: pointer;
+  transition: 150ms ease;
 }
 
 .icon-button:hover {
-  color: #111820;
-  background: #edf2f3;
+  color: var(--color-primary);
+  border-color: #dbe5f5;
+  background: var(--color-primary-soft);
 }
 
 .icon-button--mobile {
@@ -141,60 +150,63 @@ async function handleCommand(command: string): Promise<void> {
 
 .topbar__divider {
   width: 1px;
-  height: 24px;
-  background: #e2e7ea;
+  height: 18px;
+  background: var(--color-border);
 }
 
 .breadcrumb {
   display: flex;
   align-items: center;
-  gap: 9px;
-  font-size: var(--font-base);
+  gap: 8px;
+  font-size: var(--font-md);
 }
 
 .breadcrumb span {
-  color: #8a969e;
+  color: var(--color-text-muted);
 }
 
 .breadcrumb strong {
-  color: #27333a;
-  font-weight: 600;
+  color: var(--color-text-primary);
+  font-weight: 650;
 }
 
 .breadcrumb strong::before {
-  margin-right: 9px;
-  color: #c1c9ce;
+  margin-right: 8px;
+  color: #c1cad8;
   content: '/';
 }
 
 .account-button {
-  gap: 9px;
-  padding: 5px 8px 5px 5px;
-  color: #344149;
-  border: 0;
-  border-radius: 5px;
+  gap: 8px;
+  min-height: 38px;
+  padding: 3px 8px 3px 4px;
+  color: var(--color-text-primary);
+  border: 1px solid transparent;
+  border-radius: 6px;
   background: transparent;
   cursor: pointer;
+  transition: 150ms ease;
 }
 
 .account-button:hover {
-  background: #f0f4f5;
+  border-color: var(--color-border);
+  background: var(--color-bg-subtle);
 }
 
 .account-button__avatar {
   display: grid;
-  width: 42px;
-  height: 42px;
+  width: 32px;
+  height: 32px;
   place-items: center;
-  color: #06362f;
+  color: var(--color-primary);
   border-radius: 5px;
-  background: #bff2e8;
-  font-size: var(--font-base);
+  background: var(--color-primary-soft);
+  font-size: var(--font-sm);
   font-weight: 700;
 }
 
 .account-button__name {
-  font-size: var(--font-base);
+  font-size: var(--font-md);
   font-weight: 600;
 }
 
@@ -202,21 +214,15 @@ async function handleCommand(command: string): Promise<void> {
   width: 100%;
   max-width: var(--content-max-width);
   margin: 0 auto;
-  padding: 32px 36px 48px;
-}
-
-@media (min-width: 2560px) {
-  .admin-content {
-    padding: 40px 48px 60px;
-  }
+  padding: 20px 20px 40px;
 }
 
 :global(.mobile-nav-drawer .el-drawer__body) {
   padding: 0;
-  background: #111820;
+  background: var(--color-surface);
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 1020px) {
   .admin-shell__desktop-sidebar,
   .icon-button--desktop,
   .topbar__divider {
@@ -228,11 +234,11 @@ async function handleCommand(command: string): Promise<void> {
   }
 
   .topbar {
-    padding: 0 14px;
+    padding: 0 12px;
   }
 
   .admin-content {
-    padding: 24px 20px 36px;
+    padding: 16px 14px 32px;
   }
 }
 
@@ -241,6 +247,17 @@ async function handleCommand(command: string): Promise<void> {
   .breadcrumb strong::before,
   .account-button__name {
     display: none;
+  }
+
+  .breadcrumb {
+    min-width: 0;
+  }
+
+  .breadcrumb strong {
+    overflow: hidden;
+    max-width: 42vw;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 }
 </style>

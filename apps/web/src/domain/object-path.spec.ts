@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
-import { getValueAtPath, stringifyExtractedValue } from './object-path'
+import {
+  getValueAtPath,
+  stringifyExtractedValue,
+  stringifyRuntimeVariableValue,
+} from './object-path'
 
 describe('object path extraction', () => {
   const response = {
@@ -22,9 +26,14 @@ describe('object path extraction', () => {
     expect(getValueAtPath(response, 'data.constructor.name')).toBeUndefined()
   })
 
-  it('only converts scalar values into runtime variables', () => {
+  it('keeps scalar extraction strict for tokens and other authentication values', () => {
     expect(stringifyExtractedValue('token')).toBe('token')
     expect(stringifyExtractedValue(0)).toBe('0')
     expect(stringifyExtractedValue({ token: 'nested' })).toBeNull()
+  })
+
+  it('serializes objects and arrays only for script runtime variables', () => {
+    expect(stringifyRuntimeVariableValue({ token: 'nested' })).toBe('{"token":"nested"}')
+    expect(stringifyRuntimeVariableValue([{ id: 7 }])).toBe('[{"id":7}]')
   })
 })

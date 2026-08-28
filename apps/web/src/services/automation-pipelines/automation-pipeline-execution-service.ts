@@ -1,6 +1,6 @@
 import type { AutomationPipeline, AutomationPipelineStep } from '@/domain/automation-pipeline'
 import type { TestEnvironment } from '@/domain/environment'
-import { getValueAtPath, stringifyExtractedValue } from '@/domain/object-path'
+import { getValueAtPath, stringifyRuntimeVariableValue } from '@/domain/object-path'
 import type {
   CompleteRunScriptDraft,
   RunFailureStage,
@@ -13,10 +13,19 @@ import type { EnvironmentService } from '@/services/environments/environment-ser
 import type { RunRecordService } from '@/services/run-records/run-record-service'
 import type { RuntimeVariableService } from '@/services/runtime-variables/runtime-variable-service'
 import { buildScriptRunContext } from '@/services/scripts/script-run-context'
+import { applyScriptResponseVariables } from '@/services/scripts/script-response-variables'
 import type { ScriptService } from '@/services/scripts/script-service'
+
+export interface AutomationPipelineStopResult {
+  stopped: boolean
+  runnerFound: boolean
+  cancelledRunIds: string[]
+}
 
 export interface AutomationPipelineExecutionService {
   run(pipeline: AutomationPipeline): Promise<RunRecord>
+  stop(pipelineId: string): Promise<AutomationPipelineStopResult>
+  isRunning(pipelineId: string): boolean
 }
 
 export interface AutomationPipelineExecutionDependencies {
@@ -59,6 +68,8 @@ function resultCompletion(scriptId: string, result: ScriptRunResult): CompleteRu
     ok: result.ok,
     durationMs: result.durationMs,
     logs: result.logs,
+    ...(result.assertions ? { assertions: result.assertions } : {}),
+    ...(result.apiResponses ? { apiResponses: result.apiResponses } : {}),
     ...(result.output ? { output: result.output } : {}),
     ...(result.error ? { error: result.error } : {}),
   }
@@ -89,6 +100,15 @@ function skippedCompletion(scriptId: string): CompleteRunScriptDraft {
   }
 }
 
+interface ActivePipelineExecution {
+  pipelineId: string
+  pipelineName: string
+  recordId: string | null
+  currentScriptId: string | null
+  cancelRequested: boolean
+  interruptionPromise: Promise<RunRecord> | null
+}
+
 function resolveStepVariables(
   step: AutomationPipelineStep,
   outputs: ReadonlyMap<string, Record<string, unknown>>,
@@ -99,9 +119,9 @@ function resolveStepVariables(
       throw new Error(`无法读取前序脚本 ${mapping.sourceScriptId} 的输出`)
     }
 
-    const value = stringifyExtractedValue(getValueAtPath(sourceOutput, mapping.sourcePath))
+    const value = stringifyRuntimeVariableValue(getValueAtPath(sourceOutput, mapping.sourcePath))
     if (value === null) {
-      throw new Error(`无法从脚本 ${mapping.sourceScriptId} 的输出路径 ${mapping.sourcePath} 提取字符串参数`)
+      throw new Error(`无法从脚本 ${mapping.sourceScriptId} 的输出路径 ${mapping.sourcePath} 提取运行参数`)
     }
 
     const targetKey = mapping.targetKey.trim()
@@ -135,9 +155,65 @@ function validatePipelineScripts(
 }
 
 export class LocalAutomationPipelineExecutionService implements AutomationPipelineExecutionService {
+  private readonly activeExecutions = new Map<string, ActivePipelineExecution>()
+
   constructor(private readonly dependencies: AutomationPipelineExecutionDependencies) {}
 
-  async run(pipeline: AutomationPipeline): Promise<RunRecord> {
+  run(pipeline: AutomationPipeline): Promise<RunRecord> {
+    if (this.activeExecutions.has(pipeline.id)) {
+      throw new Error(`自动化配置“${pipeline.name}”正在运行，请先等待完成或强制停止`)
+    }
+
+    const execution: ActivePipelineExecution = {
+      pipelineId: pipeline.id,
+      pipelineName: pipeline.name,
+      recordId: null,
+      currentScriptId: null,
+      cancelRequested: false,
+      interruptionPromise: null,
+    }
+    this.activeExecutions.set(pipeline.id, execution)
+    return this.execute(pipeline, execution).finally(() => {
+      if (this.activeExecutions.get(pipeline.id) === execution) {
+        this.activeExecutions.delete(pipeline.id)
+      }
+    })
+  }
+
+  isRunning(pipelineId: string): boolean {
+    return this.activeExecutions.has(pipelineId)
+  }
+
+  async stop(pipelineId: string): Promise<AutomationPipelineStopResult> {
+    const execution = this.activeExecutions.get(pipelineId)
+    if (!execution) {
+      return { stopped: false, runnerFound: false, cancelledRunIds: [] }
+    }
+
+    execution.cancelRequested = true
+    let runnerFound = false
+    let cancelledRunIds: string[] = []
+    try {
+      if (execution.currentScriptId) {
+        const result = await this.dependencies.scripts.stop(execution.currentScriptId)
+        runnerFound = result.runnerFound
+        cancelledRunIds = result.cancelledRunIds
+      }
+      if (execution.recordId) await this.interruptExecution(execution)
+      return { stopped: true, runnerFound, cancelledRunIds }
+    } catch (error) {
+      if (this.activeExecutions.get(pipelineId) === execution) {
+        execution.cancelRequested = false
+        execution.interruptionPromise = null
+      }
+      throw error
+    }
+  }
+
+  private async execute(
+    pipeline: AutomationPipeline,
+    execution: ActivePipelineExecution,
+  ): Promise<RunRecord> {
     const environment = (await this.dependencies.environments.list())
       .find((item) => item.id === pipeline.environmentId)
     if (!environment) throw new Error('流水线配置的运行环境不存在或已被删除')
@@ -154,11 +230,14 @@ export class LocalAutomationPipelineExecutionService implements AutomationPipeli
       },
       scripts: orderedScripts.map(scriptSnapshot),
     })
+    execution.recordId = record.id
 
     let failureStage: RunFailureStage = 'login'
     let secretValues = environmentSecrets(environment)
     try {
+      if (execution.cancelRequested) return await this.interruptExecution(execution)
       const loginResult = await this.dependencies.environmentLogin.login(environment)
+      if (execution.cancelRequested) return await this.interruptExecution(execution)
       if (!loginResult.businessSuccess) {
         const status = loginResult.status ? `HTTP ${loginResult.status}` : '未收到 HTTP 响应'
         throw new Error(loginResult.error || `环境登录失败（${status}），请检查登录配置和业务成功规则`)
@@ -180,8 +259,9 @@ export class LocalAutomationPipelineExecutionService implements AutomationPipeli
 
       failureStage = 'runner'
       const baseContext = buildScriptRunContext(environment, this.dependencies.runtimeVariables)
-      return await this.runSteps(record.id, pipeline, baseContext, secretValues)
+      return await this.runSteps(record.id, pipeline, baseContext, secretValues, execution)
     } catch (error) {
+      if (execution.cancelRequested) return await this.interruptExecution(execution)
       const current = await this.dependencies.runRecords.get(record.id).catch(() => null)
       if (current?.status !== 'running') return current ?? record
       return this.dependencies.runRecords.fail(record.id, {
@@ -197,12 +277,14 @@ export class LocalAutomationPipelineExecutionService implements AutomationPipeli
     pipeline: AutomationPipeline,
     baseContext: ScriptRunContext,
     secretValues: string[],
+    execution: ActivePipelineExecution,
   ): Promise<RunRecord> {
     const completions: CompleteRunScriptDraft[] = []
     const outputs = new Map<string, Record<string, unknown>>()
     const pipelineVariables: Record<string, string> = {}
 
     for (const [index, step] of pipeline.steps.entries()) {
+      if (execution.cancelRequested) return this.interruptExecution(execution)
       let completion: CompleteRunScriptDraft
       try {
         Object.assign(pipelineVariables, resolveStepVariables(step, outputs))
@@ -211,7 +293,11 @@ export class LocalAutomationPipelineExecutionService implements AutomationPipeli
           variables: { ...baseContext.variables, ...pipelineVariables },
           extraHTTPHeaders: { ...baseContext.extraHTTPHeaders },
         }
+        execution.currentScriptId = step.scriptId
         const completedScript = (await this.dependencies.scripts.run([step.scriptId], context))[0]
+        if (execution.cancelRequested || completedScript?.lastRunResult?.cancelled) {
+          return this.interruptExecution(execution)
+        }
         if (!completedScript?.lastRunResult) {
           throw new Error(`Runner 未返回脚本 ${step.scriptId} 的执行结果`)
         }
@@ -219,8 +305,20 @@ export class LocalAutomationPipelineExecutionService implements AutomationPipeli
         if (completedScript.lastRunResult.output) {
           outputs.set(step.scriptId, completedScript.lastRunResult.output)
         }
+        const variableReport = applyScriptResponseVariables(
+          completedScript,
+          completedScript.lastRunResult,
+          baseContext.environmentId,
+          this.dependencies.runtimeVariables,
+        )
+        Object.assign(pipelineVariables, Object.fromEntries(
+          variableReport.applied.map((variable) => [variable.key, variable.value]),
+        ))
       } catch (error) {
+        if (execution.cancelRequested) return this.interruptExecution(execution)
         completion = failedCompletion(step.scriptId, errorMessage(error, '脚本执行失败'))
+      } finally {
+        if (execution.currentScriptId === step.scriptId) execution.currentScriptId = null
       }
 
       completions.push(completion)
@@ -231,6 +329,34 @@ export class LocalAutomationPipelineExecutionService implements AutomationPipeli
       break
     }
 
-    return this.dependencies.runRecords.complete(recordId, { scripts: completions, secretValues })
+    const allSecretValues = [
+      ...secretValues,
+      ...this.dependencies.runtimeVariables.list()
+        .filter((variable) => variable.secret)
+        .map((variable) => variable.value),
+    ].filter(Boolean)
+    if (execution.cancelRequested) return this.interruptExecution(execution)
+    return this.dependencies.runRecords.complete(recordId, {
+      scripts: completions,
+      secretValues: allSecretValues,
+    })
+  }
+
+  private async interruptExecution(execution: ActivePipelineExecution): Promise<RunRecord> {
+    const recordId = execution.recordId
+    if (!recordId) {
+      throw new Error(`自动化配置“${execution.pipelineName}”正在停止，请稍后查看运行记录`)
+    }
+    if (!execution.interruptionPromise) {
+      execution.interruptionPromise = this.dependencies.runRecords.interrupt(
+        recordId,
+        `用户已强制停止自动化配置“${execution.pipelineName}”`,
+      ).catch(async (error) => {
+        const current = await this.dependencies.runRecords.get(recordId)
+        if (current && current.status !== 'running') return current
+        throw error
+      })
+    }
+    return execution.interruptionPromise
   }
 }

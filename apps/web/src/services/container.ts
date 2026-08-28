@@ -14,6 +14,8 @@ import { LocalRunRecordService } from './run-records/local-run-record.service'
 import type { RunRecordService } from './run-records/run-record-service'
 import type { AutomationPipelineService } from './automation-pipelines/automation-pipeline-service'
 import { LocalAutomationPipelineService } from './automation-pipelines/local-automation-pipeline.service'
+import type { RunnerControlService } from './system/runner-control-service'
+import { LocalRunnerControlService } from './system/local-runner-control.service'
 import {
   LocalAutomationPipelineExecutionService,
   type AutomationPipelineExecutionService,
@@ -28,6 +30,7 @@ export interface ServiceContainer {
   environments: EnvironmentService
   runtimeVariables: RuntimeVariableService
   runRecords: RunRecordService
+  runnerControl: RunnerControlService
   scripts: ScriptService
 }
 
@@ -54,5 +57,6 @@ export const services: ServiceContainer = Object.freeze({
   environments,
   runtimeVariables,
   runRecords,
+  runnerControl: new LocalRunnerControlService(),
   scripts,
 })

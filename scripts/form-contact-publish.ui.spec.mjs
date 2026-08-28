@@ -2,7 +2,13 @@ import { mkdir } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { chromium, expect } from '@playwright/test'
+import { expect } from './support/recorded-expect.mjs'
+import { attachApiResponseRecorder } from './support/api-response-recorder.mjs'
+import {
+  createFormLinkContract,
+  firstFormCode,
+} from './support/form-link-contract.mjs'
+import { launchGoogleChrome } from './support/google-chrome.mjs'
 
 import {
   closePlaywrightHandles,
@@ -51,12 +57,33 @@ async function waitForApiResponse(page, urlPattern, action, label) {
   }, { timeout: ACTION_TIMEOUT_MS })
   await action()
   const response = await responsePromise
-  expect(response.ok(), `${label} HTTP 状态应成功，实际 ${response.status()}`).toBeTruthy()
+  if (!response.ok()) {
+    throw new Error(`${label}接口返回 HTTP ${response.status()}`)
+  }
   const body = await response.json().catch(() => null)
+  if (body !== null && typeof body !== 'object') {
+    throw new Error(`${label}接口返回的 JSON 结构无效`)
+  }
   if (body && Object.prototype.hasOwnProperty.call(body, 'code')) {
-    expect(body.code, `${label}业务码应为 0`).toBe(0)
+    if (Number(body.code) !== 0) throw new Error(`${label}接口业务码异常：${body.code}`)
   }
   return { response, body }
+}
+
+async function fetchFormDetail(page, apiBaseUrl, formId, authorization) {
+  const detailUrl = new URL(`be/form/${encodeURIComponent(formId)}`, `${apiBaseUrl.replace(/\/+$/, '')}/`).toString()
+  const result = await page.evaluate(async ({ url, token }) => {
+    const response = await fetch(url, { headers: { Authorization: token } })
+    return {
+      ok: response.ok,
+      status: response.status,
+      body: await response.json().catch(() => null),
+    }
+  }, { url: detailUrl, token: authorization })
+  if (!result.ok) throw new Error(`读取已发布表单详情接口返回 HTTP ${result.status}`)
+  if (!result.body || typeof result.body !== 'object') throw new Error('读取已发布表单详情接口未返回有效 JSON')
+  if (Number(result.body.code) !== 0) throw new Error(`读取已发布表单详情接口业务码异常：${result.body.code}`)
+  return result.body
 }
 
 async function screenshotFailure(page, title) {
@@ -95,7 +122,7 @@ async function chooseContactCollectionInDesigner(page, logger) {
     .catch(() => false)
   if (replaceDialogVisible) {
     await replaceDialog.getByText(/忽略，不替换|忽略，不替換/, { exact: true }).click()
-    const saveResult = await waitForApiResponse(
+    await waitForApiResponse(
       page,
       '/config',
       () => clickFirstVisible([
@@ -104,7 +131,6 @@ async function chooseContactCollectionInDesigner(page, logger) {
       ], '确认忽略不替换'),
       '保存联系人收录策略',
     )
-    expect(saveResult.body?.code ?? 0, '联系人收录策略应保存成功').toBe(0)
     await expect(replaceDialog, '联系人收录设置保存后弹窗应关闭').toBeHidden()
   } else if (collectDialogVisible) {
     throw new Error('确认收录联系人后未进入“联系人信息替换确认”步骤')
@@ -165,25 +191,27 @@ export async function run({
   extraHTTPHeaders,
   signal,
   logger,
+  recordApiResponse,
 }) {
-  expect(siteBaseUrl, '运行环境必须提供 Web 基址').toBeTruthy()
-  expect(apiBaseUrl, '运行环境必须提供 API 基址').toBeTruthy()
+  if (!siteBaseUrl) throw new Error('运行环境必须提供 Web 基址')
+  if (!apiBaseUrl) throw new Error('运行环境必须提供 API 基址')
   const authorization = extraHTTPHeaders?.Authorization
-  expect(authorization, '所有业务请求必须使用环境登录后的 Token').toBeTruthy()
+  if (!authorization) throw new Error('所有业务请求必须使用环境登录后的 Token')
 
   const title = timestampTitle()
   const siteOrigin = new URL(siteBaseUrl).origin
   const apiOrigin = new URL(apiBaseUrl).origin
-  expect(siteOrigin, 'Web 基址与 API 基址必须同源').toBe(apiOrigin)
+  if (siteOrigin !== apiOrigin) throw new Error('Web 基址与 API 基址必须同源')
 
   let browser
   let context
   let page
   let stopAbortClose = () => undefined
+  let stopApiResponseRecorder = async () => undefined
   try {
     throwIfRunAborted(signal)
     logger('info', '启动 Chrome 无头浏览器，界面不会显示', { browser: 'Google Chrome', headless: true })
-    browser = await chromium.launch({ channel: 'chrome', headless: true })
+    browser = await launchGoogleChrome()
     stopAbortClose = closePlaywrightOnAbort(signal, () => ({ browser, context }), { logger })
     throwIfRunAborted(signal)
     context = await browser.newContext({
@@ -193,6 +221,10 @@ export async function run({
     })
     throwIfRunAborted(signal)
     page = await context.newPage()
+    stopApiResponseRecorder = attachApiResponseRecorder(page, {
+      onApiResponse: recordApiResponse,
+      shouldRecord: ({ url }) => url.origin === apiOrigin,
+    })
     page.setDefaultTimeout(ACTION_TIMEOUT_MS)
     page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS)
 
@@ -228,7 +260,7 @@ export async function run({
     )
     await page.waitForURL(/\/form-activity\/designer\?[^#]*id=/, { timeout: NAVIGATION_TIMEOUT_MS })
     formId = new URL(page.url()).searchParams.get('id') || String(createResponse.body?.data?.id ?? '')
-    expect(formId, '创建表单后 URL 或响应中必须包含表单 id').toBeTruthy()
+    if (!formId) throw new Error('创建表单后 URL 或响应中未返回表单 id')
     logger('success', '已通过页面进入表单设计器', { formId })
 
     const contactPalette = page.locator('button[data-component-type="contactGroup"]')
@@ -273,7 +305,8 @@ export async function run({
     }, { timeout: ACTION_TIMEOUT_MS })
     await page.getByRole('button', { name: /保存草稿|儲存草稿/ }).click()
     const itemSaveResponse = await itemSavePromise
-    expect(itemSaveResponse.ok(), `保存草稿 HTTP 状态应成功，实际 ${itemSaveResponse.status()}`).toBeTruthy()
+    if (!itemSaveResponse.ok()) throw new Error(`保存草稿接口返回 HTTP ${itemSaveResponse.status()}`)
+    const itemsPayload = itemSaveResponse.request().postDataJSON()
     await expect(page.getByText(/保存成功|儲存成功/).last(), '页面应提示保存成功').toBeVisible()
     logger('success', '表单名称及联系人三题已保存为草稿')
 
@@ -286,9 +319,12 @@ export async function run({
     }, { timeout: ACTION_TIMEOUT_MS })
     await page.getByRole('button', { name: /发布|發佈/, exact: true }).click()
     const publishResponse = await publishPromise
-    expect(publishResponse.ok(), `发布 HTTP 状态应成功，实际 ${publishResponse.status()}`).toBeTruthy()
+    if (!publishResponse.ok()) throw new Error(`发布接口返回 HTTP ${publishResponse.status()}`)
     const publishBody = await publishResponse.json().catch(() => null)
-    expect(publishBody?.code ?? 0, '发布业务码应为 0').toBe(0)
+    if (publishBody !== null && typeof publishBody !== 'object') throw new Error('发布接口返回的 JSON 结构无效')
+    if (publishBody && Object.prototype.hasOwnProperty.call(publishBody, 'code') && Number(publishBody.code) !== 0) {
+      throw new Error(`发布接口业务码异常：${publishBody.code}`)
+    }
     await page.waitForURL(/\/form-activity\/list(?:[/?#]|$)/, { timeout: NAVIGATION_TIMEOUT_MS })
     logger('success', '表单发布成功并已回到列表页')
 
@@ -305,6 +341,21 @@ export async function run({
     await expect(titleLink, '列表中的表单标题应完全匹配').toHaveText(title)
     logger('success', '已发布列表断言通过，目标表单可见', { formId, title })
 
+    const formDetailResponse = await fetchFormDetail(page, apiBaseUrl, formId, authorization)
+    const formCode = firstFormCode(publishBody, formDetailResponse) || String(formId)
+    const formContract = createFormLinkContract({
+      formId,
+      formCode,
+      title,
+      revisionNo: publishBody?.data?.revision_no,
+      items: formDetailResponse?.data?.items || formDetailResponse?.data?.form?.items || itemsPayload?.items,
+    })
+    logger('success', '已生成可供后续脚本使用的联系人表单联动参数', {
+      formId,
+      formCode,
+      fieldCount: Object.values(formContract.fieldKeys).filter(Boolean).length,
+    })
+
     expect(tokenViolations, '所有 API 业务请求都必须携带环境 Token').toEqual([])
     expect(authenticatedRequestCount, '至少应观察到一个携带 Token 的业务请求').toBeGreaterThan(0)
     expect(authenticatedRequestCount, '携带 Token 的请求数应等于全部业务请求数').toBe(businessRequestCount)
@@ -317,12 +368,15 @@ export async function run({
 
     return {
       formId,
+      formCode,
+      formContract,
       title,
       status: 'published',
       browser: 'chrome',
       headless: true,
       contactFields: ['username', 'mobile', 'email'],
       authenticatedRequestCount,
+      publishResponse: publishBody,
     }
   } catch (error) {
     if (signal?.aborted) {
@@ -333,6 +387,7 @@ export async function run({
     }
     throw error
   } finally {
+    await stopApiResponseRecorder()
     const abortCloseStarted = await stopAbortClose()
     if (!abortCloseStarted) await closePlaywrightHandles({ context, browser }, { logger })
   }

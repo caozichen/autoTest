@@ -42,6 +42,10 @@ describe('LocalEnvironmentService', () => {
       active: true,
       baseUrl: 'https://lx.admin.lingxi.tech/',
       apiBaseUrl: 'https://lx.admin.lingxi.tech/api',
+      auth: {
+        mobile: '13671153204',
+        verifyCode: '666666',
+      },
     })
   })
 
@@ -61,6 +65,7 @@ describe('LocalEnvironmentService', () => {
         method: 'POST',
         timeoutMs: 30_000,
         loginPath: '/api/login',
+        requestBody: JSON.stringify({ username: 'qa', password: 'password' }),
         username: 'qa',
         password: 'password',
         mobile: '',
@@ -138,13 +143,13 @@ describe('LocalEnvironmentService', () => {
         method: 'POST',
         timeoutMs: 45_000,
         loginPath: '/be/login/mobile',
-        mobile: '',
-        verifyCode: '',
+        mobile: '13671153204',
+        verifyCode: '666666',
       },
     })
     expect((await service.list()).some((environment) => environment.id === 'env-development')).toBe(false)
     expect((await service.getActive())?.id).toBe('env-testing')
-    expect(storage.getItem('autotest.environments.v5')).not.toBeNull()
+    expect(storage.getItem('autotest.environments.v7')).not.toBeNull()
   })
 
   it('adds the preset when migrating an intermediate v2 store without TEST', async () => {
@@ -221,7 +226,7 @@ describe('LocalEnvironmentService', () => {
       tokenTypeFallback: 'Bearer',
     })
     expect(preset?.ignoreHTTPSErrors).toBe(true)
-    expect(storage.getItem('autotest.environments.v5')).not.toBeNull()
+    expect(storage.getItem('autotest.environments.v7')).not.toBeNull()
   })
 
   it('removes only known demo environments while migrating v4 storage', async () => {
@@ -325,7 +330,78 @@ describe('LocalEnvironmentService', () => {
       tokenVariable: 'CUSTOM_TOKEN',
     })
     expect((await service.getActive())?.id).toBe('env-testing')
-    expect(storage.getItem('autotest.environments.v5')).not.toBeNull()
+    expect(storage.getItem('autotest.environments.v7')).not.toBeNull()
+  })
+
+  it('fills blank TEST credentials while migrating v5 and preserves other edits', async () => {
+    const storage = new MemoryStorage()
+    const previous = (await new LocalEnvironmentService(new MemoryStorage()).list())[0]
+    expect(previous).toBeDefined()
+    if (!previous) return
+    previous.description = '用户已编辑的测试环境'
+    delete (previous.auth as Partial<typeof previous.auth>).requestBody
+    previous.auth.mobile = ''
+    previous.auth.verifyCode = ''
+    previous.auth.tokenPath = 'data.custom_token'
+    storage.setItem('autotest.environments.v5', JSON.stringify([previous]))
+
+    const migrated = (await new LocalEnvironmentService(storage).list())[0]
+
+    expect(migrated).toMatchObject({
+      description: '用户已编辑的测试环境',
+      auth: {
+        mobile: '13671153204',
+        verifyCode: '666666',
+        tokenPath: 'data.custom_token',
+      },
+    })
+    expect(JSON.parse(migrated?.auth.requestBody ?? '{}')).toEqual({
+      mobile: '13671153204',
+      verify_code: '666666',
+    })
+    expect(storage.getItem('autotest.environments.v7')).not.toBeNull()
+  })
+
+  it('persists an edited JSON request body and restores it from v7 storage', async () => {
+    const storage = new MemoryStorage()
+    const service = new LocalEnvironmentService(storage)
+    const current = (await service.list())[0]
+    expect(current).toBeDefined()
+    if (!current) return
+
+    const updated = await service.update(current.id, {
+      name: current.name,
+      code: current.code,
+      description: '编辑功能持久化验证',
+      baseUrl: current.baseUrl,
+      apiBaseUrl: current.apiBaseUrl,
+      ignoreHTTPSErrors: current.ignoreHTTPSErrors,
+      enabled: current.enabled,
+      auth: {
+        ...current.auth,
+        requestBody: JSON.stringify({
+          mobile: '13900000000',
+          verify_code: '123456',
+          client: { platform: 'web' },
+        }),
+      },
+      variables: current.variables,
+    })
+    const restored = (await new LocalEnvironmentService(storage).list())[0]
+
+    expect(updated.active).toBe(true)
+    expect(restored).toMatchObject({
+      description: '编辑功能持久化验证',
+      auth: {
+        mobile: '13900000000',
+        verifyCode: '123456',
+      },
+    })
+    expect(JSON.parse(restored?.auth.requestBody ?? '{}')).toEqual({
+      mobile: '13900000000',
+      verify_code: '123456',
+      client: { platform: 'web' },
+    })
   })
 
   it('does not persist credentials from the inactive login mode', async () => {
@@ -343,6 +419,7 @@ describe('LocalEnvironmentService', () => {
         method: 'POST',
         timeoutMs: 30_000,
         loginPath: '/login/mobile',
+        requestBody: JSON.stringify({ mobile: '13800000000', verify_code: '123456' }),
         username: 'should-not-persist',
         password: 'should-not-persist',
         mobile: '13800000000',

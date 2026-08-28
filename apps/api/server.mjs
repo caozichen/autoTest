@@ -29,6 +29,8 @@ function liveRunSnapshot(run) {
     status: run.status,
     durationMs: run.result?.durationMs ?? Math.round(performance.now() - run.startedAt),
     logs: run.result?.logs ?? run.logs,
+    ...(run.result?.assertions ? { assertions: run.result.assertions } : {}),
+    ...(run.result?.apiResponses ? { apiResponses: run.result.apiResponses } : {}),
     ...(run.result?.result ? { result: run.result.result } : {}),
     ...(run.result?.error || run.cancellationReason
       ? { error: run.result?.error ?? run.cancellationReason }

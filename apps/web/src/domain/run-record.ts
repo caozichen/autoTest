@@ -1,3 +1,6 @@
+import type { ScriptAssertionResult } from './assertion'
+import type { ScriptApiResponse } from './script'
+
 export type RunRecordStatus = 'running' | 'passed' | 'failed' | 'partial' | 'interrupted'
 export type RunScriptStatus = 'queued' | 'passed' | 'failed' | 'skipped'
 export type RunRecordLogLevel = 'info' | 'success' | 'warning' | 'error'
@@ -35,6 +38,8 @@ export interface RunScriptRecord extends RunScriptSnapshot {
   status: RunScriptStatus
   durationMs: number | null
   logs: RunRecordLog[]
+  assertions: ScriptAssertionResult[]
+  apiResponses: ScriptApiResponse[]
   output?: Record<string, unknown>
   error?: string
 }
@@ -99,6 +104,8 @@ export interface CompleteRunScriptDraft {
     message: string
     details?: Record<string, unknown>
   }>
+  assertions?: ScriptAssertionResult[]
+  apiResponses?: ScriptApiResponse[]
   output?: Record<string, unknown>
   error?: string
 }

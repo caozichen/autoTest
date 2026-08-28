@@ -1,12 +1,27 @@
-import type { EnvironmentDraft, EnvironmentVariable, TestEnvironment } from '@/domain/environment'
+import {
+  formatEnvironmentRequestBody,
+  parseEnvironmentRequestBody,
+  type EnvironmentDraft,
+  type EnvironmentLoginMode,
+  type EnvironmentVariable,
+  type TestEnvironment,
+} from '@/domain/environment'
 import type { EnvironmentService } from './environment-service'
 
-const STORAGE_KEY = 'autotest.environments.v5'
-const PREVIOUS_STORAGE_KEY = 'autotest.environments.v4'
+const STORAGE_KEY = 'autotest.environments.v7'
+const PREVIOUS_STORAGE_KEY = 'autotest.environments.v6'
+const V5_STORAGE_KEY = 'autotest.environments.v5'
+const V4_STORAGE_KEY = 'autotest.environments.v4'
 const V3_STORAGE_KEY = 'autotest.environments.v3'
 const V2_STORAGE_KEY = 'autotest.environments.v2'
 const LEGACY_STORAGE_KEY = 'autotest.environments.v1'
 const DEMO_ENVIRONMENT_IDS = new Set(['env-development', 'env-staging', 'env-legacy'])
+const LINGXI_MOBILE = '13671153204'
+const LINGXI_VERIFY_CODE = '666666'
+
+function mobileRequestBody(mobile: string, verifyCode: string): string {
+  return formatEnvironmentRequestBody({ mobile, verify_code: verifyCode })
+}
 
 const initialEnvironments: TestEnvironment[] = [
   {
@@ -24,10 +39,11 @@ const initialEnvironments: TestEnvironment[] = [
       method: 'POST',
       timeoutMs: 45_000,
       loginPath: '/be/login/mobile',
+      requestBody: mobileRequestBody(LINGXI_MOBILE, LINGXI_VERIFY_CODE),
       username: '',
       password: '',
-      mobile: '',
-      verifyCode: '',
+      mobile: LINGXI_MOBILE,
+      verifyCode: LINGXI_VERIFY_CODE,
       successPath: 'code',
       successValue: '0',
       tokenPath: 'data.token',
@@ -57,6 +73,36 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function stringValue(value: unknown): string {
   return typeof value === 'string' ? value : ''
+}
+
+function credentialValue(value: unknown): string {
+  return typeof value === 'string' || typeof value === 'number' ? String(value) : ''
+}
+
+function normalizeRequestBody(
+  auth: Record<string, unknown>,
+  mode: EnvironmentLoginMode,
+  useLingxiDefaults: boolean,
+): string {
+  const configuredBody = stringValue(auth.requestBody)
+  if (configuredBody.trim()) {
+    try {
+      return formatEnvironmentRequestBody(parseEnvironmentRequestBody(configuredBody))
+    } catch {
+      // Fall back to legacy credential fields when migrating an invalid stored value.
+    }
+  }
+
+  if (mode === 'mobile-code') {
+    const mobile = stringValue(auth.mobile).trim() || (useLingxiDefaults ? LINGXI_MOBILE : '')
+    const verifyCode = stringValue(auth.verifyCode).trim() || (useLingxiDefaults ? LINGXI_VERIFY_CODE : '')
+    return mobileRequestBody(mobile, verifyCode)
+  }
+
+  return formatEnvironmentRequestBody({
+    username: stringValue(auth.username),
+    password: stringValue(auth.password),
+  })
 }
 
 function normalizeVariables(value: unknown): EnvironmentVariable[] {
@@ -93,6 +139,8 @@ function normalizeEnvironment(value: unknown, applyLingxiDefaults: boolean): Tes
     value.baseUrl.includes('lx.admin.lingxi.tech')
   )
   const useLingxiDefaults = applyLingxiDefaults && isLingxiTest
+  const requestBody = normalizeRequestBody(value.auth, mode, useLingxiDefaults)
+  const parsedRequestBody = parseEnvironmentRequestBody(requestBody)
 
   return {
     id: value.id,
@@ -113,10 +161,11 @@ function normalizeEnvironment(value: unknown, applyLingxiDefaults: boolean): Tes
         ? Math.min(value.auth.timeoutMs, 120_000)
         : 30_000,
       loginPath: value.auth.loginPath,
-      username: stringValue(value.auth.username),
-      password: stringValue(value.auth.password),
-      mobile: stringValue(value.auth.mobile),
-      verifyCode: stringValue(value.auth.verifyCode),
+      requestBody,
+      username: mode === 'password' ? credentialValue(parsedRequestBody.username) : '',
+      password: mode === 'password' ? credentialValue(parsedRequestBody.password) : '',
+      mobile: mode === 'mobile-code' ? credentialValue(parsedRequestBody.mobile) : '',
+      verifyCode: mode === 'mobile-code' ? credentialValue(parsedRequestBody.verify_code) : '',
       successPath: stringValue(value.auth.successPath) || (useLingxiDefaults ? 'code' : ''),
       successValue: stringValue(value.auth.successValue) || (useLingxiDefaults ? '0' : ''),
       tokenPath: stringValue(value.auth.tokenPath) || (useLingxiDefaults ? 'data.token' : ''),
@@ -145,9 +194,21 @@ function migrateEnvironments(environments: TestEnvironment[], replaceExistingTes
   const existingTest = withoutDemos.find((environment) => (
     environment.id === 'env-testing' || environment.code.toUpperCase() === 'TEST'
   ))
-  const testEnvironment = existingTest && !replaceExistingTest
+  const selectedTestEnvironment = existingTest && !replaceExistingTest
     ? structuredClone(existingTest)
     : preset
+  const isLingxiMobileLogin = selectedTestEnvironment.auth.mode === 'mobile-code'
+    && selectedTestEnvironment.baseUrl.includes('lx.admin.lingxi.tech')
+  const testEnvironment = isLingxiMobileLogin
+    ? {
+        ...selectedTestEnvironment,
+        auth: {
+          ...selectedTestEnvironment.auth,
+          mobile: selectedTestEnvironment.auth.mobile.trim() || preset.auth.mobile,
+          verifyCode: selectedTestEnvironment.auth.verifyCode.trim() || preset.auth.verifyCode,
+        },
+      }
+    : selectedTestEnvironment
 
   const remaining = withoutDemos
     .filter((environment) => environment.id !== 'env-testing' && environment.code.toUpperCase() !== 'TEST')
@@ -164,10 +225,16 @@ function migrateEnvironments(environments: TestEnvironment[], replaceExistingTes
 
 function sanitizeDraft(draft: EnvironmentDraft): EnvironmentDraft {
   const sanitized = structuredClone(draft)
+  const requestBody = parseEnvironmentRequestBody(sanitized.auth.requestBody)
+  sanitized.auth.requestBody = formatEnvironmentRequestBody(requestBody)
   if (sanitized.auth.mode === 'mobile-code') {
+    sanitized.auth.mobile = credentialValue(requestBody.mobile).trim()
+    sanitized.auth.verifyCode = credentialValue(requestBody.verify_code).trim()
     sanitized.auth.username = ''
     sanitized.auth.password = ''
   } else {
+    sanitized.auth.username = credentialValue(requestBody.username).trim()
+    sanitized.auth.password = credentialValue(requestBody.password)
     sanitized.auth.mobile = ''
     sanitized.auth.verifyCode = ''
   }
@@ -252,6 +319,20 @@ export class LocalEnvironmentService implements EnvironmentService {
     const previous = this.readStorageKey(PREVIOUS_STORAGE_KEY, true)
     if (previous) {
       const migrated = migrateEnvironments(previous, false)
+      this.storage.setItem(STORAGE_KEY, JSON.stringify(migrated))
+      return cloneEnvironments(migrated)
+    }
+
+    const v5 = this.readStorageKey(V5_STORAGE_KEY, true)
+    if (v5) {
+      const migrated = migrateEnvironments(v5, false)
+      this.storage.setItem(STORAGE_KEY, JSON.stringify(migrated))
+      return cloneEnvironments(migrated)
+    }
+
+    const v4 = this.readStorageKey(V4_STORAGE_KEY, true)
+    if (v4) {
+      const migrated = migrateEnvironments(v4, false)
       this.storage.setItem(STORAGE_KEY, JSON.stringify(migrated))
       return cloneEnvironments(migrated)
     }

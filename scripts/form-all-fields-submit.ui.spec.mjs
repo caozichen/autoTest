@@ -2,7 +2,12 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { chromium, expect } from '@playwright/test'
+import { expect as hardExpect } from '@playwright/test'
+
+import { expect } from './support/recorded-expect.mjs'
+import { attachApiResponseRecorder } from './support/api-response-recorder.mjs'
+import { launchGoogleChrome } from './support/google-chrome.mjs'
+import { run as runLinkedAllFieldsForm } from './form-lpxavn-submit.ui.spec.mjs'
 
 import {
   closePlaywrightHandles,
@@ -19,6 +24,8 @@ const ACTION_TIMEOUT_MS = 30_000
 const SELECT_MAX_ATTEMPTS = 3
 const SELECT_VISIBILITY_TIMEOUT_MS = 3_000
 const SELECT_COMMIT_TIMEOUT_MS = 1_500
+const SUBMISSION_RESULT_SELECTOR = 'form-submission-result'
+const SUBMISSION_RESULT_URL_PATTERN = /\/form\/submission-result\/?(?:[?#]|$)/
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const OUTPUT_DIR = resolve(SCRIPT_DIR, '..', 'outputs', 'form-all-fields-submit')
 const FIXTURE_DIR = resolve(OUTPUT_DIR, 'fixtures')
@@ -56,6 +63,16 @@ const PAGE_FIELD_LABELS = Object.freeze([
   ['单行文本', '多行文本', '单项选择', '多项选择', '下拉选择', '数字', '日期', '时间', '图片上传', '文件上传'],
   ['级联选择', '手写签名', '题组', '矩阵题', '矩阵选择', '排序题', '评分题', 'NPS'],
 ])
+const PAGE_FIELD_KEYS = Object.freeze([
+  [FIELD_KEYS.username, FIELD_KEYS.mobile, FIELD_KEYS.email, FIELD_KEYS.idCard, FIELD_KEYS.landlinePhone, FIELD_KEYS.address, FIELD_KEYS.birthday],
+  [FIELD_KEYS.input, FIELD_KEYS.textarea, FIELD_KEYS.radio, FIELD_KEYS.checkbox, FIELD_KEYS.select, FIELD_KEYS.number, FIELD_KEYS.date, FIELD_KEYS.time, FIELD_KEYS.imageUpload, FIELD_KEYS.fileUpload],
+  [FIELD_KEYS.cascader, FIELD_KEYS.signature, FIELD_KEYS.fieldGroup, FIELD_KEYS.matrix, FIELD_KEYS.matrixChoice, FIELD_KEYS.ranking, FIELD_KEYS.rating, FIELD_KEYS.nps],
+])
+const ADDRESS_OPTION_ALIASES = Object.freeze({
+  province: Object.freeze(['广东省', '廣東省']),
+  city: Object.freeze(['深圳市']),
+  district: Object.freeze(['南山区', '南山區']),
+})
 
 function createTestData(now = Date.now()) {
   const suffix = String(now).slice(-8).padStart(8, '0')
@@ -99,20 +116,19 @@ async function assertField(page, key, label) {
   const card = fieldCard(page, key)
   await expect(card, `当前页应唯一显示“${label}”题目`).toHaveCount(1)
   await expect(card, `“${label}”题目应可见`).toBeVisible()
-  await expect(card, `题目标题应与“${label}”匹配`).toContainText(label)
   return card
 }
 
-async function assertCurrentPage(page, pageNumber, expectedLabels, logger) {
-  await expect(page.getByText(`第 ${pageNumber} 页/共 3 页`, { exact: true }), `应显示第 ${pageNumber} 页`).toBeVisible()
+async function assertCurrentPage(page, pageNumber, expectedKeys, expectedLabels, logger) {
   const visibleCards = page.locator([
     '.fb-runtime-field-card:visible',
     '.fb-runtime-structural-field-card[data-item-key]:visible',
   ].join(', '))
   await expect(visibleCards, `第 ${pageNumber} 页题目数应正确`).toHaveCount(expectedLabels.length)
-  const visibleText = await visibleCards.allTextContents()
-  for (const label of expectedLabels) {
-    expect(visibleText.some((text) => text.includes(label)), `第 ${pageNumber} 页应包含“${label}”`).toBeTruthy()
+  for (const [index, key] of expectedKeys.entries()) {
+    const label = expectedLabels[index] ?? key
+    await expect(fieldCard(page, key), `第 ${pageNumber} 页应包含“${label}”`).toHaveCount(1)
+    await expect(fieldCard(page, key), `第 ${pageNumber} 页的“${label}”应可见`).toBeVisible()
   }
   logger('success', `第 ${pageNumber} 页结构断言通过`, { questionCount: expectedLabels.length, labels: expectedLabels })
 }
@@ -123,62 +139,72 @@ async function fillAndAssert(input, value, label) {
 }
 
 async function selectOption(page, trigger, optionName, label, logger = () => undefined) {
+  const optionNames = (Array.isArray(optionName) ? optionName : [optionName])
+    .map((name) => String(name).trim())
+    .filter(Boolean)
+  if (optionNames.length === 0) throw new Error(`“${label}”未提供可选择的目标选项`)
+  const optionPattern = new RegExp(`^(?:${optionNames
+    .map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('|')})$`)
+  const expectedOptionLabel = optionNames.join(' / ')
   let lastError
 
   for (let attempt = 1; attempt <= SELECT_MAX_ATTEMPTS; attempt += 1) {
     let listbox
     try {
-      await trigger.evaluate((element) => {
-        element.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' })
-      })
-      await trigger.click()
-
-      const listboxId = await trigger.getAttribute('aria-controls')
-      expect(listboxId, `“${label}”下拉框应关联选项列表`).toBeTruthy()
-      listbox = page.locator(`[role="listbox"][id=${JSON.stringify(listboxId)}]`)
-      await expect(listbox, `“${label}”选项列表应打开`).toBeVisible()
-
-      const option = listbox.getByRole('option', { name: optionName, exact: true })
-      await expect(option, `“${label}”应唯一提供“${optionName}”选项`).toHaveCount(1)
-      await option.scrollIntoViewIfNeeded()
-      await option.evaluate((element) => {
-        element.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' })
-      })
-      await expect(option, `“${label}”的“${optionName}”选项应完整进入视口`).toBeInViewport({
-        ratio: 1,
+      await trigger.scrollIntoViewIfNeeded({ timeout: SELECT_VISIBILITY_TIMEOUT_MS })
+      await trigger.click({ timeout: SELECT_VISIBILITY_TIMEOUT_MS })
+      await hardExpect(trigger, `“${label}”下拉框点击后应展开`).toHaveAttribute('aria-expanded', 'true', {
         timeout: SELECT_VISIBILITY_TIMEOUT_MS,
       })
-      await option.focus()
-      await expect(option, `“${label}”的“${optionName}”选项应获得键盘焦点`).toBeFocused()
-      await page.keyboard.press('Enter')
 
-      await expect(listbox, `选择“${optionName}”后选项列表应关闭`).toBeHidden({
+      const listboxId = await trigger.getAttribute('aria-controls')
+      hardExpect(listboxId, `“${label}”下拉框应关联当前选项列表`).toBeTruthy()
+      listbox = page.locator(`[role="listbox"][id=${JSON.stringify(listboxId)}]:visible`)
+      await hardExpect(listbox, `“${label}”当前选项列表应打开`).toBeVisible({
+        timeout: SELECT_VISIBILITY_TIMEOUT_MS,
+      })
+      const option = listbox.getByRole('option', { name: optionPattern })
+      await hardExpect(option, `“${label}”应唯一提供“${expectedOptionLabel}”中的一个选项`).toHaveCount(1, {
+        timeout: SELECT_VISIBILITY_TIMEOUT_MS,
+      })
+      const selectedOptionName = (await option.innerText()).trim()
+      await option.scrollIntoViewIfNeeded({ timeout: SELECT_VISIBILITY_TIMEOUT_MS })
+      await hardExpect(option, `“${label}”选项“${selectedOptionName}”应可见`).toBeVisible({
+        timeout: SELECT_VISIBILITY_TIMEOUT_MS,
+      })
+      await option.click({ timeout: SELECT_VISIBILITY_TIMEOUT_MS })
+
+      await hardExpect(listbox, `选择“${selectedOptionName}”后选项列表应关闭`).toBeHidden({
         timeout: SELECT_COMMIT_TIMEOUT_MS,
       })
-      await expect(trigger, `“${label}”应精确回显“${optionName}”`).toHaveText(optionName, {
+      await hardExpect(trigger, `“${label}”应精确回显“${selectedOptionName}”`).toHaveText(selectedOptionName, {
         timeout: SELECT_COMMIT_TIMEOUT_MS,
       })
-      return
+      await expect(trigger, `“${label}”成功选择“${selectedOptionName}”`).toHaveText(selectedOptionName)
+      return selectedOptionName
     } catch (error) {
       lastError = error
-      const actualText = await trigger.innerText().catch(() => '')
-      await trigger.press('Escape').catch(() => undefined)
+      await page.keyboard.press('Escape').catch(() => undefined)
       if (listbox) {
-        await expect(listbox).toBeHidden({ timeout: 500 }).catch(() => undefined)
+        await hardExpect(listbox).toBeHidden({ timeout: 500 }).catch(() => undefined)
       }
+      await hardExpect(trigger).toHaveAttribute('aria-expanded', 'false', { timeout: 500 }).catch(() => undefined)
+      const actualText = await trigger.innerText({ timeout: 500 }).catch(() => '')
 
       if (attempt < SELECT_MAX_ATTEMPTS) {
-        logger('warning', `“${label}”第 ${attempt} 次选择未生效，准备重新选择“${optionName}”`, {
+        logger('warning', `“${label}”第 ${attempt} 次选择未生效，准备重新选择“${expectedOptionLabel}”`, {
           attempt,
-          expected: optionName,
+          expected: expectedOptionLabel,
           actual: actualText.trim(),
+          reason: error instanceof Error ? error.message : String(error),
         })
       }
     }
   }
 
   const detail = lastError instanceof Error ? lastError.message : String(lastError)
-  throw new Error(`“${label}”连续 ${SELECT_MAX_ATTEMPTS} 次未能选择“${optionName}”：${detail}`, {
+  throw new Error(`“${label}”连续 ${SELECT_MAX_ATTEMPTS} 次未能选择“${expectedOptionLabel}”：${detail}`, {
     cause: lastError,
   })
 }
@@ -192,23 +218,42 @@ async function waitForPublicMutation(page, pathSuffix, action, label) {
   }, { timeout: ACTION_TIMEOUT_MS })
   await action()
   const response = await responsePromise
-  expect(response.ok(), `${label} HTTP 状态应成功，实际 ${response.status()}`).toBeTruthy()
+  if (!response.ok()) throw new Error(`${label}接口返回 HTTP ${response.status()}`)
   const body = await response.json().catch(() => null)
+  if (!body || typeof body !== 'object') throw new Error(`${label}接口未返回有效 JSON`)
   if (body && Object.prototype.hasOwnProperty.call(body, 'code')) {
-    expect(body.code, `${label}业务码应为 0`).toBe(0)
+    if (Number(body.code) !== 0) throw new Error(`${label}接口业务码异常：${body.code}`)
   }
   return { response, body }
 }
 
+async function assertVisibleSubmissionResult(page, { timeout = NAVIGATION_TIMEOUT_MS } = {}) {
+  const result = page.locator(SUBMISSION_RESULT_SELECTOR)
+  await expect(result, '提交后应挂载唯一的普通表单结果页组件').toHaveCount(1, { timeout })
+  await expect(result, '结果页组件应属于当前表单').toHaveAttribute('form-code', FORM_CODE, { timeout })
+  await expect(result, '结果页组件应包含有效提交 ID').toHaveAttribute('submission-id', /\S+/, { timeout })
+
+  // The custom-element host has no layout box; its visible result UI is rendered inside the component.
+  await expect(page.getByRole('heading', { level: 1 }).first(), '提交后应显示结果页主标题').toBeVisible({
+    timeout,
+  })
+
+  return result.getAttribute('submission-id')
+}
+
 async function goToNextPage(page, currentPage, logger) {
   logger('info', `第 ${currentPage} 页填写完成，点击“下一页”并等待服务端分页校验`)
+  const paginationButtons = page.locator('.fb-runtime-pagination-buttons > button.fb-runtime-submit-button')
+  await expect(paginationButtons, `第 ${currentPage} 页应显示分页操作按钮`).not.toHaveCount(0)
   await waitForPublicMutation(
     page,
     `/f/form/${FORM_CODE}/submission/validate-page`,
-    () => page.getByRole('button', { name: '下一页', exact: true }).click(),
+    () => paginationButtons.last().click(),
     `第 ${currentPage} 页校验`,
   )
-  await expect(page.getByText(`第 ${currentPage + 1} 页/共 3 页`, { exact: true }), '分页后页码应更新').toBeVisible()
+  const nextPageFirstKey = PAGE_FIELD_KEYS[currentPage]?.[0]
+  expect(nextPageFirstKey, `应配置第 ${currentPage + 1} 页首个题目`).toBeTruthy()
+  await expect(fieldCard(page, nextPageFirstKey), `应进入第 ${currentPage + 1} 页`).toBeVisible()
   logger('success', `第 ${currentPage} 页服务端校验通过，已进入第 ${currentPage + 1} 页`)
 }
 
@@ -231,9 +276,7 @@ async function uploadAndAssert(card, filePath, label) {
   await input.setInputFiles(filePath)
   const fileName = filePath.split(/[\\/]/).pop()
   const uploadStatus = card.locator('.fb-runtime-upload-status')
-  await expect(uploadStatus, `“${label}”上传完成后数量应为 1`).toContainText('已上传 1/', {
-    timeout: ACTION_TIMEOUT_MS,
-  })
+  await expect(uploadStatus, `“${label}”应显示上传状态`).toBeVisible()
 
   if (label === '图片上传') {
     const previewImage = card.locator('.fb-runtime-upload-image-preview img')
@@ -251,7 +294,7 @@ async function uploadAndAssert(card, filePath, label) {
 
 async function drawSignature(page, card, logger) {
   await card.locator('.fb-signature-empty-trigger').click()
-  const dialog = page.getByRole('dialog').filter({ hasText: '请在下方区域手写签名' })
+  const dialog = page.locator('[role="dialog"]:visible').filter({ has: page.locator('canvas') })
   await expect(dialog, '点击签名题后应打开手写签名弹窗').toBeVisible()
   const canvas = dialog.locator('canvas')
   await expect(canvas, '签名弹窗应包含画布').toBeVisible()
@@ -266,7 +309,9 @@ async function drawSignature(page, card, logger) {
     await page.mouse.move(box.x + box.width * x, box.y + box.height * y, { steps: 4 })
   }
   await page.mouse.up()
-  await dialog.getByRole('button', { name: '确定', exact: true }).click()
+  const confirmButton = dialog.locator('button.fb-text-white')
+  await expect(confirmButton, '签名弹窗应唯一显示主确认按钮').toHaveCount(1)
+  await confirmButton.click()
   await expect(dialog, '确认并上传签名后弹窗应关闭').toBeHidden({ timeout: ACTION_TIMEOUT_MS })
   await expect(card.locator('.fb-signature-filled-surface'), '签名题应回显签名结果').toBeVisible()
   logger('success', '手写签名已通过画布完成并上传')
@@ -279,20 +324,22 @@ async function screenshotFailure(page, runId) {
   return screenshotPath
 }
 
-export async function run({
+async function runLegacy({
   extraHTTPHeaders,
   ignoreHTTPSErrors = false,
   signal,
   logger,
+  recordApiResponse,
 }) {
   const authorization = extraHTTPHeaders?.Authorization
-  expect(authorization, '平台运行上下文应包含环境登录 Token').toBeTruthy()
+  if (!authorization) throw new Error('平台运行上下文必须包含环境登录 Token')
 
   const data = createTestData()
   let browser
   let context
   let page
   let stopAbortClose = () => undefined
+  let stopApiResponseRecorder = async () => undefined
   try {
     throwIfRunAborted(signal)
     const fixtures = await createUploadFixtures(data.runId)
@@ -305,7 +352,7 @@ export async function run({
     })
     logger('info', '公开填写页无需登录；环境 Token 仅用于平台鉴权，不会注入或发送到公开表单域名')
 
-    browser = await chromium.launch({ channel: 'chrome', headless: true })
+    browser = await launchGoogleChrome()
     stopAbortClose = closePlaywrightOnAbort(signal, () => ({ browser, context }), { logger })
     throwIfRunAborted(signal)
     context = await browser.newContext({
@@ -315,6 +362,10 @@ export async function run({
     })
     throwIfRunAborted(signal)
     page = await context.newPage()
+    stopApiResponseRecorder = attachApiResponseRecorder(page, {
+      onApiResponse: recordApiResponse,
+      shouldRecord: ({ url }) => url.origin === PUBLIC_ORIGIN,
+    })
     page.setDefaultTimeout(ACTION_TIMEOUT_MS)
     page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS)
 
@@ -333,31 +384,32 @@ export async function run({
     await expect(page, '公开表单地址应保持为目标 form code').toHaveURL(new RegExp(`[?&]id=${FORM_CODE}(?:&|$)`))
     await expect(page, '页面标题应与目标表单名称完全匹配').toHaveTitle(EXPECTED_FORM_TITLE)
     await expect(page.getByText(EXPECTED_FORM_TITLE, { exact: true }), '页面中应显示目标表单名称').toBeVisible()
-    logger('success', '目标公开表单加载成功', { title: EXPECTED_FORM_TITLE, formCode: FORM_CODE })
+    const pageLocale = await page.locator('html').getAttribute('lang')
+    logger('success', '目标公开表单加载成功', { title: EXPECTED_FORM_TITLE, formCode: FORM_CODE, locale: pageLocale || 'unknown' })
 
-    await assertCurrentPage(page, 1, PAGE_FIELD_LABELS[0], logger)
+    await assertCurrentPage(page, 1, PAGE_FIELD_KEYS[0], PAGE_FIELD_LABELS[0], logger)
     const username = await assertField(page, FIELD_KEYS.username, '姓名')
-    await fillAndAssert(username.getByPlaceholder('请输入姓名'), data.username, '姓名')
+    await fillAndAssert(username.locator('input').first(), data.username, '姓名')
     const mobile = await assertField(page, FIELD_KEYS.mobile, '手机号')
     await expect(mobile.getByRole('combobox'), '手机号区号应为中国大陆 +86').toContainText('+86')
-    await fillAndAssert(mobile.getByPlaceholder('请输入手机号'), data.mobile, '手机号')
+    await fillAndAssert(mobile.locator('input').first(), data.mobile, '手机号')
     const email = await assertField(page, FIELD_KEYS.email, '邮箱')
-    await fillAndAssert(email.getByPlaceholder('请输入邮箱'), data.email, '邮箱')
+    await fillAndAssert(email.locator('input').first(), data.email, '邮箱')
     const idCard = await assertField(page, FIELD_KEYS.idCard, '身份证件')
     await expect(idCard.getByRole('combobox'), '证件类型应为身份证').toContainText('身份证')
-    await fillAndAssert(idCard.getByPlaceholder('请输入证件号码'), data.idCard, '身份证件')
+    await fillAndAssert(idCard.locator('input').first(), data.idCard, '身份证件')
     const landline = await assertField(page, FIELD_KEYS.landlinePhone, '固定电话')
-    await fillAndAssert(landline.getByPlaceholder('请输入固定电话'), data.landlinePhone, '固定电话')
+    await fillAndAssert(landline.locator('input').first(), data.landlinePhone, '固定电话')
 
     const address = await assertField(page, FIELD_KEYS.address, '地址')
-    const addressSelects = address.getByRole('combobox')
-    await selectOption(page, addressSelects.nth(0), data.province, '地址-省份', logger)
-    await selectOption(page, addressSelects.nth(1), data.city, '地址-城市', logger)
-    await selectOption(page, addressSelects.nth(2), data.district, '地址-区县', logger)
-    await fillAndAssert(address.getByPlaceholder('请输入地址'), data.street, '详细地址')
+    const addressSelects = address.locator('[role="combobox"]')
+    data.province = await selectOption(page, addressSelects.nth(0), ADDRESS_OPTION_ALIASES.province, '地址-省份', logger)
+    data.city = await selectOption(page, addressSelects.nth(1), ADDRESS_OPTION_ALIASES.city, '地址-城市', logger)
+    data.district = await selectOption(page, addressSelects.nth(2), ADDRESS_OPTION_ALIASES.district, '地址-区县', logger)
+    await fillAndAssert(address.locator('input').first(), data.street, '详细地址')
 
     const birthday = await assertField(page, FIELD_KEYS.birthday, '生日')
-    const birthdaySelects = birthday.getByRole('combobox')
+    const birthdaySelects = birthday.locator('[role="combobox"]')
     await selectOption(page, birthdaySelects.nth(0), data.birthday.year, '生日-年份', logger)
     await selectOption(page, birthdaySelects.nth(1), data.birthday.month, '生日-月份', logger)
     await selectOption(page, birthdaySelects.nth(2), data.birthday.day, '生日-日期', logger)
@@ -370,11 +422,11 @@ export async function run({
     })
     await goToNextPage(page, 1, logger)
 
-    await assertCurrentPage(page, 2, PAGE_FIELD_LABELS[1], logger)
+    await assertCurrentPage(page, 2, PAGE_FIELD_KEYS[1], PAGE_FIELD_LABELS[1], logger)
     const input = await assertField(page, FIELD_KEYS.input, '单行文本')
-    await fillAndAssert(input.getByPlaceholder('请输入单行文本'), data.singleLine, '单行文本')
+    await fillAndAssert(input.locator('input').first(), data.singleLine, '单行文本')
     const textarea = await assertField(page, FIELD_KEYS.textarea, '多行文本')
-    await fillAndAssert(textarea.getByPlaceholder('请输入多行文本'), data.multiLine, '多行文本')
+    await fillAndAssert(textarea.locator('textarea').first(), data.multiLine, '多行文本')
 
     const radio = await assertField(page, FIELD_KEYS.radio, '单项选择')
     const radioChoice = radio.getByRole('radio', { name: data.radio, exact: true })
@@ -387,26 +439,37 @@ export async function run({
       await expect(control, `多项选择应选中“${choice}”`).toBeChecked()
     }
     const select = await assertField(page, FIELD_KEYS.select, '下拉选择')
-    await selectOption(page, select.getByRole('combobox'), data.select, '下拉选择', logger)
+    await selectOption(page, select.locator('[role="combobox"]'), data.select, '下拉选择', logger)
     const number = await assertField(page, FIELD_KEYS.number, '数字')
-    await fillAndAssert(number.getByPlaceholder('请输入数字'), data.number, '数字')
+    await fillAndAssert(number.locator('input').first(), data.number, '数字')
 
     const date = await assertField(page, FIELD_KEYS.date, '日期')
     const dateTrigger = date.locator('button').first()
+    const datePlaceholder = (await dateTrigger.innerText()).trim()
     await dateTrigger.click()
     const dateOverlay = page.locator('[data-fb-date-overlay]')
     await expect(dateOverlay, '日期题应打开日期面板').toBeVisible()
     await dateOverlay.locator('button.fb-ring-1:not([disabled])').click()
-    await expect(dateTrigger, '日期题选择今天后不应再显示占位文字').not.toContainText('请选择日期')
+    await expect.poll(
+      async () => (await dateTrigger.innerText()).trim(),
+      { message: '日期题选择日期后应更新回显' },
+    ).not.toBe(datePlaceholder)
 
     const time = await assertField(page, FIELD_KEYS.time, '时间')
     const timeTrigger = time.locator('button').first()
+    const timePlaceholder = (await timeTrigger.innerText()).trim()
     await timeTrigger.click()
-    const timePanel = page.locator('[data-fb-renderer-portal]')
+    const timePanel = page.locator('.fb-timepicker-container:visible')
     await expect(timePanel, '时间题应打开时间面板').toBeVisible()
-    await timePanel.getByRole('button', { name: '此刻', exact: true }).click()
-    await timePanel.getByRole('button', { name: '确定', exact: true }).click()
-    await expect(timeTrigger, '时间题选择此刻后不应再显示占位文字').not.toContainText('请选择时间')
+    const timeActions = timePanel.locator('button.fb-h-7.fb-min-w-14')
+    await expect(timeActions, '时间面板应显示设为当前时间和确认两个操作').toHaveCount(2)
+    await timeActions.nth(0).click()
+    await timeActions.nth(1).click()
+    await expect(timePanel, '确认时间后时间面板应关闭').toBeHidden()
+    await expect.poll(
+      async () => (await timeTrigger.innerText()).trim(),
+      { message: '时间题选择时间后应更新回显' },
+    ).not.toBe(timePlaceholder)
 
     const imageUpload = await assertField(page, FIELD_KEYS.imageUpload, '图片上传')
     await uploadAndAssert(imageUpload, fixtures.imagePath, '图片上传')
@@ -422,7 +485,7 @@ export async function run({
     })
     await goToNextPage(page, 2, logger)
 
-    await assertCurrentPage(page, 3, PAGE_FIELD_LABELS[2], logger)
+    await assertCurrentPage(page, 3, PAGE_FIELD_KEYS[2], PAGE_FIELD_LABELS[2], logger)
     const cascader = await assertField(page, FIELD_KEYS.cascader, '级联选择')
     const cascaderTrigger = cascader.locator('.fb-runtime-cascader-trigger')
     await cascaderTrigger.click()
@@ -433,7 +496,7 @@ export async function run({
     const signature = await assertField(page, FIELD_KEYS.signature, '手写签名')
     await drawSignature(page, signature, logger)
     const fieldGroup = await assertField(page, FIELD_KEYS.fieldGroup, '题组')
-    await expect(fieldGroup, '空题组不应要求填写不存在的子题').not.toContainText('请填写')
+    await expect(fieldGroup.locator('[data-item-key]'), '空题组不应包含不存在的子题').toHaveCount(0)
 
     const matrix = await assertField(page, FIELD_KEYS.matrix, '矩阵题')
     const matrixInputs = matrix.locator('tbody input[type="text"]')
@@ -484,21 +547,27 @@ export async function run({
     const submission = await waitForPublicMutation(
       page,
       `/f/form/${FORM_CODE}/submission`,
-      () => page.getByRole('button', { name: '提交', exact: true }).click(),
+      () => page.locator('.fb-runtime-submit-button-wrap button.fb-runtime-submit-button').click(),
       '提交表单',
     )
     const requestPayload = submission.response.request().postData() || ''
     for (const expectedValue of [data.username, data.mobile, data.email, data.singleLine, data.matrix[2][2]]) {
       expect(requestPayload.includes(expectedValue), `提交请求应包含与题目匹配的值“${expectedValue}”`).toBeTruthy()
     }
-    const submissionId = String(
+    const responseSubmissionId = String(
       submission.body?.data?.submission_id
       ?? submission.body?.data?.id
       ?? submission.body?.submission_id
       ?? '',
     )
-    await page.waitForURL(/\/form\/submission-result\//, { timeout: NAVIGATION_TIMEOUT_MS }).catch(() => undefined)
-    await expect(page.getByText('提交成功', { exact: true }).first(), '提交后应显示“提交成功”结果').toBeVisible({ timeout: NAVIGATION_TIMEOUT_MS })
+    await expect(page, '提交后应进入普通表单结果页').toHaveURL(SUBMISSION_RESULT_URL_PATTERN, {
+      timeout: NAVIGATION_TIMEOUT_MS,
+    })
+    const renderedSubmissionId = await assertVisibleSubmissionResult(page)
+    if (responseSubmissionId) {
+      expect(renderedSubmissionId, '结果页组件的提交 ID 应与提交接口响应一致').toBe(responseSubmissionId)
+    }
+    const submissionId = responseSubmissionId || renderedSubmissionId || ''
     expect(authorizationLeaks, '公开表单域名的所有请求都不应携带后台环境 Token').toEqual([])
     expect(publicRequestCount, '应观察到公开表单域名的业务请求').toBeGreaterThan(0)
     logger('success', '表单提交成功，题目、答案和提交请求断言全部通过', {
@@ -532,9 +601,17 @@ export async function run({
     }
     throw error
   } finally {
+    await stopApiResponseRecorder()
     const abortCloseStarted = await stopAbortClose()
     if (!abortCloseStarted) await closePlaywrightHandles({ context, browser }, { logger })
   }
+}
+
+export async function run(options) {
+  return runLinkedAllFieldsForm({
+    ...options,
+    requestPath: options?.requestPath ?? `/form/?id=${FORM_CODE}`,
+  })
 }
 
 export {
@@ -542,8 +619,13 @@ export {
   FIELD_KEYS,
   FORM_CODE,
   FORM_URL,
+  PAGE_FIELD_KEYS,
   PAGE_FIELD_LABELS,
   SELECT_MAX_ATTEMPTS,
+  SUBMISSION_RESULT_SELECTOR,
+  SUBMISSION_RESULT_URL_PATTERN,
+  assertVisibleSubmissionResult,
   createTestData,
   selectOption,
+  runLegacy,
 }

@@ -20,11 +20,13 @@ import ScriptEditorDialog from '@/components/ScriptEditorDialog.vue'
 import ScriptRunResultDialog from '@/components/ScriptRunResultDialog.vue'
 import type { TestEnvironment } from '@/domain/environment'
 import type { RunFailureStage, RunRecord } from '@/domain/run-record'
+import type { RuntimeVariable } from '@/domain/runtime-variable'
 import type { AutomationScript, ScriptDraft, ScriptStatus } from '@/domain/script'
 import { services } from '@/services/container'
 import { applyResponseVariable } from '@/services/environments/apply-response-variable'
 import { collectBatchStopScriptIds } from '@/services/scripts/script-batch-stop-plan'
 import { buildScriptRunContext } from '@/services/scripts/script-run-context'
+import { applyScriptResponseVariables } from '@/services/scripts/script-response-variables'
 
 const scripts = ref<AutomationScript[]>([])
 const environments = ref<TestEnvironment[]>([])
@@ -37,6 +39,7 @@ const currentPage = ref(1)
 const pageSize = 6
 const editorVisible = ref(false)
 const editingScript = ref<AutomationScript | null>(null)
+const editorRuntimeVariables = ref<RuntimeVariable[]>([])
 const resultVisible = ref(false)
 const resultScript = ref<AutomationScript | null>(null)
 const runningScriptIds = ref<Set<string>>(new Set())
@@ -103,6 +106,24 @@ const summary = computed(() => ({
 }))
 const availableEnvironments = computed(() => environments.value.filter((environment) => environment.enabled))
 const selectedEnvironment = computed(() => environments.value.find((environment) => environment.id === selectedEnvironmentId.value) ?? null)
+const editorVariableOptions = computed(() => {
+  const variables = new Map<string, { key: string; value: string; secret: boolean }>()
+  for (const variable of selectedEnvironment.value?.variables ?? []) {
+    if (variable.enabled && variable.key.trim()) variables.set(variable.key, {
+      key: variable.key,
+      value: variable.value,
+      secret: variable.secret,
+    })
+  }
+  for (const variable of editorRuntimeVariables.value) {
+    variables.set(variable.key, {
+      key: variable.key,
+      value: variable.value,
+      secret: variable.secret,
+    })
+  }
+  return [...variables.values()].sort((left, right) => left.key.localeCompare(right.key))
+})
 const selectedRunLocked = computed(() => selectedScripts.value.some(isScriptRunning))
 
 watch([searchKeyword, statusFilter], () => {
@@ -165,11 +186,13 @@ async function selectEnvironment(environmentId: string): Promise<void> {
 }
 
 function openCreate(): void {
+  editorRuntimeVariables.value = services.runtimeVariables.list()
   editingScript.value = null
   editorVisible.value = true
 }
 
 function openEdit(script: AutomationScript): void {
+  editorRuntimeVariables.value = services.runtimeVariables.list()
   editingScript.value = script
   editorVisible.value = true
 }
@@ -360,6 +383,20 @@ async function runScripts(targets: AutomationScript[]): Promise<void> {
     startLiveRefresh()
     const completed = await runTask
     stopLiveRefresh()
+    const variableReports = completed.map((script) => applyScriptResponseVariables(
+      script,
+      script.lastRunResult ?? { ok: false, durationMs: 0, logs: [] },
+      environment.id,
+      services.runtimeVariables,
+    ))
+    const appliedVariableCount = variableReports.reduce((total, report) => total + report.applied.length, 0)
+    const failedVariableCount = variableReports.reduce((total, report) => total + report.failed.length, 0)
+    runSecretValues = [
+      ...runSecretValues,
+      ...services.runtimeVariables.list()
+        .filter((variable) => variable.secret)
+        .map((variable) => variable.value),
+    ].filter(Boolean)
     const currentRecord = await services.runRecords.get(runRecord.id)
     if (currentRecord?.status === 'running') {
       runRecord = await services.runRecords.complete(runRecord.id, {
@@ -368,6 +405,8 @@ async function runScripts(targets: AutomationScript[]): Promise<void> {
           ok: script.lastRunResult?.ok ?? script.status === 'passed',
           durationMs: script.lastRunResult?.durationMs ?? 0,
           logs: script.lastRunResult?.logs ?? [],
+          ...(script.lastRunResult?.assertions ? { assertions: script.lastRunResult.assertions } : {}),
+          ...(script.lastRunResult?.apiResponses ? { apiResponses: script.lastRunResult.apiResponses } : {}),
           ...(script.lastRunResult?.output ? { output: script.lastRunResult.output } : {}),
           ...(script.lastRunResult?.error ? { error: script.lastRunResult.error } : {}),
         })),
@@ -386,7 +425,12 @@ async function runScripts(targets: AutomationScript[]): Promise<void> {
     } else if (failedCount > 0) {
       ElMessage.error(`${failedCount} 个脚本执行失败，请查看运行日志`)
     } else {
-      ElMessage.success(`${runnable.length} 个脚本已在${environment.name}运行完成`)
+      ElMessage.success(
+        `${runnable.length} 个脚本已在${environment.name}运行完成${appliedVariableCount > 0 ? `，已更新 ${appliedVariableCount} 个全局变量` : ''}`,
+      )
+    }
+    if (failedVariableCount > 0) {
+      ElMessage.warning(`${failedVariableCount} 条响应变量规则未匹配，原变量未覆盖`)
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : '运行失败'
@@ -607,7 +651,13 @@ onBeforeUnmount(stopLiveRefresh)
       </footer>
     </section>
 
-    <ScriptEditorDialog v-model="editorVisible" :script="editingScript" @save="saveScript" />
+    <ScriptEditorDialog
+      v-model="editorVisible"
+      :script="editingScript"
+      :environment="selectedEnvironment"
+      :variables="editorVariableOptions"
+      @save="saveScript"
+    />
     <ScriptRunResultDialog v-model="resultVisible" :script="resultScript" />
   </div>
 </template>
@@ -622,7 +672,7 @@ onBeforeUnmount(stopLiveRefresh)
   align-items: flex-end;
   justify-content: space-between;
   gap: 24px;
-  margin-bottom: 24px;
+  margin-bottom: 18px;
 }
 
 .page-heading p,
@@ -632,14 +682,14 @@ onBeforeUnmount(stopLiveRefresh)
 }
 
 .page-heading p {
-  margin-bottom: 5px;
-  color: #159c8d;
-  font-size: var(--font-sm);
+  margin-bottom: 4px;
+  color: var(--color-primary);
+  font-size: var(--font-xs);
   font-weight: 700;
 }
 
 .page-heading h1 {
-  color: #17232a;
+  color: var(--color-text-primary);
   font-size: var(--font-title);
   font-weight: 700;
 }
@@ -647,27 +697,27 @@ onBeforeUnmount(stopLiveRefresh)
 .page-heading span {
   display: block;
   margin-top: 8px;
-  color: #8a969d;
+  color: var(--color-text-muted);
   font-size: var(--font-md);
 }
 
 .summary-strip {
   display: grid;
   margin-bottom: 16px;
-  border: 1px solid #e1e7ea;
-  border-radius: 7px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  background: #fff;
-  box-shadow: 0 5px 18px rgb(24 45 55 / 4%);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-card);
 }
 
 .summary-strip > div {
   display: flex;
-  min-height: 104px;
+  min-height: 88px;
   align-items: center;
   gap: 13px;
   padding: 16px 20px;
-  border-right: 1px solid #edf1f3;
+  border-right: 1px solid var(--color-border-light);
 }
 
 .summary-strip > div:last-child {
@@ -676,26 +726,26 @@ onBeforeUnmount(stopLiveRefresh)
 
 .summary-strip__icon {
   display: grid;
-  width: 46px;
-  height: 46px;
-  flex: 0 0 46px;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
   place-items: center;
   border-radius: 5px;
 }
 
 .summary-strip__icon--cyan {
-  color: #087d71;
-  background: #d9f7f1;
+  color: var(--color-primary);
+  background: var(--color-primary-soft);
 }
 
 .summary-strip__icon--green {
-  color: #16834a;
-  background: #def6e8;
+  color: var(--color-success);
+  background: #eaf7f0;
 }
 
 .summary-strip__icon--red {
-  color: #bd3f45;
-  background: #fde7e8;
+  color: var(--color-danger);
+  background: #fff0f1;
 }
 
 .summary-strip p,
@@ -717,9 +767,9 @@ onBeforeUnmount(stopLiveRefresh)
   gap: 12px;
   margin-bottom: 16px;
   padding: 12px 16px;
-  border: 1px solid #cce8e3;
-  border-radius: 7px;
-  background: #f7fbfa;
+  border: 1px solid #d9e4f5;
+  border-radius: var(--radius-card);
+  background: #f7faff;
 }
 
 .execution-environment--missing {
@@ -733,9 +783,9 @@ onBeforeUnmount(stopLiveRefresh)
   height: 46px;
   flex: 0 0 46px;
   place-items: center;
-  color: #087d71;
+  color: var(--color-primary);
   border-radius: 5px;
-  background: #d9f7f1;
+  background: var(--color-primary-soft);
 }
 
 .execution-environment__label {
@@ -750,14 +800,14 @@ onBeforeUnmount(stopLiveRefresh)
 }
 
 .execution-environment__label strong {
-  color: #344149;
+  color: var(--color-text-primary);
   font-size: var(--font-md);
 }
 
 .execution-environment__label span,
 .execution-environment__endpoint span {
   margin-top: 4px;
-  color: #8a969c;
+  color: var(--color-text-muted);
   font-size: var(--font-caption);
 }
 
@@ -773,7 +823,7 @@ onBeforeUnmount(stopLiveRefresh)
 
 .execution-environment__endpoint code {
   overflow: hidden;
-  color: #277c72;
+  color: #315fbd;
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: var(--font-xs);
   text-overflow: ellipsis;
@@ -782,38 +832,38 @@ onBeforeUnmount(stopLiveRefresh)
 
 .execution-environment__warning {
   flex: 1;
-  color: #ad6a12;
+  color: var(--color-warning);
   font-size: var(--font-sm);
 }
 
 .summary-strip p > span {
-  color: #8b979e;
+  color: var(--color-text-muted);
   font-size: var(--font-sm);
 }
 
 .summary-strip p > strong {
   margin-top: 4px;
-  color: #26343b;
+  color: var(--color-text-primary);
   font-size: var(--font-subtitle);
 }
 
 .script-panel {
   overflow: hidden;
-  border: 1px solid #e1e7ea;
-  border-radius: 7px;
-  background: #fff;
-  box-shadow: 0 5px 18px rgb(24 45 55 / 4%);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-card);
 }
 
 .toolbar {
   display: flex;
-  min-height: 80px;
+  min-height: 64px;
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
   padding: 12px 16px;
-  border-bottom: 1px solid #edf1f3;
+  border-bottom: 1px solid var(--color-border-light);
 }
 
 .toolbar__filters,
@@ -850,9 +900,9 @@ onBeforeUnmount(stopLiveRefresh)
   height: 44px;
   flex: 0 0 44px;
   place-items: center;
-  color: #108f82;
+  color: var(--color-primary);
   border-radius: 5px;
-  background: #e3f7f3;
+  background: var(--color-primary-soft);
 }
 
 .script-info > div {
@@ -860,7 +910,7 @@ onBeforeUnmount(stopLiveRefresh)
 }
 
 .script-info strong {
-  color: #2d3a41;
+  color: var(--color-text-primary);
   font-size: var(--font-md);
   font-weight: 650;
 }
@@ -869,7 +919,7 @@ onBeforeUnmount(stopLiveRefresh)
   display: -webkit-box;
   overflow: hidden;
   margin: 5px 0 7px;
-  color: #8c989f;
+  color: var(--color-text-muted);
   font-size: var(--font-sm);
   line-height: 1.5;
   -webkit-box-orient: vertical;
@@ -884,10 +934,10 @@ onBeforeUnmount(stopLiveRefresh)
 
 .script-tags span {
   padding: 2px 6px;
-  color: #66757d;
-  border: 1px solid #e2e8ea;
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
   border-radius: 3px;
-  background: #f7f9fa;
+  background: var(--color-bg-subtle);
   font-size: var(--font-caption);
 }
 
@@ -897,7 +947,7 @@ onBeforeUnmount(stopLiveRefresh)
   align-items: center;
   gap: 6px;
   margin: 0;
-  color: #64727a;
+  color: var(--color-text-secondary);
 }
 
 .path-info code {
@@ -912,7 +962,7 @@ onBeforeUnmount(stopLiveRefresh)
   display: block;
   overflow: hidden;
   margin-top: 7px;
-  color: #1c8e82;
+  color: #315fbd;
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: var(--font-xs);
   text-overflow: ellipsis;
@@ -925,14 +975,14 @@ onBeforeUnmount(stopLiveRefresh)
 }
 
 .last-run strong {
-  color: #5d6b73;
+  color: var(--color-text-secondary);
   font-size: var(--font-sm);
   font-weight: 600;
 }
 
 .last-run span {
   margin-top: 5px;
-  color: #9ba5aa;
+  color: var(--color-text-muted);
   font-size: var(--font-xs);
 }
 
@@ -948,36 +998,36 @@ onBeforeUnmount(stopLiveRefresh)
 
 .table-footer {
   display: flex;
-  min-height: 76px;
+  min-height: 60px;
   align-items: center;
   justify-content: space-between;
   gap: 18px;
   padding: 10px 16px;
-  border-top: 1px solid #edf1f3;
+  border-top: 1px solid var(--color-border-light);
 }
 
 .table-footer > span {
-  color: #909ba1;
+  color: var(--color-text-muted);
   font-size: var(--font-sm);
 }
 
 :deep(.el-table) {
-  --el-table-border-color: #edf1f3;
-  --el-table-header-bg-color: #fafbfb;
-  --el-table-row-hover-bg-color: #f7faf9;
-  color: #69777f;
+  --el-table-border-color: var(--color-border-light);
+  --el-table-header-bg-color: #f8faff;
+  --el-table-row-hover-bg-color: #f7f9fd;
+  color: var(--color-text-secondary);
   font-size: var(--font-sm);
 }
 
 :deep(.el-table th.el-table__cell) {
-  height: 58px;
-  color: #7c898f;
+  height: 46px;
+  color: #6b778c;
   font-size: var(--font-xs);
   font-weight: 650;
 }
 
 :deep(.el-table td.el-table__cell) {
-  height: 100px;
+  height: 88px;
 }
 
 @media (max-width: 1350px) {
@@ -1057,7 +1107,7 @@ onBeforeUnmount(stopLiveRefresh)
   .summary-strip > div {
     min-height: 70px;
     border-right: 0;
-    border-bottom: 1px solid #edf1f3;
+    border-bottom: 1px solid var(--color-border-light);
   }
 
   .summary-strip > div:last-child {

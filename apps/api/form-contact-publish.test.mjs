@@ -172,6 +172,13 @@ test('executes the form flow through headless Google Chrome UI with the environm
       sendJson(response, { code: 0, data: {} })
       return
     }
+    if (request.method === 'GET' && url.pathname === '/api/be/form/101') {
+      sendJson(response, {
+        code: 0,
+        data: { form: { id: 101, form_code: 'contact-dynamic' } },
+      })
+      return
+    }
     if (request.method === 'POST' && url.pathname === '/api/be/form/101/publish') {
       published = true
       sendJson(response, { code: 0, data: {} })
@@ -196,6 +203,8 @@ test('executes the form flow through headless Google Chrome UI with the environm
     })
 
     assert.equal(result.formId, '101')
+    assert.equal(result.formCode, 'contact-dynamic')
+    assert.equal(result.formContract.formCode, 'contact-dynamic')
     assert.equal(result.status, 'published')
     assert.equal(result.browser, 'chrome')
     assert.equal(result.headless, true)

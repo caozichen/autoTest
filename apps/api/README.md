@@ -1,7 +1,7 @@
 # Playwright Runner
 
 本地 Runner 只接受脚本注册表中的脚本 ID，不接受任意文件路径。它通过 Playwright
-Runner 执行已登记的 Playwright 脚本。三个内置表单脚本都会启动 Google Chrome 无头浏览器，访问目标页面并模拟真实用户操作。
+Runner 执行已登记的 Playwright 脚本。五个内置表单脚本都会启动 Google Chrome 无头浏览器，访问目标页面并模拟真实用户操作。
 
 ## 启动
 
@@ -27,6 +27,8 @@ Invoke-RestMethod http://127.0.0.1:4310/health
 
 - `form-all-fields-publish`
 - `form-all-fields-submit`
+- `form-lpxavn-submit`
+- `form-submission-reply-edit`
 - `form-contact-publish`
 
 脚本行为、运行依赖和真实数据副作用见根目录 README 的“已注册脚本”。

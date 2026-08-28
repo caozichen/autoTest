@@ -12,6 +12,8 @@ import type {
   RunScriptSnapshot,
   StartRunRecordDraft,
 } from '@/domain/run-record'
+import type { ScriptAssertionResult, ScriptAssertionStatus } from '@/domain/assertion'
+import type { ScriptApiResponse } from '@/domain/script'
 import type { RunRecordService } from './run-record-service'
 
 const STORAGE_KEY = 'autotest.run-records.v1'
@@ -24,6 +26,7 @@ const STATUS_VALUES: RunRecordStatus[] = ['running', 'passed', 'failed', 'partia
 const SCRIPT_STATUS_VALUES: RunScriptRecord['status'][] = ['queued', 'passed', 'failed', 'skipped']
 const LOG_LEVEL_VALUES: RunRecordLogLevel[] = ['info', 'success', 'warning', 'error']
 const LOG_SCOPE_VALUES: RunRecordLog['scope'][] = ['batch', 'login', 'runner', 'script']
+const ASSERTION_STATUS_VALUES: ScriptAssertionStatus[] = ['passed', 'failed']
 
 type IdFactory = () => string
 
@@ -54,6 +57,75 @@ function normalizeStoredLog(value: unknown): RunRecordLog | null {
   }
 }
 
+function normalizeStoredAssertion(value: unknown): ScriptAssertionResult | null {
+  if (!isRecord(value)) return null
+  if (
+    typeof value.sequence !== 'number' ||
+    !Number.isInteger(value.sequence) ||
+    value.sequence < 1 ||
+    typeof value.timestamp !== 'string' ||
+    !Number.isFinite(new Date(value.timestamp).getTime()) ||
+    typeof value.name !== 'string' ||
+    typeof value.module !== 'string' ||
+    typeof value.matcher !== 'string' ||
+    !ASSERTION_STATUS_VALUES.includes(value.status as ScriptAssertionStatus) ||
+    typeof value.durationMs !== 'number' ||
+    !Number.isFinite(value.durationMs) ||
+    value.durationMs < 0
+  ) return null
+
+  return {
+    sequence: value.sequence,
+    timestamp: value.timestamp,
+    name: value.name,
+    module: value.module,
+    matcher: value.matcher,
+    status: value.status as ScriptAssertionStatus,
+    durationMs: value.durationMs,
+    ...(typeof value.error === 'string' ? { error: value.error } : {}),
+  }
+}
+
+function normalizeStoredApiResponse(value: unknown): ScriptApiResponse | null {
+  if (!isRecord(value)) return null
+  if (
+    typeof value.sequence !== 'number' ||
+    !Number.isInteger(value.sequence) ||
+    value.sequence < 1 ||
+    typeof value.timestamp !== 'string' ||
+    !Number.isFinite(new Date(value.timestamp).getTime()) ||
+    typeof value.name !== 'string' ||
+    typeof value.method !== 'string' ||
+    typeof value.url !== 'string' ||
+    typeof value.status !== 'number' ||
+    !Number.isInteger(value.status) ||
+    value.status < 0 ||
+    value.status > 599 ||
+    typeof value.ok !== 'boolean' ||
+    typeof value.durationMs !== 'number' ||
+    !Number.isFinite(value.durationMs) ||
+    value.durationMs < 0
+  ) return null
+
+  return {
+    sequence: value.sequence,
+    timestamp: value.timestamp,
+    name: value.name,
+    method: value.method,
+    url: value.url,
+    status: value.status,
+    ok: value.ok,
+    durationMs: value.durationMs,
+    ...(Object.prototype.hasOwnProperty.call(value, 'requestBody')
+      ? { requestBody: structuredClone(value.requestBody) }
+      : {}),
+    ...(Object.prototype.hasOwnProperty.call(value, 'responseBody')
+      ? { responseBody: structuredClone(value.responseBody) }
+      : {}),
+    ...(typeof value.error === 'string' ? { error: value.error } : {}),
+  }
+}
+
 function normalizeStoredScript(value: unknown): RunScriptRecord | null {
   if (!isRecord(value) || !Array.isArray(value.tags) || !Array.isArray(value.logs)) return null
   if (
@@ -72,6 +144,16 @@ function normalizeStoredScript(value: unknown): RunScriptRecord | null {
   ) return null
 
   const logs = value.logs.map(normalizeStoredLog).filter((log): log is RunRecordLog => Boolean(log))
+  const assertions = Array.isArray(value.assertions)
+    ? value.assertions
+        .map(normalizeStoredAssertion)
+        .filter((assertion): assertion is ScriptAssertionResult => Boolean(assertion))
+    : []
+  const apiResponses = Array.isArray(value.apiResponses)
+    ? value.apiResponses
+        .map(normalizeStoredApiResponse)
+        .filter((response): response is ScriptApiResponse => Boolean(response))
+    : []
   return {
     recordId: value.recordId,
     id: value.id,
@@ -82,6 +164,8 @@ function normalizeStoredScript(value: unknown): RunScriptRecord | null {
     status: value.status as RunScriptRecord['status'],
     durationMs: value.durationMs as number | null,
     logs,
+    assertions,
+    apiResponses,
     ...(isRecord(value.output) ? { output: structuredClone(value.output) } : {}),
     ...(typeof value.error === 'string' ? { error: value.error } : {}),
   }
@@ -298,6 +382,8 @@ export class LocalRunRecordService implements RunRecordService {
       status: 'queued',
       durationMs: null,
       logs: [],
+      assertions: [],
+      apiResponses: [],
     }))
     const logs: RunRecordLog[] = [{
       id: this.idFactory(),
@@ -403,6 +489,33 @@ export class LocalRunRecordService implements RunRecordService {
     return structuredClone(record)
   }
 
+  async interrupt(id: string, reason: string): Promise<RunRecord> {
+    const { record, expectedRevision, expectedUpdatedAt } = this.runningDraft(id)
+    const finishedAt = this.now().toISOString()
+    const message = reason.trim() || '用户已强制停止运行批次'
+    record.status = 'interrupted'
+    record.failureStage = 'runner'
+    record.error = message
+    record.finishedAt = finishedAt
+    record.updatedAt = finishedAt
+    record.revision += 1
+    record.durationMs = durationBetween(record.startedAt, finishedAt)
+    record.scripts = record.scripts.map((script) => script.status === 'queued'
+      ? { ...script, status: 'skipped' }
+      : script)
+    record.logs.push({
+      id: this.idFactory(),
+      timestamp: finishedAt,
+      level: 'warning',
+      scope: 'runner',
+      message,
+    })
+    record.counts = createCounts(record.scripts)
+    record.analysis = createAnalysis(record.scripts, record.logs)
+    this.replaceRecord(record, expectedRevision, expectedUpdatedAt)
+    return structuredClone(record)
+  }
+
   async interruptByScriptId(scriptId: string): Promise<RunRecord[]> {
     this.refreshFromStorage()
     const base = this.readPersistedRecords() ?? this.records
@@ -473,6 +586,24 @@ export class LocalRunRecordService implements RunRecordService {
     })
     const output = redactDetails(completion.output, secretValues)
     const error = completion.error ? replaceSecrets(completion.error, secretValues) : undefined
+    const assertions = (completion.assertions ?? []).map((assertion) => ({
+      ...assertion,
+      name: replaceSecrets(assertion.name, secretValues),
+      module: replaceSecrets(assertion.module, secretValues),
+      ...(assertion.error ? { error: replaceSecrets(assertion.error, secretValues) } : {}),
+    }))
+    const apiResponses = (completion.apiResponses ?? []).map((response) => ({
+      ...response,
+      name: replaceSecrets(response.name, secretValues),
+      url: replaceSecrets(response.url, secretValues),
+      ...(Object.prototype.hasOwnProperty.call(response, 'requestBody')
+        ? { requestBody: redactValue(response.requestBody, secretValues) }
+        : {}),
+      ...(Object.prototype.hasOwnProperty.call(response, 'responseBody')
+        ? { responseBody: redactValue(response.responseBody, secretValues) }
+        : {}),
+      ...(response.error ? { error: replaceSecrets(response.error, secretValues) } : {}),
+    }))
     const status = completion.status ?? (completion.ok === true ? 'passed' : 'failed')
 
     return {
@@ -480,6 +611,8 @@ export class LocalRunRecordService implements RunRecordService {
       status,
       durationMs: status === 'skipped' ? null : Math.max(0, completion.durationMs),
       logs,
+      assertions,
+      apiResponses,
       ...(output ? { output } : {}),
       ...(error ? { error } : {}),
     }

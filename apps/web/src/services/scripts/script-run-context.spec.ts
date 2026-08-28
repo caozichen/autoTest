@@ -30,6 +30,7 @@ function environment(): TestEnvironment {
       method: 'POST',
       timeoutMs: 45_000,
       loginPath: '/be/login/mobile',
+      requestBody: '{"mobile":"13800000000","verify_code":"123456"}',
       username: '',
       password: '',
       mobile: '13800000000',

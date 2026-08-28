@@ -465,7 +465,7 @@ async function submit(): Promise<void> {
 .basic-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.35fr) minmax(260px, 0.65fr);
-  gap: 0 20px;
+  gap: 0 16px;
 }
 
 :deep(.el-select) {
@@ -489,7 +489,7 @@ async function submit(): Promise<void> {
 }
 
 .option-row code {
-  color: #7a898f;
+  color: var(--color-text-muted, #94a3b8);
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: var(--font-caption);
 }
@@ -506,15 +506,15 @@ async function submit(): Promise<void> {
 .select-empty {
   display: block;
   padding: 10px;
-  color: #849198;
+  color: var(--color-text-muted, #94a3b8);
   font-size: var(--font-sm);
   text-align: center;
 }
 
 .pipeline-section {
   margin-top: 4px;
-  padding-top: 22px;
-  border-top: 1px solid #e4eaec;
+  padding-top: 18px;
+  border-top: 1px solid var(--color-border-light, #eef2f7);
 }
 
 .section-heading,
@@ -530,13 +530,13 @@ async function submit(): Promise<void> {
 
 .section-heading h3 {
   margin: 0;
-  color: #26343b;
+  color: var(--color-text-primary, #1f2a44);
   font-size: var(--font-lg);
-  font-weight: 700;
+  font-weight: 650;
 }
 
 .section-heading span {
-  color: #78868d;
+  color: var(--color-text-secondary, #64748b);
   font-size: var(--font-sm);
 }
 
@@ -544,43 +544,45 @@ async function submit(): Promise<void> {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;
-  margin-top: 14px;
-  padding: 13px;
-  border: 1px solid #dfe8e8;
-  border-left: 3px solid #1aa898;
-  background: #f7faf9;
+  margin-top: 12px;
+  padding: 11px 12px;
+  border: 1px solid var(--color-border, #e5ebf3);
+  border-left: 3px solid var(--color-primary, #2563eb);
+  border-radius: 5px;
+  background: var(--color-primary-soft, #eff6ff);
 }
 
 .step-list {
   display: grid;
-  gap: 12px;
-  margin-top: 16px;
+  gap: 10px;
+  margin-top: 12px;
 }
 
 .step-card {
   overflow: hidden;
-  border: 1px solid #dfe6e8;
-  border-radius: 6px;
-  background: #fff;
+  border: 1px solid var(--color-border, #e5ebf3);
+  border-radius: min(var(--radius-card, 6px), 8px);
+  background: var(--color-surface, #fff);
+  box-shadow: 0 1px 2px rgb(15 23 42 / 4%);
 }
 
 .step-card__main {
   display: grid;
   grid-template-columns: 58px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 14px;
-  padding: 15px 16px;
+  gap: 12px;
+  padding: 12px 14px;
 }
 
 .step-order {
   display: grid;
-  width: 46px;
-  height: 46px;
+  width: 42px;
+  height: 42px;
   place-items: center;
-  color: #b9dcd7;
-  border: 1px solid #34535a;
+  color: var(--color-primary, #2563eb);
+  border: 1px solid #bfdbfe;
   border-radius: 5px;
-  background: #1b2c33;
+  background: var(--color-primary-soft, #eff6ff);
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: var(--font-md);
   font-weight: 700;
@@ -595,7 +597,7 @@ async function submit(): Promise<void> {
 }
 
 .step-script .field-label {
-  color: #526168;
+  color: var(--color-text-primary, #1f2a44);
   font-size: var(--font-sm);
   font-weight: 650;
 }
@@ -603,7 +605,7 @@ async function submit(): Promise<void> {
 .step-script small {
   grid-column: 2;
   overflow: hidden;
-  color: #829097;
+  color: var(--color-text-muted, #94a3b8);
   font-size: var(--font-caption);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -611,21 +613,21 @@ async function submit(): Promise<void> {
 
 .step-actions {
   display: grid;
-  grid-template-columns: repeat(3, 40px);
-  gap: 7px;
+  grid-template-columns: repeat(3, 34px);
+  gap: 6px;
 }
 
 .step-actions :deep(.el-button) {
-  width: 40px;
-  height: 40px;
+  width: 34px;
+  height: 34px;
   margin: 0;
   padding: 0;
 }
 
 .mapping-section {
-  padding: 13px 16px 15px 88px;
-  border-top: 1px solid #edf1f2;
-  background: #fafcfc;
+  padding: 11px 14px 13px 80px;
+  border-top: 1px solid var(--color-border-light, #eef2f7);
+  background: var(--color-bg-subtle, #f8fafc);
 }
 
 .mapping-heading {
@@ -633,12 +635,12 @@ async function submit(): Promise<void> {
 }
 
 .mapping-heading strong {
-  color: #45545b;
+  color: var(--color-text-primary, #1f2a44);
   font-size: var(--font-sm);
 }
 
 .mapping-heading span {
-  color: #87949a;
+  color: var(--color-text-muted, #94a3b8);
   font-size: var(--font-caption);
 }
 
@@ -658,12 +660,12 @@ async function submit(): Promise<void> {
 
 .mapping-list__head {
   padding: 0 0 7px;
-  color: #75838a;
+  color: var(--color-text-secondary, #64748b);
   font-size: var(--font-caption);
 }
 
 .mapping-row + .mapping-row {
-  margin-top: 9px;
+  margin-top: 8px;
 }
 
 .mapping-row :deep(.el-button) {
@@ -673,7 +675,7 @@ async function submit(): Promise<void> {
 }
 
 .dialog-footer > span {
-  color: #76848b;
+  color: var(--color-text-secondary, #64748b);
   font-size: var(--font-sm);
 }
 
@@ -740,19 +742,42 @@ async function submit(): Promise<void> {
 
 <style>
 .automation-pipeline-dialog {
+  --el-color-primary: var(--color-primary, #2563eb);
   display: flex;
   width: min(1120px, calc(100vw - 32px));
   max-width: 1280px;
   max-height: calc(100dvh - 32px);
   flex-direction: column;
   margin: 16px auto;
-  border-radius: 7px;
+  overflow: hidden;
+  border: 1px solid var(--color-border, #e5ebf3);
+  border-radius: min(var(--radius-card, 6px), 8px);
+  background: var(--color-surface, #fff);
+  box-shadow: var(--shadow-card, 0 10px 30px rgb(15 23 42 / 10%));
+}
+
+.automation-pipeline-dialog .el-dialog__header {
+  margin: 0;
+  padding: 16px 20px 14px;
+  border-bottom: 1px solid var(--color-border-light, #eef2f7);
+}
+
+.automation-pipeline-dialog .el-dialog__title {
+  color: var(--color-text-primary, #1f2a44);
+  font-weight: 650;
 }
 
 .automation-pipeline-dialog .el-dialog__body {
   min-height: 0;
   overflow-y: auto;
-  padding-top: 10px;
+  padding: 14px 20px 16px;
+  color: var(--color-text-primary, #1f2a44);
+}
+
+.automation-pipeline-dialog .el-dialog__footer {
+  padding: 12px 20px;
+  border-top: 1px solid var(--color-border-light, #eef2f7);
+  background: var(--color-bg-subtle, #f8fafc);
 }
 
 @media (min-width: 1920px) {

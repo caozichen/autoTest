@@ -6,7 +6,7 @@ export interface EnvironmentLoginResult {
   targetUrl: string
   durationMs: number
   receivedAt: string
-  requestBody: Record<string, string>
+  requestBody: Record<string, unknown>
   responseBody: unknown
   rawResponse: string
   responseHeaders: Record<string, string>

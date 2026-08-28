@@ -18,7 +18,11 @@ import { ElMessage } from 'element-plus'
 import EnvironmentEditorDialog from '@/components/EnvironmentEditorDialog.vue'
 import EnvironmentLoginResultDialog from '@/components/EnvironmentLoginResultDialog.vue'
 import type { EnvironmentLoginResult, ResponseVariableBinding } from '@/domain/environment-login'
-import type { EnvironmentDraft, TestEnvironment } from '@/domain/environment'
+import {
+  cloneEnvironmentDraft,
+  type EnvironmentDraft,
+  type TestEnvironment,
+} from '@/domain/environment'
 import type { RuntimeVariable } from '@/domain/runtime-variable'
 import { services } from '@/services/container'
 import { applyResponseVariable as applyLoginResponseVariable } from '@/services/environments/apply-response-variable'
@@ -30,6 +34,7 @@ const statusFilter = ref<'all' | 'enabled' | 'disabled'>('all')
 const currentPage = ref(1)
 const pageSize = 6
 const editorVisible = ref(false)
+const editorSaving = ref(false)
 const editingEnvironment = ref<TestEnvironment | null>(null)
 const loginTestingId = ref('')
 const loginResultVisible = ref(false)
@@ -84,6 +89,8 @@ function openEdit(environment: TestEnvironment): void {
 }
 
 async function saveEnvironment(draft: EnvironmentDraft): Promise<void> {
+  if (editorSaving.value) return
+  editorSaving.value = true
   try {
     if (editingEnvironment.value) {
       await services.environments.update(editingEnvironment.value.id, draft)
@@ -96,6 +103,8 @@ async function saveEnvironment(draft: EnvironmentDraft): Promise<void> {
     await loadEnvironments()
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '环境保存失败')
+  } finally {
+    editorSaving.value = false
   }
 }
 
@@ -170,21 +179,9 @@ async function applyResponseVariable(binding: ResponseVariableBinding): Promise<
     return
   }
 
-  const draft: EnvironmentDraft = {
-    name: environment.name,
-    code: environment.code,
-    description: environment.description,
-    baseUrl: environment.baseUrl,
-    apiBaseUrl: environment.apiBaseUrl,
-    ignoreHTTPSErrors: environment.ignoreHTTPSErrors,
-    enabled: environment.enabled,
-    auth: {
-      ...structuredClone(environment.auth),
-      tokenVariable: binding.variableName.trim(),
-      tokenPath: binding.responsePath.trim(),
-    },
-    variables: structuredClone(environment.variables),
-  }
+  const draft = cloneEnvironmentDraft(environment)
+  draft.auth.tokenVariable = binding.variableName.trim()
+  draft.auth.tokenPath = binding.responsePath.trim()
 
   try {
     const updated = await services.environments.update(environment.id, draft)
@@ -355,7 +352,12 @@ onMounted(() => loadEnvironments())
       </footer>
     </section>
 
-    <EnvironmentEditorDialog v-model="editorVisible" :environment="editingEnvironment" @save="saveEnvironment" />
+    <EnvironmentEditorDialog
+      v-model="editorVisible"
+      :environment="editingEnvironment"
+      :saving="editorSaving"
+      @save="saveEnvironment"
+    />
     <EnvironmentLoginResultDialog
       v-model="loginResultVisible"
       :environment="loginResultEnvironment"
@@ -376,7 +378,7 @@ onMounted(() => loadEnvironments())
   align-items: flex-end;
   justify-content: space-between;
   gap: 24px;
-  margin-bottom: 24px;
+  margin-bottom: 18px;
 }
 
 .page-heading p,
@@ -386,14 +388,14 @@ onMounted(() => loadEnvironments())
 }
 
 .page-heading p {
-  margin-bottom: 5px;
-  color: #159c8d;
-  font-size: var(--font-sm);
+  margin-bottom: 4px;
+  color: var(--color-primary);
+  font-size: var(--font-xs);
   font-weight: 700;
 }
 
 .page-heading h1 {
-  color: #17232a;
+  color: var(--color-text-primary);
   font-size: var(--font-title);
   font-weight: 700;
 }
@@ -401,32 +403,33 @@ onMounted(() => loadEnvironments())
 .page-heading span {
   display: block;
   margin-top: 8px;
-  color: #8a969d;
+  color: var(--color-text-muted);
   font-size: var(--font-md);
 }
 
 .current-environment {
   display: flex;
-  min-height: 112px;
+  min-height: 96px;
   align-items: center;
   gap: 15px;
   margin-bottom: 16px;
   padding: 16px 20px;
-  color: #e8f7f4;
-  border-radius: 7px;
-  background: #17252d;
-  box-shadow: 0 8px 24px rgb(20 38 46 / 12%);
+  color: var(--color-text-primary);
+  border: 1px solid #d9e4f5;
+  border-radius: var(--radius-card);
+  background: #f7faff;
+  box-shadow: 0 8px 24px rgb(31 42 68 / 3%);
 }
 
 .current-environment__icon {
   display: grid;
-  width: 56px;
-  height: 56px;
-  flex: 0 0 56px;
+  width: 48px;
+  height: 48px;
+  flex: 0 0 48px;
   place-items: center;
-  color: #0a3932;
+  color: var(--color-primary);
   border-radius: 6px;
-  background: #37d5be;
+  background: var(--color-primary-soft);
 }
 
 .current-environment__main {
@@ -442,19 +445,19 @@ onMounted(() => loadEnvironments())
 }
 
 .current-environment__main p span {
-  color: #82949e;
+  color: var(--color-text-muted);
   font-size: var(--font-xs);
 }
 
 .current-environment__main strong {
-  color: #fff;
+  color: var(--color-text-primary);
   font-size: var(--font-lg);
 }
 
 .current-environment__main code {
   padding: 3px 6px;
-  color: #60dcca;
-  border: 1px solid rgb(96 220 202 / 20%);
+  color: var(--color-primary);
+  border: 1px solid #d4e1fa;
   border-radius: 3px;
   font-size: var(--font-caption);
 }
@@ -463,7 +466,7 @@ onMounted(() => loadEnvironments())
   display: block;
   overflow: hidden;
   margin-top: 7px;
-  color: #94a5ad;
+  color: var(--color-text-muted);
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: var(--font-sm);
   text-overflow: ellipsis;
@@ -481,26 +484,27 @@ onMounted(() => loadEnvironments())
   align-items: center;
   gap: 7px;
   padding: 9px 10px;
-  color: #acbbc2;
-  border: 1px solid rgb(255 255 255 / 8%);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
   border-radius: 5px;
-  background: rgb(255 255 255 / 3%);
+  background: var(--color-surface);
   font-size: var(--font-xs);
 }
 
 .summary-strip {
   display: grid;
   margin-bottom: 16px;
-  border: 1px solid #e1e7ea;
-  border-radius: 7px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  background: #fff;
+  background: var(--color-surface);
+  box-shadow: var(--shadow-card);
 }
 
 .summary-strip div {
-  min-height: 86px;
+  min-height: 78px;
   padding: 16px 22px;
-  border-right: 1px solid #edf1f3;
+  border-right: 1px solid var(--color-border-light);
 }
 
 .summary-strip div:last-child {
@@ -513,22 +517,22 @@ onMounted(() => loadEnvironments())
 }
 
 .summary-strip span {
-  color: #8b979e;
+  color: var(--color-text-muted);
   font-size: var(--font-xs);
 }
 
 .summary-strip strong {
   margin-top: 4px;
-  color: #26343b;
+  color: var(--color-text-primary);
   font-size: var(--font-subtitle);
 }
 
 .environment-panel {
   overflow: hidden;
-  border: 1px solid #e1e7ea;
-  border-radius: 7px;
-  background: #fff;
-  box-shadow: 0 5px 18px rgb(24 45 55 / 4%);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-card);
 }
 
 .toolbar,
@@ -540,12 +544,12 @@ onMounted(() => loadEnvironments())
 }
 
 .toolbar {
-  min-height: 80px;
+  min-height: 64px;
   flex-wrap: wrap;
   justify-content: space-between;
   gap: 16px;
   padding: 12px 16px;
-  border-bottom: 1px solid #edf1f3;
+  border-bottom: 1px solid var(--color-border-light);
 }
 
 .toolbar__filters {
@@ -577,16 +581,16 @@ onMounted(() => loadEnvironments())
   height: 44px;
   flex: 0 0 44px;
   place-items: center;
-  color: #66747c;
+  color: var(--color-text-secondary);
   border-radius: 5px;
-  background: #edf1f3;
+  background: var(--color-bg-subtle);
   font-size: var(--font-xs);
   font-weight: 700;
 }
 
 .environment-info__mark--active {
-  color: #087b70;
-  background: #d8f5ef;
+  color: var(--color-primary);
+  background: var(--color-primary-soft);
 }
 
 .environment-info > div {
@@ -601,7 +605,7 @@ onMounted(() => loadEnvironments())
 }
 
 .environment-info strong {
-  color: #2d3a41;
+  color: var(--color-text-primary);
   font-size: var(--font-md);
 }
 
@@ -609,7 +613,7 @@ onMounted(() => loadEnvironments())
   display: block;
   overflow: hidden;
   margin-top: 6px;
-  color: #8e9aa0;
+  color: var(--color-text-muted);
   font-size: var(--font-xs);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -626,7 +630,7 @@ onMounted(() => loadEnvironments())
 }
 
 .endpoint-info code {
-  color: #28786f;
+  color: #315fbd;
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: var(--font-xs);
 }
@@ -634,12 +638,12 @@ onMounted(() => loadEnvironments())
 .endpoint-info span,
 .token-info span {
   margin-top: 6px;
-  color: #939ea4;
+  color: var(--color-text-muted);
   font-size: var(--font-xs);
 }
 
 .token-info strong {
-  color: #58666e;
+  color: var(--color-text-secondary);
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: var(--font-xs);
 }
@@ -649,9 +653,9 @@ onMounted(() => loadEnvironments())
   width: 36px;
   height: 30px;
   place-items: center;
-  color: #5c6b72;
+  color: var(--color-text-secondary);
   border-radius: 4px;
-  background: #edf2f3;
+  background: var(--color-bg-subtle);
   font-size: var(--font-xs);
   font-weight: 600;
 }
@@ -667,35 +671,35 @@ onMounted(() => loadEnvironments())
 }
 
 .table-footer {
-  min-height: 76px;
+  min-height: 60px;
   justify-content: space-between;
   gap: 16px;
   padding: 10px 16px;
-  border-top: 1px solid #edf1f3;
+  border-top: 1px solid var(--color-border-light);
 }
 
 .table-footer > span {
-  color: #89959c;
+  color: var(--color-text-muted);
   font-size: var(--font-sm);
 }
 
 :deep(.el-table) {
-  --el-table-border-color: #edf1f3;
-  --el-table-header-bg-color: #fafbfb;
-  --el-table-row-hover-bg-color: #f7faf9;
-  color: #69777f;
+  --el-table-border-color: var(--color-border-light);
+  --el-table-header-bg-color: #f8faff;
+  --el-table-row-hover-bg-color: #f7f9fd;
+  color: var(--color-text-secondary);
   font-size: var(--font-sm);
 }
 
 :deep(.el-table th.el-table__cell) {
-  height: 58px;
-  color: #7c898f;
+  height: 46px;
+  color: #6b778c;
   font-size: var(--font-xs);
   font-weight: 650;
 }
 
 :deep(.el-table td.el-table__cell) {
-  height: 94px;
+  height: 82px;
 }
 
 @media (max-width: 1350px) {
@@ -739,7 +743,7 @@ onMounted(() => loadEnvironments())
 
   .summary-strip div {
     border-right: 0;
-    border-bottom: 1px solid #edf1f3;
+    border-bottom: 1px solid var(--color-border-light);
   }
 
   .summary-strip div:last-child {

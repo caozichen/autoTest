@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Clock, DataAnalysis, Files, Monitor, Operation, SetUp } from '@element-plus/icons-vue'
+import { Clock, DataAnalysis, Files, Monitor, Operation, Setting, SetUp } from '@element-plus/icons-vue'
 
 defineProps<{
   compact?: boolean
@@ -36,6 +36,11 @@ defineProps<{
         <el-icon :size="19"><Clock /></el-icon>
         <span v-if="!compact">运行记录</span>
       </RouterLink>
+      <p v-if="!compact" class="nav__caption nav__caption--section">系统设置</p>
+      <RouterLink class="nav__item" active-class="nav__item--active" to="/settings">
+        <el-icon :size="19"><Setting /></el-icon>
+        <span v-if="!compact">Runner 管理</span>
+      </RouterLink>
     </nav>
 
     <div class="sidebar-status" :class="{ 'sidebar-status--compact': compact }">
@@ -51,105 +56,124 @@ defineProps<{
 <style scoped>
 .app-sidebar {
   display: flex;
-  width: 260px;
+  width: 220px;
   min-height: 100%;
   flex-direction: column;
-  color: #dfe7ec;
-  background: #111820;
+  color: var(--color-text-secondary);
+  border-right: 1px solid var(--color-border-light);
+  background: var(--color-surface);
+  box-shadow: 2px 0 8px rgb(31 42 68 / 3%);
   transition: width 180ms ease;
 }
 
 .app-sidebar--compact {
-  width: 84px;
+  width: 68px;
 }
 
 .brand {
   display: flex;
-  height: 78px;
+  height: 60px;
   align-items: center;
-  gap: 11px;
-  padding: 0 22px;
-  border-bottom: 1px solid rgb(255 255 255 / 8%);
+  gap: 9px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--color-border-light);
 }
 
 .brand__mark {
   display: grid;
-  width: 42px;
-  height: 42px;
-  flex: 0 0 42px;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
   place-items: center;
-  color: #081513;
+  color: #fff;
   border-radius: 6px;
-  background: #27d6bf;
-  box-shadow: 0 0 24px rgb(39 214 191 / 22%);
+  background: var(--color-primary);
 }
 
 .brand__name {
-  color: #fff;
+  color: var(--color-text-primary);
   font-size: var(--font-brand);
-  font-weight: 700;
+  font-weight: 750;
 }
 
 .nav {
   flex: 1;
-  padding: 22px 12px;
+  padding: 14px 8px;
 }
 
 .nav__caption {
-  margin: 0 10px 10px;
-  color: #72808c;
-  font-size: var(--font-md);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 8px 8px;
+  color: var(--color-text-secondary);
+  font-size: var(--font-xs);
+  font-weight: 650;
+}
+
+.nav__caption::after {
+  height: 1px;
+  flex: 1;
+  background: var(--color-border-light);
+  content: '';
 }
 
 .nav__caption--section {
-  margin-top: 24px;
+  margin-top: 18px;
 }
 
 .nav__item {
   display: flex;
-  min-height: 54px;
+  min-height: 40px;
   align-items: center;
-  gap: 14px;
-  padding: 0 16px;
-  font-size: var(--font-base);
-  color: #9eabb5;
-  border-radius: 6px;
+  gap: 11px;
+  margin-bottom: 4px;
+  padding: 0 14px;
+  color: var(--color-text-secondary);
+  border-radius: 4px;
+  font-size: var(--font-md);
   text-decoration: none;
+  transition: color 150ms ease, background 150ms ease;
+}
+
+.nav__item:hover {
+  color: var(--color-primary);
+  background: #f7f9fd;
 }
 
 .nav__item--active {
-  color: #fff;
-  background: #1c2932;
-  box-shadow: inset 3px 0 #27d6bf;
+  color: var(--color-primary);
+  background: rgb(37 99 235 / 8%);
+  font-weight: 600;
 }
 
 .sidebar-status {
   display: flex;
-  min-height: 92px;
+  min-height: 64px;
   align-items: center;
-  gap: 11px;
-  margin: 12px;
-  padding: 14px;
-  border: 1px solid rgb(255 255 255 / 8%);
+  gap: 10px;
+  margin: 8px;
+  padding: 10px;
+  border: 1px solid var(--color-border);
   border-radius: 6px;
-  background: #17212a;
+  background: var(--color-bg-subtle);
 }
 
 .sidebar-status--compact {
-  min-height: 58px;
+  min-height: 52px;
   justify-content: center;
   padding: 0;
 }
 
 .sidebar-status__icon {
   display: grid;
-  width: 34px;
-  height: 34px;
-  flex: 0 0 34px;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
   place-items: center;
-  color: #55d6c5;
+  color: var(--color-primary);
   border-radius: 5px;
-  background: rgb(85 214 197 / 10%);
+  background: var(--color-primary-soft);
 }
 
 .sidebar-status strong,
@@ -158,14 +182,14 @@ defineProps<{
 }
 
 .sidebar-status strong {
-  color: #edf6f3;
-  font-size: var(--font-md);
+  color: var(--color-text-primary);
+  font-size: var(--font-sm);
   font-weight: 600;
 }
 
 .sidebar-status span {
-  margin-top: 3px;
-  color: #768691;
-  font-size: var(--font-sm);
+  margin-top: 2px;
+  color: var(--color-text-muted);
+  font-size: var(--font-caption);
 }
 </style>

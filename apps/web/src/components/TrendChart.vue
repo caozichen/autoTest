@@ -22,34 +22,34 @@ function renderChart(): void {
   chart ??= init(chartElement.value)
   chart.setOption({
     animationDuration: 450,
-    color: ['#16b8a6', '#e2575d'],
+    color: ['#2563eb', '#e2555d'],
     tooltip: {
       trigger: 'axis',
-      backgroundColor: '#172129',
+      backgroundColor: '#1f2a44',
       borderWidth: 0,
-      textStyle: { color: '#fff', fontSize: 16 },
+      textStyle: { color: '#fff', fontSize: 12 },
     },
     legend: {
       top: 0,
       right: 0,
       itemWidth: 12,
       itemHeight: 3,
-      textStyle: { color: '#76838b', fontSize: 16 },
+      textStyle: { color: '#64748b', fontSize: 12 },
     },
     grid: { left: 8, right: 8, top: 42, bottom: 4, containLabel: true },
     xAxis: {
       type: 'category',
       boundaryGap: false,
       data: props.data.map((item) => item.date),
-      axisLine: { lineStyle: { color: '#dce3e6' } },
+      axisLine: { lineStyle: { color: '#dfe6f0' } },
       axisTick: { show: false },
-      axisLabel: { color: '#8b979e', fontSize: 15 },
+      axisLabel: { color: '#86909c', fontSize: 12 },
     },
     yAxis: {
       type: 'value',
       splitNumber: 4,
-      axisLabel: { color: '#9aa5ab', fontSize: 15 },
-      splitLine: { lineStyle: { color: '#edf1f3' } },
+      axisLabel: { color: '#86909c', fontSize: 12 },
+      splitLine: { lineStyle: { color: '#edf1f7' } },
     },
     series: [
       {
@@ -58,7 +58,7 @@ function renderChart(): void {
         smooth: true,
         showSymbol: false,
         lineStyle: { width: 3 },
-        areaStyle: { color: 'rgba(22, 184, 166, 0.08)' },
+        areaStyle: { color: 'rgba(37, 99, 235, 0.08)' },
         data: props.data.map((item) => item.passed),
       },
       {
@@ -97,6 +97,6 @@ onBeforeUnmount(() => {
 <style scoped>
 .trend-chart {
   width: 100%;
-  height: 340px;
+  height: 300px;
 }
 </style>

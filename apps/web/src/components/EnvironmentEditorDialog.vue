@@ -3,11 +3,18 @@ import { computed, reactive, ref, watch } from 'vue'
 import { Delete, Plus } from '@element-plus/icons-vue'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 
-import type { EnvironmentDraft, TestEnvironment } from '@/domain/environment'
+import {
+  cloneEnvironmentDraft,
+  formatEnvironmentRequestBody,
+  parseEnvironmentRequestBody,
+  type EnvironmentDraft,
+  type TestEnvironment,
+} from '@/domain/environment'
 
 const props = defineProps<{
   modelValue: boolean
   environment: TestEnvironment | null
+  saving?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -33,6 +40,10 @@ function emptyDraft(): EnvironmentDraft {
       method: 'POST',
       timeoutMs: 30_000,
       loginPath: '/api/auth/login',
+      requestBody: formatEnvironmentRequestBody({
+        mobile: '',
+        verify_code: '',
+      }),
       username: '',
       password: '',
       mobile: '',
@@ -53,6 +64,11 @@ const loginUrlPreview = computed(() => {
   if (!form.apiBaseUrl.trim() || !form.auth.loginPath.trim()) return '请填写 API 基址和登录路径'
   return `${form.apiBaseUrl.replace(/\/+$/, '')}/${form.auth.loginPath.replace(/^\/+/, '')}`
 })
+const requestBodyPlaceholder = computed(() => formatEnvironmentRequestBody(
+  form.auth.mode === 'mobile-code'
+    ? { mobile: '13671153204', verify_code: '666666' }
+    : { username: 'test-user', password: 'password' },
+))
 const rules: FormRules<EnvironmentDraft> = {
   name: [
     { required: true, message: '请输入环境名称', trigger: 'blur' },
@@ -77,19 +93,7 @@ watch(
   () => [props.modelValue, props.environment] as const,
   ([visible, environment]) => {
     if (!visible) return
-    const source: EnvironmentDraft = environment
-      ? {
-          name: environment.name,
-          code: environment.code,
-          description: environment.description,
-          baseUrl: environment.baseUrl,
-          apiBaseUrl: environment.apiBaseUrl,
-          ignoreHTTPSErrors: environment.ignoreHTTPSErrors,
-          enabled: environment.enabled,
-          auth: structuredClone(environment.auth),
-          variables: structuredClone(environment.variables),
-        }
-      : emptyDraft()
+    const source = environment ? cloneEnvironmentDraft(environment) : emptyDraft()
     Object.assign(form, source)
     activeTab.value = 'basic'
     formRef.value?.clearValidate()
@@ -125,12 +129,12 @@ async function submit(): Promise<void> {
     return
   }
 
-  const credentials = form.auth.mode === 'mobile-code'
-    ? [form.auth.mobile, form.auth.verifyCode]
-    : [form.auth.username, form.auth.password]
-  if (credentials.some((value) => !value.trim())) {
+  let requestBody
+  try {
+    requestBody = parseEnvironmentRequestBody(form.auth.requestBody)
+  } catch (error) {
     activeTab.value = 'auth'
-    ElMessage.warning(form.auth.mode === 'mobile-code' ? '请填写手机号和验证码' : '请填写登录账号和密码')
+    ElMessage.warning(error instanceof Error ? error.message : '请求体必须是合法的 JSON 对象')
     return
   }
 
@@ -154,7 +158,8 @@ async function submit(): Promise<void> {
     return
   }
 
-  const draft = structuredClone(form)
+  const draft = cloneEnvironmentDraft(form)
+  draft.auth.requestBody = formatEnvironmentRequestBody(requestBody)
   if (draft.auth.mode === 'mobile-code') {
     draft.auth.username = ''
     draft.auth.password = ''
@@ -173,6 +178,8 @@ async function submit(): Promise<void> {
     width="920px"
     class="environment-dialog"
     destroy-on-close
+    :show-close="!saving"
+    :close-on-press-escape="!saving"
     :close-on-click-modal="false"
     @update:model-value="emit('update:modelValue', $event)"
   >
@@ -214,7 +221,7 @@ async function submit(): Promise<void> {
 
         <el-tab-pane label="登录与 Token" name="auth">
           <div class="auth-hint">
-            登录凭据仅保存在当前浏览器本地；测试登录的响应只在本次弹窗中展示，不会写入本地存储。
+            编辑后的登录凭据保存在当前浏览器本地；测试登录的响应只在本次弹窗中展示，不会写入本地存储。
           </div>
           <div class="form-grid">
             <el-form-item label="登录方式">
@@ -238,26 +245,17 @@ async function submit(): Promise<void> {
             <el-input v-model="form.auth.loginPath" placeholder="/be/login/mobile" />
             <code class="login-url-preview">{{ loginUrlPreview }}</code>
           </el-form-item>
-          <div v-if="form.auth.mode === 'mobile-code'" class="form-grid">
-            <el-form-item label="手机号">
-              <el-input v-model="form.auth.mobile" autocomplete="tel" placeholder="请输入登录手机号">
-                <template #prepend>mobile</template>
-              </el-input>
-            </el-form-item>
-            <el-form-item label="验证码">
-              <el-input v-model="form.auth.verifyCode" autocomplete="one-time-code" placeholder="请输入当前验证码">
-                <template #prepend>verify_code</template>
-              </el-input>
-            </el-form-item>
-          </div>
-          <div v-else class="form-grid">
-            <el-form-item label="登录账号">
-              <el-input v-model="form.auth.username" autocomplete="off" placeholder="自动化测试账号" />
-            </el-form-item>
-            <el-form-item label="登录密码">
-              <el-input v-model="form.auth.password" type="password" autocomplete="new-password" placeholder="测试账号密码" show-password />
-            </el-form-item>
-          </div>
+          <el-form-item label="请求体（JSON）">
+            <el-input
+              v-model="form.auth.requestBody"
+              class="request-body-editor"
+              type="textarea"
+              :rows="8"
+              resize="vertical"
+              :spellcheck="false"
+              :placeholder="requestBodyPlaceholder"
+            />
+          </el-form-item>
           <div class="form-grid">
             <el-form-item label="登录成功判定路径（可选）">
               <el-input v-model="form.auth.successPath" placeholder="code" />
@@ -314,8 +312,8 @@ async function submit(): Promise<void> {
     </el-form>
 
     <template #footer>
-      <el-button @click="emit('update:modelValue', false)">取消</el-button>
-      <el-button type="primary" @click="submit">保存环境</el-button>
+      <el-button :disabled="saving" @click="emit('update:modelValue', false)">取消</el-button>
+      <el-button type="primary" :loading="saving" @click="submit">保存环境</el-button>
     </template>
   </el-dialog>
 </template>
@@ -324,38 +322,40 @@ async function submit(): Promise<void> {
 .form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0 18px;
+  gap: 0 16px;
 }
 
 .form-grid--name {
-  grid-template-columns: minmax(0, 1fr) 220px 130px;
+  grid-template-columns: minmax(0, 1fr) 210px 116px;
 }
 
 .enable-field {
   display: flex;
-  min-height: 42px;
+  min-height: 36px;
   align-items: center;
   gap: 8px;
-  color: #65737a;
-  font-size: var(--font-md);
+  color: var(--color-text-secondary, #64748b);
+  font-size: var(--font-sm);
 }
 
 .auth-hint {
-  margin-bottom: 20px;
-  padding: 11px 13px;
-  color: #4f6f6a;
-  border-left: 3px solid #1bb3a2;
-  background: #eef8f6;
+  margin-bottom: 16px;
+  padding: 10px 12px;
+  color: var(--color-text-secondary, #64748b);
+  border: 1px solid var(--color-border, #e5ebf3);
+  border-left: 3px solid var(--color-primary, #2563eb);
+  border-radius: 4px;
+  background: var(--color-primary-soft, #eff6ff);
   font-size: var(--font-sm);
-  line-height: 1.6;
+  line-height: 1.5;
 }
 
 .login-url-preview {
   display: block;
   max-width: 100%;
   overflow: hidden;
-  margin-top: 8px;
-  color: #28786f;
+  margin-top: 6px;
+  color: var(--color-primary, #2563eb);
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: var(--font-sm);
   text-overflow: ellipsis;
@@ -366,20 +366,21 @@ async function submit(): Promise<void> {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 14px;
+  gap: 12px;
+  margin-bottom: 10px;
 }
 
 .variable-toolbar p {
   margin: 0;
-  color: #8a969d;
+  color: var(--color-text-muted, #94a3b8);
   font-size: var(--font-sm);
 }
 
 .variable-list {
   overflow-x: auto;
-  border: 1px solid #e3e9eb;
-  border-radius: 6px;
+  border: 1px solid var(--color-border, #e5ebf3);
+  border-radius: min(var(--radius-card, 6px), 8px);
+  background: var(--color-surface, #fff);
 }
 
 .variable-list__head,
@@ -388,19 +389,20 @@ async function submit(): Promise<void> {
   min-width: 880px;
   grid-template-columns: 72px 1.1fr 1.2fr 1fr 72px 44px;
   align-items: center;
-  gap: 10px;
-  padding: 11px 12px;
+  gap: 8px;
+  padding: 9px 10px;
 }
 
 .variable-list__head {
-  color: #7c898f;
-  border-bottom: 1px solid #e7ecee;
-  background: #f7f9fa;
+  color: var(--color-text-secondary, #64748b);
+  border-bottom: 1px solid var(--color-border, #e5ebf3);
+  background: var(--color-bg-subtle, #f8fafc);
   font-size: var(--font-xs);
+  font-weight: 600;
 }
 
 .variable-row {
-  border-bottom: 1px solid #edf1f3;
+  border-bottom: 1px solid var(--color-border-light, #eef2f7);
 }
 
 .variable-row:last-child {
@@ -414,7 +416,25 @@ async function submit(): Promise<void> {
 }
 
 :deep(.environment-tabs > .el-tabs__header) {
-  margin-bottom: 22px;
+  margin-bottom: 16px;
+}
+
+:deep(.environment-tabs .el-tabs__item) {
+  color: var(--color-text-secondary, #64748b);
+  font-size: var(--font-sm);
+}
+
+:deep(.environment-tabs .el-tabs__item.is-active) {
+  color: var(--color-primary, #2563eb);
+  font-weight: 600;
+}
+
+:deep(.environment-tabs .el-tabs__active-bar) {
+  background: var(--color-primary, #2563eb);
+}
+
+:deep(.environment-tabs .el-tabs__nav-wrap::after) {
+  background: var(--color-border-light, #eef2f7);
 }
 
 :deep(.el-select),
@@ -422,10 +442,21 @@ async function submit(): Promise<void> {
   width: 100%;
 }
 
+.request-body-editor :deep(.el-textarea__inner) {
+  min-height: 176px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  line-height: 1.6;
+}
+
 @media (max-width: 700px) {
   .form-grid,
   .form-grid--name {
     grid-template-columns: 1fr;
+  }
+
+  :deep(.environment-tabs .el-tabs__item) {
+    padding: 0 8px;
+    font-size: var(--font-xs);
   }
 
   .variable-toolbar {
@@ -437,17 +468,41 @@ async function submit(): Promise<void> {
 
 <style>
 .environment-dialog {
+  --el-color-primary: var(--color-primary, #2563eb);
   max-width: calc(100vw - 28px);
   max-height: calc(100dvh - 32px);
   display: flex;
   flex-direction: column;
   margin: 16px auto;
-  border-radius: 7px;
+  overflow: hidden;
+  border: 1px solid var(--color-border, #e5ebf3);
+  border-radius: min(var(--radius-card, 6px), 8px);
+  background: var(--color-surface, #fff);
+  box-shadow: var(--shadow-card, 0 10px 30px rgb(15 23 42 / 10%));
+}
+
+.environment-dialog .el-dialog__header {
+  margin: 0;
+  padding: 16px 20px 14px;
+  border-bottom: 1px solid var(--color-border-light, #eef2f7);
+}
+
+.environment-dialog .el-dialog__title {
+  color: var(--color-text-primary, #1f2a44);
+  font-weight: 650;
 }
 
 .environment-dialog .el-dialog__body {
   min-height: 0;
   overflow-y: auto;
-  padding-top: 8px;
+  padding: 12px 20px 16px;
+  color: var(--color-text-primary, #1f2a44);
+  background: var(--color-surface, #fff);
+}
+
+.environment-dialog .el-dialog__footer {
+  padding: 12px 20px;
+  border-top: 1px solid var(--color-border-light, #eef2f7);
+  background: var(--color-bg-subtle, #f8fafc);
 }
 </style>

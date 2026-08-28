@@ -48,392 +48,280 @@ async function submit(): Promise<void> {
 
 <template>
   <main class="login-page">
-    <section class="login-visual" aria-label="AutoTest 本地工作区">
-      <div class="login-visual__grid" />
-      <div class="visual-content">
-        <div class="visual-brand">
-          <span class="visual-brand__mark"><el-icon :size="24"><Monitor /></el-icon></span>
-          <span>AutoTest</span>
-        </div>
-        <div class="visual-copy">
-          <p class="visual-copy__eyebrow">PLAYWRIGHT CONTROL CENTER</p>
-          <h1>稳定运行每一次测试</h1>
-          <p>统一管理本地脚本、运行状态与断言结果。</p>
-        </div>
-        <div class="system-board">
-          <div class="system-board__head">
-            <strong>本地工作区</strong>
-            <span>LOCAL</span>
-          </div>
-          <div class="system-board__metrics">
-            <div><span>浏览器</span><strong>Chromium</strong></div>
-            <div><span>脚本来源</span><strong>本地文件</strong></div>
-            <div><span>数据存储</span><strong>浏览器本地</strong></div>
+    <section class="login-card" aria-labelledby="login-title">
+      <div class="login-brand">
+        <div class="login-brand__identity">
+          <span class="login-brand__mark"><el-icon :size="22"><Monitor /></el-icon></span>
+          <div>
+            <strong>AutoTest</strong>
+            <span>自动化测试平台</span>
           </div>
         </div>
+        <span class="login-brand__mode">本地模式</span>
       </div>
-      <p class="visual-footer">LOCAL AUTOMATION WORKSPACE</p>
-    </section>
 
-    <section class="login-form-panel">
-      <div class="login-form-wrap">
-        <div class="mobile-brand">
-          <span><el-icon :size="20"><Monitor /></el-icon></span>
-          AutoTest
-        </div>
-        <header class="login-header">
-          <p>欢迎回来</p>
-          <h2>登录测试平台</h2>
-          <span>使用管理员账号进入工作台</span>
-        </header>
+      <header class="login-header">
+        <h1 id="login-title">登录系统</h1>
+        <p>请输入管理员账号和密码进入工作台</p>
+      </header>
 
-        <el-form ref="formRef" :model="form" :rules="rules" label-position="top" size="large" @submit.prevent="submit">
-          <el-form-item label="用户名" prop="username">
-            <el-input v-model="form.username" :prefix-icon="User" autocomplete="username" placeholder="请输入用户名" />
-          </el-form-item>
-          <el-form-item label="密码" prop="password">
-            <el-input v-model="form.password" type="password" :prefix-icon="Lock" autocomplete="current-password" placeholder="请输入密码" show-password @keyup.enter="submit" />
-          </el-form-item>
-          <el-button class="login-button" type="primary" native-type="submit" :loading="submitting">登录平台</el-button>
-        </el-form>
+      <el-form ref="formRef" :model="form" :rules="rules" label-position="top" size="large" @submit.prevent="submit">
+        <el-form-item label="用户名" prop="username">
+          <el-input v-model="form.username" :prefix-icon="User" autocomplete="username" placeholder="请输入用户名" />
+        </el-form-item>
+        <el-form-item label="密码" prop="password">
+          <el-input v-model="form.password" type="password" :prefix-icon="Lock" autocomplete="current-password" placeholder="请输入密码" show-password @keyup.enter="submit" />
+        </el-form-item>
+        <el-button class="login-button" type="primary" native-type="submit" :loading="submitting">登录平台</el-button>
+      </el-form>
 
-        <div class="local-account">
-          <span>本地账号</span>
-          <code>admin</code>
-          <i>/</i>
-          <code>admin123</code>
+      <div class="local-account" aria-label="本地默认账号">
+        <span>本地默认账号</span>
+        <div>
+          <span>用户名 <code>admin</code></span>
+          <i />
+          <span>密码 <code>admin123</code></span>
         </div>
       </div>
-      <footer>AutoTest Platform · Local Mode</footer>
     </section>
+
+    <footer>AutoTest Platform · Local Workspace</footer>
   </main>
 </template>
 
 <style scoped>
 .login-page {
+  --login-primary: var(--color-primary, #2563eb);
+  --login-primary-hover: var(--color-primary-hover, #1d4ed8);
+  --login-primary-soft: var(--color-primary-soft, #eff6ff);
+  --login-text: var(--color-text-primary, #1f2a44);
+  --login-text-secondary: var(--color-text-secondary, #64748b);
+  --login-text-muted: var(--color-text-muted, #94a3b8);
+  --login-border: var(--color-border, #e5ebf3);
+  --login-border-light: var(--color-border-light, #edf1f7);
+  --login-surface: var(--color-surface, #fff);
+  --login-bg: var(--color-bg-page, #f5f7fb);
+  --login-bg-subtle: var(--color-bg-subtle, #f8fafc);
+
   display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
   min-height: 100dvh;
-  grid-template-columns: minmax(430px, 0.92fr) minmax(520px, 1.08fr);
-  background: #fff;
+  padding: clamp(32px, 7vh, 72px) 20px 24px;
+  color: var(--login-text);
+  background-color: #091423;
+  background-image: url('/assets/login-cityscape.png');
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: cover;
 }
 
-.login-visual {
-  position: relative;
-  display: flex;
-  min-height: 100dvh;
-  overflow: hidden;
-  align-items: center;
-  padding: 64px clamp(42px, 5vw, 86px);
-  color: #fff;
-  background: #101820;
+.login-card {
+  width: min(100%, 440px);
+  place-self: center;
+  padding: 32px 36px 30px;
+  border: 1px solid var(--login-border);
+  border-top: 3px solid var(--login-primary);
+  border-radius: var(--radius-card, 8px);
+  background: var(--login-surface);
+  box-shadow: 0 18px 52px rgb(0 0 0 / 32%);
 }
 
-.login-visual__grid {
-  position: absolute;
-  inset: 0;
-  opacity: 0.14;
-  background-image:
-    linear-gradient(rgb(131 241 222 / 28%) 1px, transparent 1px),
-    linear-gradient(90deg, rgb(131 241 222 / 28%) 1px, transparent 1px);
-  background-size: 42px 42px;
-  mask-image: linear-gradient(to bottom, #000, transparent 88%);
-}
-
-.visual-content {
-  position: relative;
-  z-index: 1;
-  width: min(100%, 720px);
-}
-
-.visual-brand,
-.mobile-brand {
+.login-brand,
+.login-brand__identity {
   display: flex;
   align-items: center;
+}
+
+.login-brand {
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.login-brand__identity {
+  min-width: 0;
   gap: 11px;
-  font-size: var(--font-brand);
-  font-weight: 700;
 }
 
-.visual-brand {
-  position: static;
-  margin-bottom: 72px;
-}
-
-.visual-brand__mark,
-.mobile-brand span {
+.login-brand__mark {
   display: grid;
   width: 38px;
   height: 38px;
   place-items: center;
-  color: #09201c;
+  flex: 0 0 auto;
+  color: #fff;
   border-radius: 6px;
-  background: #2ed8c0;
+  background: var(--login-primary);
 }
 
-.visual-copy__eyebrow {
-  margin: 0 0 14px;
-  color: #5be0cd;
-  font-size: var(--font-sm);
-  font-weight: 700;
-}
-
-.visual-copy h1 {
-  max-width: 480px;
-  margin: 0;
-  font-size: var(--font-hero);
-  font-weight: 650;
-  line-height: 1.18;
-}
-
-.visual-copy > p:last-child {
-  margin: 20px 0 0;
-  color: #9dabb4;
-  font-size: var(--font-lg);
-  line-height: 1.8;
-}
-
-.system-board {
-  margin-top: 42px;
-  padding: 22px;
-  border: 1px solid rgb(125 237 218 / 18%);
-  border-radius: 7px;
-  background: rgb(25 38 48 / 88%);
-  box-shadow: 0 22px 60px rgb(0 0 0 / 18%);
-}
-
-.system-board__head,
-.system-board__metrics {
-  display: flex;
-  align-items: center;
-}
-
-.system-board__head {
-  justify-content: space-between;
-  padding-bottom: 18px;
-  border-bottom: 1px solid rgb(255 255 255 / 8%);
-}
-
-.system-board__head strong {
-  font-size: var(--font-md);
-}
-
-.system-board__head > span {
-  padding: 4px 7px;
-  color: #68decf;
-  border: 1px solid rgb(104 222 207 / 24%);
-  border-radius: 3px;
-  font-size: var(--font-caption);
-}
-
-.system-board__metrics {
-  justify-content: space-between;
-  gap: 24px;
-  padding-top: 22px;
-}
-
-.system-board__metrics div {
+.login-brand__identity > div {
   min-width: 0;
 }
 
-.system-board__metrics span,
-.system-board__metrics strong {
+.login-brand__identity strong,
+.login-brand__identity span {
   display: block;
 }
 
-.system-board__metrics span {
-  color: #74848e;
+.login-brand__identity strong {
+  color: var(--login-text);
+  font-size: var(--font-lg);
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.login-brand__identity span {
+  margin-top: 2px;
+  color: var(--login-text-muted);
   font-size: var(--font-xs);
 }
 
-.system-board__metrics strong {
-  margin-top: 7px;
-  color: #edf8f6;
-  font-size: var(--font-lg);
-}
-
-.visual-footer {
-  position: absolute;
-  bottom: 32px;
-  left: clamp(42px, 5vw, 86px);
-  margin: 0;
-  color: #566671;
-  font-size: var(--font-caption);
-}
-
-.login-form-panel {
-  display: flex;
-  min-height: 100dvh;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  padding: 60px 40px 28px;
-  background: #fbfcfc;
-}
-
-.login-form-wrap {
-  width: min(100%, 520px);
-}
-
-.mobile-brand {
-  display: none;
-  margin-bottom: 46px;
-  color: #172229;
-}
-
-.mobile-brand span {
-  width: 34px;
-  height: 34px;
-}
-
-.login-header {
-  margin-bottom: 32px;
-}
-
-.login-header p {
-  margin: 0 0 8px;
-  color: #159f8f;
-  font-size: var(--font-base);
+.login-brand__mode {
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  color: var(--login-primary);
+  border: 1px solid #bfdbfe;
+  border-radius: 4px;
+  background: var(--login-primary-soft);
+  font-size: var(--font-xs);
   font-weight: 600;
 }
 
-.login-header h2 {
-  margin: 0;
-  color: #172229;
-  font-size: var(--font-display);
-  font-weight: 700;
+.login-header {
+  margin: 30px 0 26px;
 }
 
-.login-header span {
-  display: block;
-  margin-top: 12px;
-  color: #89959c;
-  font-size: var(--font-base);
+.login-header h1 {
+  margin: 0;
+  color: var(--login-text);
+  font-size: var(--font-subtitle);
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.login-header p {
+  margin: 8px 0 0;
+  color: var(--login-text-secondary);
+  font-size: var(--font-sm);
 }
 
 .login-button {
   width: 100%;
-  height: 52px;
-  margin-top: 8px;
-  border-color: #149f90;
+  height: 44px;
+  margin-top: 4px;
+  border-color: var(--login-primary);
   border-radius: 5px;
-  background: #149f90;
+  background: var(--login-primary);
   font-weight: 600;
 }
 
 .login-button:hover,
 .login-button:focus {
-  border-color: #118a7d;
-  background: #118a7d;
+  border-color: var(--login-primary-hover);
+  background: var(--login-primary-hover);
 }
 
 .local-account {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  margin-top: 24px;
-  padding: 10px;
-  color: #8a969c;
-  border: 1px dashed #d9e1e4;
-  border-radius: 5px;
-  background: #f6f9f9;
-  font-size: var(--font-sm);
-}
-
-.local-account code {
-  color: #425159;
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-}
-
-.local-account i {
-  color: #c0c8cc;
-  font-style: normal;
-}
-
-.login-form-panel footer {
-  margin-top: auto;
-  padding-top: 50px;
-  color: #b0b9be;
+  margin-top: 22px;
+  padding-top: 18px;
+  color: var(--login-text-muted);
+  border-top: 1px solid var(--login-border-light);
   font-size: var(--font-xs);
 }
 
-:deep(.el-form-item) {
-  margin-bottom: 22px;
+.local-account > span {
+  display: block;
+  margin-bottom: 8px;
 }
 
-:deep(.el-form-item__label) {
-  color: #445159;
-  font-size: var(--font-md);
+.local-account > div {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--login-text-secondary);
+}
+
+.local-account code {
+  margin-left: 3px;
+  color: var(--login-text);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: var(--font-sm);
   font-weight: 600;
 }
 
+.local-account i {
+  width: 1px;
+  height: 12px;
+  background: var(--login-border);
+}
+
+.login-page > footer {
+  justify-self: center;
+  margin-top: 28px;
+  color: rgb(255 255 255 / 74%);
+  font-size: var(--font-xs);
+  text-align: center;
+  text-shadow: 0 1px 2px rgb(0 0 0 / 45%);
+}
+
+:deep(.el-form-item) {
+  margin-bottom: 20px;
+}
+
+:deep(.el-form-item__label) {
+  height: auto;
+  padding-bottom: 7px;
+  color: var(--login-text);
+  font-size: var(--font-sm);
+  font-weight: 600;
+  line-height: 1.4;
+}
+
 :deep(.el-input__wrapper) {
-  min-height: 50px;
+  min-height: 44px;
+  padding-inline: 13px;
   border-radius: 5px;
-  box-shadow: 0 0 0 1px #dce3e6 inset;
+  background: var(--login-surface);
+  box-shadow: 0 0 0 1px var(--login-border) inset;
+}
+
+:deep(.el-input__wrapper:hover) {
+  box-shadow: 0 0 0 1px #cbd5e1 inset;
 }
 
 :deep(.el-input__wrapper.is-focus) {
-  box-shadow: 0 0 0 1px #16a796 inset;
+  box-shadow: 0 0 0 1px var(--login-primary) inset;
 }
 
-@media (max-width: 1200px) {
+:deep(.el-input__inner) {
+  color: var(--login-text);
+  font-size: var(--font-sm);
+}
+
+:deep(.el-input__inner::placeholder) {
+  color: var(--login-text-muted);
+}
+
+:deep(.el-input__prefix),
+:deep(.el-input__password) {
+  color: var(--login-text-muted);
+}
+
+@media (max-height: 650px) and (min-width: 481px) {
   .login-page {
-    grid-template-columns: minmax(360px, 0.8fr) minmax(440px, 1fr);
+    padding-block: 16px;
   }
 
-  .login-visual {
-    padding-inline: 38px;
-  }
-
-  .visual-brand {
-    margin-bottom: 52px;
-  }
-}
-
-@media (min-width: 761px) and (max-height: 800px) {
-  .login-visual {
-    align-items: flex-start;
-    padding-block: 28px;
-  }
-
-  .visual-brand {
-    margin-bottom: 26px;
-  }
-
-  .visual-copy > p:last-child {
-    margin-top: 14px;
-    line-height: 1.6;
-  }
-
-  .system-board {
-    margin-top: 24px;
-    padding: 16px;
-  }
-
-  .system-board__head {
-    padding-bottom: 12px;
-  }
-
-  .system-board__metrics {
-    padding: 14px 0;
-  }
-
-  .visual-footer,
-  .login-form-panel footer {
-    display: none;
-  }
-
-  .login-form-panel {
-    padding-block: 28px;
+  .login-card {
+    padding-block: 24px;
   }
 
   .login-header {
-    margin-bottom: 20px;
+    margin: 22px 0 20px;
   }
 
   .local-account {
-    margin-top: 14px;
+    margin-top: 16px;
+    padding-top: 14px;
   }
 
   :deep(.el-form-item) {
@@ -441,21 +329,25 @@ async function submit(): Promise<void> {
   }
 }
 
-@media (max-width: 760px) {
+@media (max-width: 480px) {
   .login-page {
-    display: block;
+    padding: 20px 0 18px;
   }
 
-  .login-visual {
-    display: none;
+  .login-card {
+    width: 100%;
+    padding: 28px 24px;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
   }
 
-  .login-form-panel {
-    padding: 36px 24px 24px;
+  .login-header {
+    margin-top: 28px;
   }
 
-  .mobile-brand {
-    display: flex;
+  .login-page > footer {
+    margin: 12px 24px 0;
   }
 }
 </style>

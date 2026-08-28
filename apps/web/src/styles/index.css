@@ -1,35 +1,71 @@
 :root {
-  --font-caption: 12px;
-  --font-xs: 14px;
-  --font-sm: 15px;
-  --font-md: 16px;
-  --font-base: 17px;
-  --font-lg: 20px;
-  --font-xl: 22px;
-  --font-brand: 25px;
-  --font-subtitle: 28px;
-  --font-section: 30px;
-  --font-title: 34px;
-  --font-display: 40px;
-  --font-hero: 58px;
+  --font-caption: 11px;
+  --font-xs: 12px;
+  --font-sm: 13px;
+  --font-md: 14px;
+  --font-base: 14px;
+  --font-lg: 18px;
+  --font-xl: 20px;
+  --font-brand: 20px;
+  --font-subtitle: 24px;
+  --font-section: 26px;
+  --font-title: 28px;
+  --font-display: 32px;
+  --font-hero: 42px;
   --content-max-width: 2400px;
-  color: #26343b;
-  background: #f2f5f7;
-  font-family: Inter, "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+  --color-primary: #2563eb;
+  --color-primary-hover: #1d4ed8;
+  --color-primary-soft: #eef4ff;
+  --color-text-primary: #1f2a44;
+  --color-text-secondary: #4e5969;
+  --color-text-muted: #86909c;
+  --color-border: #e5ebf3;
+  --color-border-light: #edf1f7;
+  --color-surface: #ffffff;
+  --color-bg-page: #f3f6fb;
+  --color-bg-subtle: #f8faff;
+  --color-success: #2e9f6b;
+  --color-warning: #d88c23;
+  --color-danger: #e2555d;
+  --shadow-card: 0 8px 24px rgb(31 42 68 / 5%);
+  --radius-card: 8px;
+  color: var(--color-text-primary);
+  background: var(--color-bg-page);
+  font-family: Inter, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   letter-spacing: 0;
-  --el-color-primary: #149f90;
-  --el-border-radius-base: 5px;
-  --el-font-size-extra-large: 25px;
-  --el-font-size-large: 20px;
-  --el-font-size-medium: 17px;
-  --el-font-size-base: 17px;
-  --el-font-size-small: 15px;
-  --el-font-size-extra-small: 14px;
-  --el-component-size-large: 48px;
-  --el-component-size: 42px;
-  --el-component-size-small: 34px;
+  --el-color-primary: var(--color-primary);
+  --el-color-primary-light-3: #5b82ee;
+  --el-color-primary-light-5: #86a4f3;
+  --el-color-primary-light-7: #b8c9f8;
+  --el-color-primary-light-8: #d5e0fb;
+  --el-color-primary-light-9: var(--color-primary-soft);
+  --el-color-primary-dark-2: var(--color-primary-hover);
+  --el-color-success: var(--color-success);
+  --el-color-warning: var(--color-warning);
+  --el-color-danger: var(--color-danger);
+  --el-color-info: #64748b;
+  --el-text-color-primary: var(--color-text-primary);
+  --el-text-color-regular: var(--color-text-secondary);
+  --el-text-color-secondary: var(--color-text-muted);
+  --el-border-color: var(--color-border);
+  --el-border-color-light: var(--color-border-light);
+  --el-border-color-lighter: #f1f4f8;
+  --el-fill-color-light: var(--color-bg-subtle);
+  --el-fill-color-lighter: #fbfcfe;
+  --el-bg-color-page: var(--color-bg-page);
+  --el-border-radius-base: 6px;
+  --el-border-radius-small: 4px;
+  --el-font-size-extra-large: 20px;
+  --el-font-size-large: 16px;
+  --el-font-size-medium: 14px;
+  --el-font-size-base: 14px;
+  --el-font-size-small: 13px;
+  --el-font-size-extra-small: 12px;
+  --el-component-size-large: 42px;
+  --el-component-size: 38px;
+  --el-component-size-small: 32px;
 }
 
 * {
@@ -46,12 +82,15 @@ body,
 
 body {
   min-height: 100dvh;
+  color: var(--color-text-primary);
+  background: var(--color-bg-page);
   font-size: var(--font-base);
+  line-height: 1.5;
 }
 
 .el-dialog__title {
   font-size: var(--font-lg);
-  font-weight: 650;
+  font-weight: 700;
 }
 
 .el-form-item__label,
@@ -68,6 +107,76 @@ body {
   font-size: var(--font-md);
 }
 
+.el-button {
+  font-weight: 600;
+}
+
+.el-button--primary:not(.is-plain) {
+  --el-button-bg-color: var(--color-primary);
+  --el-button-border-color: var(--color-primary);
+  --el-button-hover-bg-color: var(--color-primary-hover);
+  --el-button-hover-border-color: var(--color-primary-hover);
+}
+
+.el-input__wrapper,
+.el-select__wrapper,
+.el-textarea__inner {
+  border-radius: 6px;
+}
+
+.el-input__wrapper,
+.el-select__wrapper {
+  box-shadow: 0 0 0 1px var(--color-border) inset;
+}
+
+.el-input__wrapper:hover,
+.el-select__wrapper:hover {
+  box-shadow: 0 0 0 1px #bac7da inset;
+}
+
+.el-input__wrapper.is-focus,
+.el-select__wrapper.is-focused {
+  box-shadow: 0 0 0 1px var(--color-primary) inset;
+}
+
+.el-dialog,
+.el-message-box {
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  box-shadow: 0 20px 50px rgb(31 42 68 / 16%);
+}
+
+.el-dialog__header {
+  margin: 0;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--color-border-light);
+}
+
+.el-dialog__body {
+  padding: 20px;
+}
+
+.el-dialog__footer {
+  padding: 14px 20px;
+  border-top: 1px solid var(--color-border-light);
+  background: #fbfcfe;
+}
+
+.el-drawer {
+  background: var(--color-surface);
+}
+
+.el-tag {
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.el-pagination button,
+.el-pagination .el-pager li {
+  border-radius: 4px;
+}
+
 button,
 input,
 textarea,
@@ -78,8 +187,13 @@ select {
 
 button:focus-visible,
 a:focus-visible {
-  outline: 2px solid #1ab6a5;
+  outline: 2px solid var(--color-primary);
   outline-offset: 2px;
+}
+
+::selection {
+  color: var(--color-text-primary);
+  background: #cddcff;
 }
 
 @media (prefers-reduced-motion: reduce) {

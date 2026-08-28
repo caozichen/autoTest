@@ -28,3 +28,16 @@ export function stringifyExtractedValue(value: unknown): string | null {
   if (typeof value === 'number' || typeof value === 'boolean') return String(value)
   return null
 }
+
+export function stringifyRuntimeVariableValue(value: unknown): string | null {
+  const scalar = stringifyExtractedValue(value)
+  if (scalar !== null) return scalar
+  if (value && typeof value === 'object') {
+    try {
+      return JSON.stringify(value)
+    } catch {
+      return null
+    }
+  }
+  return null
+}

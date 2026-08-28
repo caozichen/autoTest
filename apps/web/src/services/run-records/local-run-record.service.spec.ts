@@ -135,6 +135,27 @@ describe('LocalRunRecordService', () => {
         ok: true,
         durationMs: 1_250,
         logs: [{ timestamp: secondTime.toISOString(), level: 'success', message: '断言通过' }],
+        assertions: [{
+          sequence: 1,
+          timestamp: secondTime.toISOString(),
+          name: '单项选择应显示三个选项',
+          module: '单项选择',
+          matcher: 'toHaveCount',
+          status: 'passed',
+          durationMs: 8.4,
+        }],
+        apiResponses: [{
+          sequence: 1,
+          timestamp: secondTime.toISOString(),
+          name: '/api/be/form',
+          method: 'POST',
+          url: 'https://lx.admin.lingxi.tech/api/be/form',
+          status: 200,
+          ok: true,
+          durationMs: 26,
+          requestBody: { title: '完整表单' },
+          responseBody: { code: 0, data: { id: 'form-1' } },
+        }],
         output: { status: 'passed' },
       }],
     })
@@ -156,6 +177,27 @@ describe('LocalRunRecordService', () => {
 
     const restored = new LocalRunRecordService(storage, () => thirdTime, () => 'unused')
     expect((await restored.get(started.id))?.scripts[0]?.logs[0]?.message).toBe('断言通过')
+    expect((await restored.get(started.id))?.scripts[0]?.assertions).toEqual([{
+      sequence: 1,
+      timestamp: secondTime.toISOString(),
+      name: '单项选择应显示三个选项',
+      module: '单项选择',
+      matcher: 'toHaveCount',
+      status: 'passed',
+      durationMs: 8.4,
+    }])
+    expect((await restored.get(started.id))?.scripts[0]?.apiResponses).toEqual([{
+      sequence: 1,
+      timestamp: secondTime.toISOString(),
+      name: '/api/be/form',
+      method: 'POST',
+      url: 'https://lx.admin.lingxi.tech/api/be/form',
+      status: 200,
+      ok: true,
+      durationMs: 26,
+      requestBody: { title: '完整表单' },
+      responseBody: { code: 0, data: { id: 'form-1' } },
+    }])
   })
 
   it('appends different runs instead of overwriting history and returns clones', async () => {
@@ -223,6 +265,16 @@ describe('LocalRunRecordService', () => {
             nested: { password: 'plain-password', safe: 'visible' },
           },
         }],
+        assertions: [{
+          sequence: 1,
+          timestamp: secondTime.toISOString(),
+          name: '手机号 13800000000 对应验证码 123456 应通过',
+          module: '手机号',
+          matcher: 'toBeTruthy',
+          status: 'failed',
+          durationMs: 5,
+          error: 'Bearer token-value-123 对应断言失败',
+        }],
         output: { access_token: 'token-value-123', state: 'failed' },
       }],
     })
@@ -234,6 +286,12 @@ describe('LocalRunRecordService', () => {
     expect(raw).not.toContain('plain-password')
     expect(raw).toContain('[REDACTED]')
     expect(raw).toContain('visible')
+    const restoredAssertion = (await new LocalRunRecordService(storage, () => thirdTime, () => 'unused')
+      .get(started.id))?.scripts[0]?.assertions[0]
+    expect(restoredAssertion).toMatchObject({
+      name: '手机号 [REDACTED] 对应验证码 [REDACTED] 应通过',
+      error: 'Bearer [REDACTED] 对应断言失败',
+    })
   })
 
   it('keeps recent runs active and recovers only runs stale for more than four hours', async () => {
@@ -295,19 +353,67 @@ describe('LocalRunRecordService', () => {
     await expect(service.complete(started.id, { scripts: [] })).rejects.toThrow('已经结束')
   })
 
+  it('interrupts only the requested running batch by record id', async () => {
+    const storage = new MemoryStorage()
+    const service = new LocalRunRecordService(
+      storage,
+      nowFactory([firstTime, secondTime, thirdTime]),
+      idFactory(['run-target', 'start-log', 'interrupt-log']),
+    )
+    const started = await service.start(startDraft())
+
+    const interrupted = await service.interrupt(started.id, '用户已强制停止自动化配置“发布回归”')
+
+    expect(interrupted).toMatchObject({
+      id: started.id,
+      status: 'interrupted',
+      failureStage: 'runner',
+      error: '用户已强制停止自动化配置“发布回归”',
+      counts: { total: 1, passed: 0, failed: 0, skipped: 1 },
+      scripts: [{ id: 'login-regression', status: 'skipped' }],
+    })
+    expect(interrupted.logs.at(-1)).toMatchObject({
+      id: 'interrupt-log',
+      level: 'warning',
+      scope: 'runner',
+      message: '用户已强制停止自动化配置“发布回归”',
+    })
+  })
+
   it('ignores malformed storage entries without crashing', async () => {
     const storage = new MemoryStorage()
     const source = new LocalRunRecordService(storage, () => firstTime, idFactory(['valid', 'start']))
     const valid = await source.start(startDraft())
+    const validScript = valid.scripts[0]!
     storage.setItem('autotest.run-records.v1', JSON.stringify([
       { id: 'broken', status: 'unknown' },
-      { ...valid, scripts: [...valid.scripts, { id: 'bad nested script' }], logs: [...valid.logs, { id: 'bad nested log' }] },
+      {
+        ...valid,
+        scripts: [{
+          ...validScript,
+          assertions: [
+            {
+              sequence: 1,
+              timestamp: firstTime.toISOString(),
+              name: '合法断言',
+              module: '基础运行流程',
+              matcher: 'toBeTruthy',
+              status: 'passed',
+              durationMs: 1,
+            },
+            { sequence: 0, timestamp: 'invalid', status: 'unknown' },
+          ],
+        }, ...valid.scripts.slice(1), { id: 'bad nested script' }],
+        logs: [...valid.logs, { id: 'bad nested log' }],
+      },
     ]))
     const service = new LocalRunRecordService(storage, () => firstTime, () => 'unused')
     const restored = await service.list()
     expect(restored).toHaveLength(1)
     expect(restored[0]?.scripts).toHaveLength(1)
     expect(restored[0]?.logs).toHaveLength(1)
+    expect(restored[0]?.scripts[0]?.assertions).toHaveLength(1)
+    expect(restored[0]?.scripts[0]?.assertions[0]?.name).toBe('合法断言')
 
     storage.setItem('autotest.run-records.v1', '{not json')
     expect(await new LocalRunRecordService(storage, () => firstTime, () => 'unused').list()).toEqual([])

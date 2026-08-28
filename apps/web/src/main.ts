@@ -1,6 +1,7 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import {
+  ElAlert,
   ElButton,
   ElDialog,
   ElDrawer,
@@ -12,10 +13,12 @@ import {
   ElFormItem,
   ElIcon,
   ElInput,
+  ElInputNumber,
   ElLoading,
   ElOption,
   ElPagination,
   ElPopconfirm,
+  ElProgress,
   ElSelect,
   ElSkeleton,
   ElSwitch,
@@ -34,6 +37,7 @@ import './styles/index.css'
 
 const app = createApp(App)
 const elementPlugins = [
+  ElAlert,
   ElButton,
   ElDialog,
   ElDrawer,
@@ -45,10 +49,12 @@ const elementPlugins = [
   ElFormItem,
   ElIcon,
   ElInput,
+  ElInputNumber,
   ElLoading,
   ElOption,
   ElPagination,
   ElPopconfirm,
+  ElProgress,
   ElSelect,
   ElSkeleton,
   ElSwitch,

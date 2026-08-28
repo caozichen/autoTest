@@ -47,6 +47,12 @@ const router = createRouter({
           component: () => import('@/views/RunHistoryView.vue'),
           meta: { section: '自动化资产', title: '运行记录' },
         },
+        {
+          path: 'settings',
+          name: 'settings',
+          component: () => import('@/views/SystemSettingsView.vue'),
+          meta: { section: '系统设置', title: 'Runner 管理' },
+        },
       ],
     },
     { path: '/:pathMatch(.*)*', redirect: '/' },

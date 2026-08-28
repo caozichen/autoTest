@@ -22,6 +22,7 @@ function normalizeVariable(value: unknown): RuntimeVariable | null {
     typeof value.value !== 'string' ||
     typeof value.secret !== 'boolean' ||
     (value.authorizationScheme !== undefined && typeof value.authorizationScheme !== 'string') ||
+    (value.sourceScriptId !== undefined && typeof value.sourceScriptId !== 'string') ||
     typeof value.sourceEnvironmentId !== 'string' ||
     typeof value.sourcePath !== 'string' ||
     typeof value.updatedAt !== 'string'
@@ -38,6 +39,7 @@ function normalizeVariable(value: unknown): RuntimeVariable | null {
       ? {}
       : { authorizationScheme: value.authorizationScheme }),
     sourceEnvironmentId: value.sourceEnvironmentId,
+    ...(typeof value.sourceScriptId === 'string' ? { sourceScriptId: value.sourceScriptId } : {}),
     sourcePath: value.sourcePath,
     updatedAt: value.updatedAt,
   }
@@ -65,6 +67,7 @@ export class SessionRuntimeVariableService implements RuntimeVariableService {
         ? {}
         : { authorizationScheme: draft.authorizationScheme.trim() }),
       sourceEnvironmentId: draft.sourceEnvironmentId,
+      ...(draft.sourceScriptId === undefined ? {} : { sourceScriptId: draft.sourceScriptId }),
       sourcePath: draft.sourcePath,
       updatedAt: this.now().toISOString(),
     }

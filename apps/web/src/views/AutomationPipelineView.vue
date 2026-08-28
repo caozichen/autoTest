@@ -10,9 +10,10 @@ import {
   RefreshRight,
   Search,
   Setting,
+  VideoPause,
   VideoPlay,
 } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 
 import AutomationPipelineEditorDialog from '@/components/AutomationPipelineEditorDialog.vue'
 import type { AutomationPipeline, AutomationPipelineDraft } from '@/domain/automation-pipeline'
@@ -32,6 +33,7 @@ const pageSize = 8
 const editorVisible = ref(false)
 const editingPipeline = ref<AutomationPipeline | null>(null)
 const runningPipelineIds = ref(new Set<string>())
+const stoppingPipelineIds = ref(new Set<string>())
 
 const scriptById = computed(() => new Map(scripts.value.map((script) => [script.id, script])))
 const environmentById = computed(() => new Map(environments.value.map((environment) => [environment.id, environment])))
@@ -94,6 +96,9 @@ async function loadData(showSuccess = false): Promise<void> {
     pipelines.value = nextPipelines
     scripts.value = nextScripts
     environments.value = nextEnvironments
+    runningPipelineIds.value = new Set(nextPipelines
+      .filter((pipeline) => services.automationPipelineExecution.isRunning(pipeline.id))
+      .map((pipeline) => pipeline.id))
     const lastPage = Math.max(1, Math.ceil(filteredPipelines.value.length / pageSize))
     currentPage.value = Math.min(currentPage.value, lastPage)
     if (showSuccess) ElMessage.success('自动化配置已刷新')
@@ -140,7 +145,7 @@ async function removePipeline(pipeline: AutomationPipeline): Promise<void> {
   }
 }
 
-async function runPipeline(pipeline: AutomationPipeline): Promise<void> {
+function runPipeline(pipeline: AutomationPipeline): void {
   const issues = issuesFor(pipeline)
   if (issues.length > 0) {
     ElMessage.error(issues[0] ?? '自动化配置不可运行')
@@ -148,22 +153,75 @@ async function runPipeline(pipeline: AutomationPipeline): Promise<void> {
   }
   if (runningPipelineIds.value.has(pipeline.id)) return
 
-  runningPipelineIds.value = new Set([...runningPipelineIds.value, pipeline.id])
+  let task: ReturnType<typeof services.automationPipelineExecution.run>
   try {
-    const record = await services.automationPipelineExecution.run(pipeline)
-    await loadData()
-    if (record.status === 'passed') {
-      ElMessage.success(`“${pipeline.name}”已按顺序运行完成`)
-    } else {
-      ElMessage.error(`“${pipeline.name}”运行未全部通过，请查看运行记录`)
-    }
+    task = services.automationPipelineExecution.run(pipeline)
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '自动化配置运行失败')
-  } finally {
-    const next = new Set(runningPipelineIds.value)
-    next.delete(pipeline.id)
-    runningPipelineIds.value = next
+    return
   }
+
+  runningPipelineIds.value = new Set([...runningPipelineIds.value, pipeline.id])
+  ElMessage.success(`“${pipeline.name}”已开始运行`)
+  void task
+    .then(async (record) => {
+      await loadData()
+      if (record.status === 'passed') {
+        ElMessage.success(`“${pipeline.name}”已按顺序运行完成`)
+      } else if (record.status === 'interrupted') {
+        ElMessage.warning(`“${pipeline.name}”已停止`)
+      } else {
+        ElMessage.error(`“${pipeline.name}”运行未全部通过，请查看运行记录`)
+      }
+    })
+    .catch((error) => {
+      ElMessage.error(error instanceof Error ? error.message : '自动化配置运行失败')
+    })
+    .finally(() => {
+      const next = new Set(runningPipelineIds.value)
+      next.delete(pipeline.id)
+      runningPipelineIds.value = next
+    })
+}
+
+async function forceStopPipeline(pipeline: AutomationPipeline): Promise<void> {
+  if (stoppingPipelineIds.value.has(pipeline.id)) return
+  stoppingPipelineIds.value = new Set([...stoppingPipelineIds.value, pipeline.id])
+  try {
+    const result = await services.automationPipelineExecution.stop(pipeline.id)
+    if (result.stopped) {
+      ElMessage.success(`“${pipeline.name}”已提交强制停止请求`)
+    } else {
+      ElMessage.warning(`“${pipeline.name}”当前没有正在运行的任务`)
+      const nextRunning = new Set(runningPipelineIds.value)
+      nextRunning.delete(pipeline.id)
+      runningPipelineIds.value = nextRunning
+    }
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? `强制停止失败：${error.message}` : '强制停止失败')
+  } finally {
+    const next = new Set(stoppingPipelineIds.value)
+    next.delete(pipeline.id)
+    stoppingPipelineIds.value = next
+  }
+}
+
+async function confirmForceStop(pipeline: AutomationPipeline): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      '当前自动化配置将立即中断，未执行步骤不会继续运行。确定强制停止吗？',
+      '强制停止自动化配置',
+      {
+        confirmButtonText: '强制停止',
+        cancelButtonText: '取消',
+        confirmButtonClass: 'el-button--danger',
+        type: 'warning',
+      },
+    )
+  } catch {
+    return
+  }
+  await forceStopPipeline(pipeline)
 }
 
 function mappingCount(pipeline: AutomationPipeline): number {
@@ -292,6 +350,7 @@ onMounted(() => loadData())
             <el-tooltip v-if="issuesFor(scope.row).length" :content="issuesFor(scope.row).join('；')" placement="top">
               <el-tag type="danger" effect="light">配置异常</el-tag>
             </el-tooltip>
+            <el-tag v-else-if="runningPipelineIds.has(scope.row.id)" type="warning" effect="light">运行中</el-tag>
             <el-tag v-else type="success" effect="light">可运行</el-tag>
           </template>
         </el-table-column>
@@ -300,18 +359,30 @@ onMounted(() => loadData())
           <template #default="scope">{{ formatUpdatedAt(scope.row.updatedAt) }}</template>
         </el-table-column>
 
-        <el-table-column label="操作" width="160" fixed="right">
+        <el-table-column label="操作" width="200" fixed="right">
           <template #default="scope">
             <div class="row-actions">
-              <el-tooltip :content="issuesFor(scope.row)[0] ?? '按顺序运行'" placement="top">
+              <el-tooltip :content="runningPipelineIds.has(scope.row.id) ? '正在运行' : (issuesFor(scope.row)[0] ?? '按顺序运行')" placement="top">
                 <span>
                   <el-button
                     text
                     :icon="VideoPlay"
-                    :loading="runningPipelineIds.has(scope.row.id)"
                     :disabled="issuesFor(scope.row).length > 0 || runningPipelineIds.has(scope.row.id)"
                     aria-label="运行自动化配置"
                     @click="runPipeline(scope.row)"
+                  />
+                </span>
+              </el-tooltip>
+              <el-tooltip content="强制停止" placement="top">
+                <span>
+                  <el-button
+                    text
+                    type="danger"
+                    :icon="VideoPause"
+                    :loading="stoppingPipelineIds.has(scope.row.id)"
+                    :disabled="!runningPipelineIds.has(scope.row.id) || stoppingPipelineIds.has(scope.row.id)"
+                    aria-label="强制停止自动化配置"
+                    @click="confirmForceStop(scope.row)"
                   />
                 </span>
               </el-tooltip>
@@ -365,7 +436,7 @@ onMounted(() => loadData())
   align-items: flex-end;
   justify-content: space-between;
   gap: 24px;
-  margin-bottom: 24px;
+  margin-bottom: 18px;
 }
 
 .page-heading p,
@@ -375,14 +446,14 @@ onMounted(() => loadData())
 }
 
 .page-heading p {
-  margin-bottom: 5px;
-  color: #159c8d;
-  font-size: var(--font-sm);
+  margin-bottom: 4px;
+  color: var(--color-primary);
+  font-size: var(--font-xs);
   font-weight: 700;
 }
 
 .page-heading h1 {
-  color: #17232a;
+  color: var(--color-text-primary);
   font-size: var(--font-title);
   font-weight: 700;
 }
@@ -390,27 +461,27 @@ onMounted(() => loadData())
 .page-heading span {
   display: block;
   margin-top: 8px;
-  color: #8a969d;
+  color: var(--color-text-muted);
   font-size: var(--font-md);
 }
 
 .summary-strip {
   display: grid;
   margin-bottom: 16px;
-  border: 1px solid #e1e7ea;
-  border-radius: 7px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  background: #fff;
-  box-shadow: 0 5px 18px rgb(24 45 55 / 4%);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-card);
 }
 
 .summary-strip > div {
   display: flex;
-  min-height: 104px;
+  min-height: 88px;
   align-items: center;
   gap: 13px;
   padding: 16px 20px;
-  border-right: 1px solid #edf1f3;
+  border-right: 1px solid var(--color-border-light);
 }
 
 .summary-strip > div:last-child {
@@ -419,16 +490,16 @@ onMounted(() => loadData())
 
 .summary-strip__icon {
   display: grid;
-  width: 46px;
-  height: 46px;
-  flex: 0 0 46px;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
   place-items: center;
   border-radius: 5px;
 }
 
-.summary-strip__icon.is-total { color: #087d71; background: #d9f7f1; }
-.summary-strip__icon.is-ready { color: #16834a; background: #def6e8; }
-.summary-strip__icon.is-mapping { color: #805e12; background: #fff0c9; }
+.summary-strip__icon.is-total { color: var(--color-primary); background: var(--color-primary-soft); }
+.summary-strip__icon.is-ready { color: var(--color-success); background: #eaf7f0; }
+.summary-strip__icon.is-mapping { color: #bd7217; background: #fff5e7; }
 
 .summary-strip p,
 .summary-strip p > span,
@@ -438,33 +509,33 @@ onMounted(() => loadData())
 }
 
 .summary-strip p > span {
-  color: #8b979e;
+  color: var(--color-text-muted);
   font-size: var(--font-sm);
 }
 
 .summary-strip p > strong {
   margin-top: 4px;
-  color: #26343b;
+  color: var(--color-text-primary);
   font-size: var(--font-subtitle);
 }
 
 .automation-panel {
   overflow: hidden;
-  border: 1px solid #e1e7ea;
-  border-radius: 7px;
-  background: #fff;
-  box-shadow: 0 5px 18px rgb(24 45 55 / 4%);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-card);
 }
 
 .toolbar {
   display: flex;
-  min-height: 80px;
+  min-height: 64px;
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
   padding: 12px 16px;
-  border-bottom: 1px solid #edf1f3;
+  border-bottom: 1px solid var(--color-border-light);
 }
 
 .toolbar__filters,
@@ -494,18 +565,18 @@ onMounted(() => loadData())
   height: 44px;
   flex: 0 0 44px;
   place-items: center;
-  color: #108f82;
+  color: var(--color-primary);
   border-radius: 5px;
-  background: #e3f7f3;
+  background: var(--color-primary-soft);
 }
 
 .pipeline-info > div { min-width: 0; }
-.pipeline-info strong { color: #2d3a41; font-size: var(--font-md); font-weight: 650; }
+.pipeline-info strong { color: var(--color-text-primary); font-size: var(--font-md); font-weight: 650; }
 .pipeline-info p {
   display: -webkit-box;
   overflow: hidden;
   margin: 6px 0 0;
-  color: #8c989f;
+  color: var(--color-text-muted);
   font-size: var(--font-sm);
   line-height: 1.5;
   -webkit-box-orient: vertical;
@@ -527,20 +598,20 @@ onMounted(() => loadData())
   max-width: 100%;
   align-items: center;
   gap: 6px;
-  color: #58676f;
+  color: var(--color-text-secondary);
 }
 
-.step-flow li:not(:last-child)::after { content: '›'; margin-left: 2px; color: #aeb8bd; }
+.step-flow li:not(:last-child)::after { content: '›'; margin-left: 2px; color: var(--color-text-muted); }
 .step-flow li > span {
   display: grid;
   width: 25px;
   height: 25px;
   flex: 0 0 25px;
   place-items: center;
-  color: #087d71;
-  border: 1px solid #bce0da;
+  color: var(--color-primary);
+  border: 1px solid #d3e0f8;
   border-radius: 50%;
-  background: #effaf8;
+  background: var(--color-primary-soft);
   font-size: var(--font-caption);
   font-weight: 700;
 }
@@ -552,15 +623,15 @@ onMounted(() => loadData())
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.step-flow small { color: #159c8d; font-size: var(--font-caption); white-space: nowrap; }
+.step-flow small { color: var(--color-primary); font-size: var(--font-caption); white-space: nowrap; }
 
 .environment-info strong,
 .environment-info code { display: block; }
-.environment-info strong { color: #4d5c63; font-size: var(--font-sm); }
+.environment-info strong { color: var(--color-text-secondary); font-size: var(--font-sm); }
 .environment-info code {
   overflow: hidden;
   margin-top: 6px;
-  color: #738188;
+  color: var(--color-text-muted);
   font-size: var(--font-xs);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -571,32 +642,32 @@ onMounted(() => loadData())
 
 .table-footer {
   display: flex;
-  min-height: 76px;
+  min-height: 60px;
   align-items: center;
   justify-content: space-between;
   gap: 18px;
   padding: 10px 16px;
-  border-top: 1px solid #edf1f3;
+  border-top: 1px solid var(--color-border-light);
 }
 
-.table-footer > span { color: #909ba1; font-size: var(--font-sm); }
+.table-footer > span { color: var(--color-text-muted); font-size: var(--font-sm); }
 
 :deep(.el-table) {
-  --el-table-border-color: #edf1f3;
-  --el-table-header-bg-color: #fafbfb;
-  --el-table-row-hover-bg-color: #f7faf9;
-  color: #69777f;
+  --el-table-border-color: var(--color-border-light);
+  --el-table-header-bg-color: #f8faff;
+  --el-table-row-hover-bg-color: #f7f9fd;
+  color: var(--color-text-secondary);
   font-size: var(--font-sm);
 }
 
 :deep(.el-table th.el-table__cell) {
-  height: 58px;
-  color: #7c898f;
+  height: 46px;
+  color: #6b778c;
   font-size: var(--font-xs);
   font-weight: 650;
 }
 
-:deep(.el-table td.el-table__cell) { height: 106px; }
+:deep(.el-table td.el-table__cell) { height: 92px; }
 
 @media (max-width: 1350px) {
   .toolbar__filters,
@@ -613,7 +684,7 @@ onMounted(() => loadData())
   .page-heading { gap: 16px; }
   .page-heading .el-button { width: 100%; }
   .summary-strip { grid-template-columns: 1fr; }
-  .summary-strip > div { min-height: 70px; border-right: 0; border-bottom: 1px solid #edf1f3; }
+  .summary-strip > div { min-height: 70px; border-right: 0; border-bottom: 1px solid var(--color-border-light); }
   .summary-strip > div:last-child { border-bottom: 0; }
   .toolbar__filters,
   .toolbar__actions { align-items: stretch; flex-direction: column; }

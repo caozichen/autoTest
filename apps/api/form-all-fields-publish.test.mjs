@@ -749,8 +749,7 @@ function mockApplicationHtml() {
             '<label><input type="radio" name="initial-strategy" value="ignore">忽略，不替换</label>',
             button('确定', 'id="confirm-initial-strategy"'),
           ].join('')
-          document.querySelector('#confirm-initial-strategy').onclick = async () => {
-            await api('/be/form/202/config', { method: 'PUT', body: JSON.stringify({ selected: 'ignore' }) })
+          document.querySelector('#confirm-initial-strategy').onclick = () => {
             addType('contactGroup')
             document.querySelector('#collect-dialog').remove()
           }
@@ -850,6 +849,7 @@ function mockApplicationHtml() {
 
 test('creates, configures, uploads, saves, and publishes the complete three-page form', async () => {
   const requests = []
+  const apiResponses = []
   const signatureRequests = []
   const storageUploads = []
   const themeRequests = []
@@ -960,7 +960,7 @@ test('creates, configures, uploads, saves, and publishes the complete three-page
       return
     }
     if (request.method === 'GET' && url.pathname === '/api/be/form/202') {
-      sendJson(response, { code: 0, message: 'success', data: { form: { id: 202 } } })
+      sendJson(response, { code: 0, message: 'success', data: { form: { id: 202, form_code: 'dynamic-all-fields' } } })
       return
     }
     if (request.method === 'PUT' && url.pathname === '/api/be/form/202/items') {
@@ -1025,18 +1025,54 @@ test('creates, configures, uploads, saves, and publishes the complete three-page
       extraHTTPHeaders: { Authorization: 'Bearer all-fields-token' },
       captureFailureScreenshot: false,
       logger: (level, message, details) => logs.push({ level, message, details }),
+      recordApiResponse: (response) => apiResponses.push(response),
     })
     const result = await runScenario()
 
     assert.equal(result.formId, '202')
+    assert.equal(result.formCode, 'dynamic-all-fields')
+    assert.equal(result.formContract.formCode, 'dynamic-all-fields')
+    assert.equal(result.formContract.fieldKeys.radio, savedItemsPayload.items.find((item) => item.type_code === 'radio').item_key)
     assert.equal(result.status, 'published')
     assert.equal(result.browser, 'chrome')
     assert.equal(result.headless, true)
     assert.equal(result.pageCount, 3)
     assert.equal(result.totalComponentCount, EXPECTED_FIELD_SEQUENCE.length)
     assert.equal(result.requiredQuestionCount, REQUIRED_FIELD_TYPES.length)
+    assert.deepEqual(result.publishResponse, {
+      code: 0,
+      message: 'success',
+      data: { form_id: 202, revision_no: 1, status: 'published' },
+    })
+    assert.equal(result.publishedRecord.id, 202)
+    assert.equal(result.publishedRecord.status, 'published')
     assert.match(result.title, /^自动化测试全题型表单-\d+$/)
     assert.equal(savedTitle, result.title)
+
+    const publishApiResponse = apiResponses.find((response) => (
+      response.method === 'POST' && response.name.endsWith('/be/form/202/publish')
+    ))
+    assert.deepEqual(publishApiResponse?.responseBody, result.publishResponse)
+    assert.equal(publishApiResponse?.status, 200)
+    assert.equal(publishApiResponse?.ok, true)
+
+    const itemsApiResponse = apiResponses.find((response) => (
+      response.method === 'PUT' && response.name.endsWith('/be/form/202/items')
+    ))
+    assert.deepEqual(itemsApiResponse?.requestBody, savedItemsPayload)
+    assert.deepEqual(itemsApiResponse?.responseBody, {
+      code: 0,
+      message: 'success',
+      data: { revision_no: 1 },
+    })
+
+    const listApiResponse = apiResponses.find((response) => {
+      if (response.method !== 'GET' || !response.name.endsWith('/be/form/list')) return false
+      return new URL(response.url).searchParams.get('filter[title]') === result.title
+    })
+    assert.ok(listApiResponse, 'GET 列表响应必须保留查询参数并被采集')
+    assert.equal(Object.hasOwn(listApiResponse, 'requestBody'), false)
+    assert.equal(listApiResponse.responseBody.data.list[0].id, 202)
 
     assert.ok(savedItemsPayload, '必须发送真实 items 保存载荷')
     assert.equal(savedItemsPayload.revision_no, 1)
@@ -1091,10 +1127,10 @@ test('creates, configures, uploads, saves, and publishes the complete three-page
     assert.equal(completeRequests.length, 3)
     assert.equal(themeRequests.length, 1, '只有头图应请求系统推荐配色')
     assert.ok(signatureRequests.every((entry) => entry.body.original_name === IMAGE_FILE_NAME))
-    assert.ok(signatureRequests.every((entry) => entry.body.mime_type === 'image/jpeg'))
+    assert.ok(signatureRequests.every((entry) => entry.body.mime_type === 'image/png'))
     assert.ok(signatureRequests.every((entry) => entry.body.file_type === 'image'))
     assert.ok(signatureRequests.every((entry) => entry.body.visibility === 'private'))
-    assert.ok(storageUploads.every((entry) => entry.size > 0 && entry.contentType === 'image/jpeg'))
+    assert.ok(storageUploads.every((entry) => entry.size > 0 && entry.contentType === 'image/png'))
     assert.equal(themeRequests[0].uploadId, signatureRequests[2].uploadId)
 
     assert.ok(savedConfigPayload, '必须发送真实 config 保存载荷')
@@ -1104,6 +1140,11 @@ test('creates, configures, uploads, saves, and publishes the complete three-page
     assert.equal(savedConfigPayload.theme_config.form_container.background_color, '#e2e8f0')
     assert.equal(savedConfigPayload.theme_config.wallpaper.background_color.color, '#0f766e')
     assert.equal(strategy, 'ignore')
+    assert.equal(
+      requests.filter((entry) => entry.path === '/api/be/form/202/config' && entry.body.selected === 'ignore').length,
+      1,
+      '设计器首次联系人弹窗即使不发送 config 请求也应继续，设置页负责持久化忽略策略',
+    )
     assert.equal(published, true)
 
     const businessRequests = requests.filter((entry) => entry.path.startsWith('/api/be/') || entry.path.startsWith('/api/base/'))

@@ -19,6 +19,10 @@ function testEnvironment(): TestEnvironment {
       method: 'POST',
       timeoutMs: 45_000,
       loginPath: '/be/login/mobile',
+      requestBody: JSON.stringify({
+        mobile: '13800000000',
+        verify_code: '123456',
+      }),
       username: '',
       password: '',
       mobile: '13800000000',
@@ -75,6 +79,26 @@ describe('FetchEnvironmentLoginService', () => {
       status: 200,
       extractedToken: 'token-value',
       extractedTokenType: 'Bearer',
+    })
+  })
+
+  it('sends nested values from the configured JSON request body without rebuilding it', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response('{"code":0}', { status: 200 }))
+    const environment = testEnvironment()
+    environment.auth.requestBody = JSON.stringify({
+      mobile: '13671153204',
+      verify_code: '666666',
+      client: { platform: 'web', remember: true },
+    })
+    const service = new FetchEnvironmentLoginService({ fetcher })
+
+    await service.login(environment)
+
+    const [, options] = fetcher.mock.calls[0] ?? []
+    expect(JSON.parse(String(options?.body))).toEqual({
+      mobile: '13671153204',
+      verify_code: '666666',
+      client: { platform: 'web', remember: true },
     })
   })
 

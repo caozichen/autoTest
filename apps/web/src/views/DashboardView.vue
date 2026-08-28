@@ -54,16 +54,34 @@ onMounted(() => loadDashboard())
 
 <template>
   <div class="dashboard">
-    <header class="page-heading">
-      <div>
-        <p>{{ greetingDate }}</p>
-        <h1>运行概览</h1>
-        <span>本地自动化测试工作区</span>
+    <section class="welcome-panel">
+      <header class="page-heading">
+        <div>
+          <p>{{ greetingDate }}</p>
+          <h1>运行概览</h1>
+          <span>本地自动化测试工作区</span>
+        </div>
+      </header>
+      <div class="welcome-panel__actions">
+        <div v-if="snapshot" class="welcome-panel__node">
+          <span class="welcome-panel__node-icon"><el-icon :size="18"><Connection /></el-icon></span>
+          <div>
+            <small>本地执行节点</small>
+            <strong>{{ snapshot.runner.browser ?? '暂无数据' }}</strong>
+          </div>
+          <span class="runner-state" :class="{ 'runner-state--offline': snapshot.runner.status === 'offline' }">
+            <i />{{ snapshot.runner.status === 'online' ? '在线' : '离线' }}
+          </span>
+        </div>
+        <el-button :icon="RefreshRight" :loading="loading" @click="loadDashboard(true)">刷新数据</el-button>
       </div>
-      <el-button :icon="RefreshRight" :loading="loading" @click="loadDashboard(true)">刷新</el-button>
-    </header>
+    </section>
 
     <template v-if="snapshot">
+      <div class="section-heading">
+        <h2>统计指标</h2>
+        <span>当前工作区概况</span>
+      </div>
       <section class="metric-grid" aria-label="核心指标">
         <MetricCard v-for="metric in snapshot.metrics" :key="metric.id" :metric="metric" />
       </section>
@@ -116,9 +134,9 @@ onMounted(() => loadDashboard())
           <el-table-column label="任务名称" min-width="240">
             <template #default="scope">
               <div class="run-name">
-                <el-icon v-if="scope.row.status === 'passed'" color="#25a866"><CircleCheck /></el-icon>
-                <el-icon v-else-if="scope.row.status === 'failed'" color="#d84f56"><Warning /></el-icon>
-                <el-icon v-else color="#c6811a"><Clock /></el-icon>
+                <el-icon v-if="scope.row.status === 'passed'" color="var(--color-success)"><CircleCheck /></el-icon>
+                <el-icon v-else-if="scope.row.status === 'failed'" color="var(--color-danger)"><Warning /></el-icon>
+                <el-icon v-else color="var(--color-warning)"><Clock /></el-icon>
                 <strong>{{ scope.row.name }}</strong>
               </div>
             </template>
@@ -155,12 +173,23 @@ onMounted(() => loadDashboard())
   min-width: 0;
 }
 
+.welcome-panel {
+  display: grid;
+  align-items: center;
+  gap: 24px;
+  margin-bottom: 18px;
+  padding: 26px 30px;
+  border: 1px solid #dde6f3;
+  border-radius: var(--radius-card);
+  grid-template-columns: minmax(0, 1fr) auto;
+  background: #f7faff;
+  box-shadow: 0 8px 24px rgb(31 42 68 / 3%);
+}
+
 .page-heading {
   display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 24px;
-  margin-bottom: 24px;
+  min-width: 0;
+  align-items: center;
 }
 
 .page-heading p,
@@ -170,45 +199,113 @@ onMounted(() => loadDashboard())
 }
 
 .page-heading p {
-  margin-bottom: 5px;
-  color: #159c8d;
-  font-size: var(--font-md);
+  margin-bottom: 7px;
+  color: #6f7f99;
+  font-size: var(--font-sm);
   font-weight: 600;
 }
 
 .page-heading h1 {
-  color: #17232a;
+  color: var(--color-text-primary);
   font-size: var(--font-title);
-  font-weight: 700;
+  font-weight: 780;
 }
 
 .page-heading span {
   display: block;
-  margin-top: 8px;
-  color: #8a969d;
+  margin-top: 7px;
+  color: var(--color-text-secondary);
   font-size: var(--font-md);
+}
+
+.welcome-panel__actions,
+.welcome-panel__node {
+  display: flex;
+  align-items: center;
+}
+
+.welcome-panel__actions {
+  gap: 12px;
+}
+
+.welcome-panel__node {
+  min-height: 50px;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+}
+
+.welcome-panel__node-icon {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  color: var(--color-primary);
+  border-radius: 5px;
+  background: var(--color-primary-soft);
+}
+
+.welcome-panel__node small,
+.welcome-panel__node strong {
+  display: block;
+}
+
+.welcome-panel__node small {
+  color: var(--color-text-muted);
+  font-size: var(--font-caption);
+}
+
+.welcome-panel__node strong {
+  margin-top: 1px;
+  color: var(--color-text-primary);
+  font-size: var(--font-sm);
+}
+
+.section-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 0 2px 10px;
+}
+
+.section-heading h2,
+.section-heading span {
+  margin: 0;
+}
+
+.section-heading h2 {
+  color: var(--color-text-primary);
+  font-size: var(--font-lg);
+  font-weight: 750;
+}
+
+.section-heading span {
+  color: var(--color-text-muted);
+  font-size: var(--font-xs);
 }
 
 .metric-grid,
 .loading-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 20px;
+  gap: 12px;
 }
 
 .overview-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.8fr) minmax(280px, 0.72fr);
-  gap: 20px;
-  margin-top: 20px;
+  grid-template-columns: minmax(0, 1.72fr) minmax(280px, 0.58fr);
+  gap: 16px;
+  margin-top: 16px;
 }
 
 .panel {
   min-width: 0;
-  border: 1px solid #e1e7ea;
-  border-radius: 7px;
-  background: #fff;
-  box-shadow: 0 5px 18px rgb(24 45 55 / 4%);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-card);
 }
 
 .panel__header {
@@ -216,8 +313,8 @@ onMounted(() => loadDashboard())
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
-  padding: 24px 26px;
-  border-bottom: 1px solid #edf1f3;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--color-border-light);
 }
 
 .panel__header h2,
@@ -226,19 +323,19 @@ onMounted(() => loadDashboard())
 }
 
 .panel__header h2 {
-  color: #26333a;
+  color: var(--color-text-primary);
   font-size: var(--font-lg);
-  font-weight: 650;
+  font-weight: 720;
 }
 
 .panel__header p {
-  margin-top: 5px;
-  color: #98a3a9;
+  margin-top: 3px;
+  color: var(--color-text-muted);
   font-size: var(--font-sm);
 }
 
 .panel__badge {
-  color: #178f83;
+  color: var(--color-primary);
   font-size: var(--font-caption);
   font-weight: 700;
 }
@@ -248,32 +345,32 @@ onMounted(() => loadDashboard())
 }
 
 .trend-panel :deep(.trend-chart) {
-  padding: 10px 16px 0;
+  padding: 8px 12px 0;
 }
 
 .runner-state {
   display: flex;
   align-items: center;
   gap: 7px;
-  color: #268b54;
-  font-size: var(--font-sm);
+  color: var(--color-success);
+  font-size: var(--font-xs);
 }
 
 .runner-state i {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: #39c877;
-  box-shadow: 0 0 0 4px rgb(57 200 119 / 11%);
+  background: var(--color-success);
+  box-shadow: 0 0 0 3px rgb(46 159 107 / 12%);
 }
 
 .runner-state--offline {
-  color: #a14c4c;
+  color: var(--color-danger);
 }
 
 .runner-state--offline i {
-  background: #d65b5b;
-  box-shadow: 0 0 0 4px rgb(214 91 91 / 11%);
+  background: var(--color-danger);
+  box-shadow: 0 0 0 3px rgb(226 85 93 / 12%);
 }
 
 .panel-empty {
@@ -285,62 +382,62 @@ onMounted(() => loadDashboard())
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 28px 20px 22px;
+  padding: 24px 18px 18px;
 }
 
 .runner-visual__icon {
   display: grid;
-  width: 78px;
-  height: 78px;
+  width: 64px;
+  height: 64px;
   place-items: center;
-  color: #0a8f81;
-  border: 1px solid #ccebe5;
+  color: var(--color-primary);
+  border: 1px solid #d8e4fb;
   border-radius: 7px;
-  background: #eaf8f5;
+  background: var(--color-primary-soft);
 }
 
 .runner-visual strong {
   margin-top: 14px;
-  color: #26343b;
+  color: var(--color-text-primary);
   font-size: var(--font-lg);
 }
 
 .runner-visual p {
   margin: 5px 0 0;
-  color: #95a0a6;
+  color: var(--color-text-muted);
   font-size: var(--font-sm);
 }
 
 .runner-details {
-  margin: 0 20px 20px;
-  border-top: 1px solid #eef2f3;
+  margin: 0 18px 18px;
+  border-top: 1px solid var(--color-border-light);
 }
 
 .runner-details div {
   display: flex;
-  min-height: 54px;
+  min-height: 48px;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  border-bottom: 1px solid #f0f3f4;
+  border-bottom: 1px solid var(--color-border-light);
   font-size: var(--font-sm);
 }
 
 .runner-details dt {
-  color: #929ea5;
+  color: var(--color-text-muted);
 }
 
 .runner-details dd {
   overflow: hidden;
   margin: 0;
-  color: #405058;
+  color: var(--color-text-secondary);
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .runs-panel {
-  margin-top: 20px;
+  margin-top: 16px;
   overflow: hidden;
 }
 
@@ -355,35 +452,35 @@ onMounted(() => loadDashboard())
 }
 
 .run-name strong {
-  color: #344149;
+  color: var(--color-text-primary);
   font-size: var(--font-md);
   font-weight: 600;
 }
 
 .loading-grid > * {
   padding: 20px;
-  border: 1px solid #e1e7ea;
-  border-radius: 7px;
-  background: #fff;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  background: var(--color-surface);
 }
 
 :deep(.el-table) {
-  --el-table-border-color: #edf1f3;
-  --el-table-header-bg-color: #fafbfb;
-  --el-table-row-hover-bg-color: #f7faf9;
-  color: #69777f;
+  --el-table-border-color: var(--color-border-light);
+  --el-table-header-bg-color: #f8faff;
+  --el-table-row-hover-bg-color: #f7f9fd;
+  color: var(--color-text-secondary);
   font-size: var(--font-md);
 }
 
 :deep(.el-table th.el-table__cell) {
-  height: 56px;
-  color: #7c898f;
+  height: 46px;
+  color: #6b778c;
   font-size: var(--font-sm);
   font-weight: 600;
 }
 
 :deep(.el-table td.el-table__cell) {
-  height: 66px;
+  height: 58px;
 }
 
 @media (max-width: 1180px) {
@@ -399,22 +496,46 @@ onMounted(() => loadDashboard())
   }
 }
 
+@media (max-width: 860px) {
+  .welcome-panel {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+  }
+
+  .welcome-panel__actions {
+    justify-content: space-between;
+  }
+}
+
 @media (max-width: 560px) {
   .metric-grid,
   .loading-grid {
     grid-template-columns: 1fr;
   }
 
-  .page-heading {
-    align-items: center;
+  .welcome-panel {
+    padding: 20px;
   }
 
-  .page-heading span {
-    display: none;
+  .welcome-panel__actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .welcome-panel__node {
+    justify-content: flex-start;
+  }
+
+  .welcome-panel__node .runner-state {
+    margin-left: auto;
   }
 
   .page-heading h1 {
-    font-size: var(--font-section);
+    font-size: var(--font-subtitle);
+  }
+
+  .section-heading span {
+    display: none;
   }
 }
 </style>

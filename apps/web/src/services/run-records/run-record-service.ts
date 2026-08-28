@@ -13,5 +13,6 @@ export interface RunRecordService {
   appendLog(id: string, draft: AppendRunLogDraft): Promise<RunRecord>
   complete(id: string, draft: CompleteRunRecordDraft): Promise<RunRecord>
   fail(id: string, draft: FailRunRecordDraft): Promise<RunRecord>
+  interrupt(id: string, reason: string): Promise<RunRecord>
   interruptByScriptId(scriptId: string): Promise<RunRecord[]>
 }

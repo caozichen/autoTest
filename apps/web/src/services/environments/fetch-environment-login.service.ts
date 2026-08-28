@@ -1,5 +1,5 @@
 import type { EnvironmentLoginResult } from '@/domain/environment-login'
-import type { TestEnvironment } from '@/domain/environment'
+import { parseEnvironmentRequestBody, type TestEnvironment } from '@/domain/environment'
 import { getValueAtPath } from '@/domain/object-path'
 import type { EnvironmentLoginService } from './environment-login-service'
 
@@ -10,20 +10,6 @@ interface FetchEnvironmentLoginServiceOptions {
 
 function joinUrl(baseUrl: string, path: string): string {
   return `${baseUrl.replace(/\/+$/, '')}/${path.replace(/^\/+/, '')}`
-}
-
-function buildRequestBody(environment: TestEnvironment): Record<string, string> {
-  if (environment.auth.mode === 'mobile-code') {
-    return {
-      mobile: environment.auth.mobile,
-      verify_code: environment.auth.verifyCode,
-    }
-  }
-
-  return {
-    username: environment.auth.username,
-    password: environment.auth.password,
-  }
 }
 
 function parseResponse(rawResponse: string): unknown {
@@ -57,7 +43,7 @@ export class FetchEnvironmentLoginService implements EnvironmentLoginService {
 
   async login(environment: TestEnvironment): Promise<EnvironmentLoginResult> {
     const targetUrl = joinUrl(environment.apiBaseUrl, environment.auth.loginPath)
-    const requestBody = buildRequestBody(environment)
+    const requestBody = parseEnvironmentRequestBody(environment.auth.requestBody)
     const timeoutMs = environment.auth.timeoutMs > 0 ? environment.auth.timeoutMs : this.timeoutMs
     const controller = new AbortController()
     const startedAt = performance.now()

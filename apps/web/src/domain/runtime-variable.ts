@@ -4,6 +4,7 @@ export interface RuntimeVariable {
   secret: boolean
   authorizationScheme?: string
   sourceEnvironmentId: string
+  sourceScriptId?: string
   sourcePath: string
   updatedAt: string
 }

@@ -1,8 +1,15 @@
-import { access, mkdir } from 'node:fs/promises'
+import { access, mkdir, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { deflateSync } from 'node:zlib'
 
-import { chromium, expect } from '@playwright/test'
+import { expect } from './support/recorded-expect.mjs'
+import { attachApiResponseRecorder } from './support/api-response-recorder.mjs'
+import {
+  createFormLinkContract,
+  firstFormCode,
+} from './support/form-link-contract.mjs'
+import { launchGoogleChrome } from './support/google-chrome.mjs'
 
 import {
   closePlaywrightHandles,
@@ -15,7 +22,7 @@ const ACTION_TIMEOUT_MS = 30_000
 const AUTHENTICATED_API_PATH_PREFIXES = ['/api/be/', '/api/base/', '/be/', '/base/']
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const SCREENSHOT_DIR = resolve(SCRIPT_DIR, '..', 'outputs', 'form-all-fields-publish')
-const DEFAULT_HEADER_IMAGE_PATH = 'C:\\Users\\admin\\Desktop\\\u5fae\u4fe1\u56fe\u7247_20250903191551_63_4.jpeg'
+const DEFAULT_HEADER_IMAGE_PATH = resolve(SCREENSHOT_DIR, 'fixtures', 'autotest-form-header.png')
 
 const FORM_SUBTITLE = '\u672c\u8868\u5355\u7528\u4e8e\u6d3b\u52a8\u62a5\u540d\u4e0e\u4fe1\u606f\u767b\u8bb0\uff0c\u8bf7\u6309\u5b9e\u9645\u60c5\u51b5\u5b8c\u6574\u586b\u5199\u3002'
 const FORM_CONTENT_HEADING = '\u586b\u5199\u987b\u77e5'
@@ -28,6 +35,72 @@ const DESCRIPTION_FIELD_TITLE = '\u62a5\u540d\u4e0e\u8054\u7cfb\u4eba\u8bf4\u660
 const DESCRIPTION_FIELD_CONTENT = '\u8bf7\u786e\u8ba4\u8054\u7cfb\u4eba\u4fe1\u606f\u51c6\u786e\u65e0\u8bef\uff0c\u63d0\u4ea4\u540e\u5c06\u7528\u4e8e\u6d3b\u52a8\u62a5\u540d\u53ca\u76f8\u5173\u901a\u77e5\u3002'
 const DIVIDER_TEXT = '\u8865\u5145\u4fe1\u606f'
 const SYSTEM_ITEM_KEYS = ['duration', 'device', 'os', 'browser']
+
+function crc32(buffer) {
+  let crc = 0xffffffff
+  for (const byte of buffer) {
+    crc ^= byte
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0)
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0
+}
+
+function pngChunk(type, data) {
+  const typeBuffer = Buffer.from(type, 'ascii')
+  const chunk = Buffer.alloc(12 + data.length)
+  chunk.writeUInt32BE(data.length, 0)
+  typeBuffer.copy(chunk, 4)
+  data.copy(chunk, 8)
+  chunk.writeUInt32BE(crc32(Buffer.concat([typeBuffer, data])), 8 + data.length)
+  return chunk
+}
+
+function createDefaultHeaderImage() {
+  const width = 1200
+  const height = 400
+  const pixels = Buffer.alloc((width * 3 + 1) * height)
+  for (let y = 0; y < height; y += 1) {
+    const rowStart = y * (width * 3 + 1)
+    pixels[rowStart] = 0
+    for (let x = 0; x < width; x += 1) {
+      const offset = rowStart + 1 + x * 3
+      const highlight = Math.max(0, 1 - Math.hypot(x - 820, y - 150) / 520)
+      pixels[offset] = Math.round(18 + 22 * highlight)
+      pixels[offset + 1] = Math.round(92 + 80 * highlight + 24 * (x / width))
+      pixels[offset + 2] = Math.round(98 + 68 * highlight + 34 * (1 - y / height))
+    }
+  }
+
+  const header = Buffer.alloc(13)
+  header.writeUInt32BE(width, 0)
+  header.writeUInt32BE(height, 4)
+  header[8] = 8
+  header[9] = 2
+  return Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    pngChunk('IHDR', header),
+    pngChunk('IDAT', deflateSync(pixels, { level: 9 })),
+    pngChunk('IEND', Buffer.alloc(0)),
+  ])
+}
+
+async function ensureHeaderImage(headerImagePath) {
+  const imagePath = resolve(headerImagePath)
+  try {
+    await access(imagePath)
+    return imagePath
+  } catch {
+    if (imagePath !== DEFAULT_HEADER_IMAGE_PATH) {
+      throw new Error(`头图文件不存在或不可读取：${imagePath}`)
+    }
+  }
+
+  await mkdir(dirname(DEFAULT_HEADER_IMAGE_PATH), { recursive: true })
+  await writeFile(DEFAULT_HEADER_IMAGE_PATH, createDefaultHeaderImage())
+  return DEFAULT_HEADER_IMAGE_PATH
+}
 
 const CONTACT_PRESET_TYPES = ['username', 'mobile', 'email']
 const CONTACT_EXTRA_TYPES = ['idCard', 'landlinePhone', 'address', 'birthday']
@@ -188,14 +261,15 @@ function formatBusinessBody(body) {
 }
 
 async function assertBusinessResponse(response, label) {
-  expect(response.ok(), `${label} HTTP 状态应成功，实际 ${response.status()}`).toBeTruthy()
+  if (!response.ok()) throw new Error(`${label}接口返回 HTTP ${response.status()}`)
   const body = await response.json().catch(() => null)
-  expect(body && typeof body === 'object', `${label}应返回 JSON 业务信封`).toBeTruthy()
-  expect(
-    Object.prototype.hasOwnProperty.call(body, 'code'),
-    `${label}响应必须包含业务码，实际 ${formatBusinessBody(body)}`,
-  ).toBeTruthy()
-  expect(body.code, `${label}业务码应为 0，实际响应 ${formatBusinessBody(body)}`).toBe(0)
+  if (!body || typeof body !== 'object') throw new Error(`${label}接口未返回有效 JSON 业务信封`)
+  if (!Object.prototype.hasOwnProperty.call(body, 'code')) {
+    throw new Error(`${label}响应缺少业务码，实际 ${formatBusinessBody(body)}`)
+  }
+  if (Number(body.code) !== 0) {
+    throw new Error(`${label}业务码应为 0，实际响应 ${formatBusinessBody(body)}`)
+  }
   return body
 }
 
@@ -204,6 +278,22 @@ function waitForExactResponse(page, method, pathnameSuffix) {
     const url = new URL(response.url())
     return response.request().method() === method && url.pathname.endsWith(pathnameSuffix)
   }, { timeout: ACTION_TIMEOUT_MS })
+}
+
+async function fetchFormDetail(page, apiBaseUrl, formId, authorization) {
+  const detailUrl = new URL(`be/form/${encodeURIComponent(formId)}`, `${apiBaseUrl.replace(/\/+$/, '')}/`).toString()
+  const result = await page.evaluate(async ({ url, token }) => {
+    const response = await fetch(url, { headers: { Authorization: token } })
+    return {
+      ok: response.ok,
+      status: response.status,
+      body: await response.json().catch(() => null),
+    }
+  }, { url: detailUrl, token: authorization })
+  if (!result.ok) throw new Error(`读取已发布表单详情接口返回 HTTP ${result.status}`)
+  if (!result.body || typeof result.body !== 'object') throw new Error('读取已发布表单详情接口未返回有效 JSON')
+  if (Number(result.body.code) !== 0) throw new Error(`读取已发布表单详情接口业务码异常：${result.body.code}`)
+  return result.body
 }
 
 function shanghaiDateParts(timestamp = Date.now()) {
@@ -283,7 +373,7 @@ async function uploadImageThroughBrowser(page, input, imagePath, { includeTheme 
   const signatureResponse = await signaturePromise
   const signatureBody = await assertBusinessResponse(signatureResponse, `${label}上传签名`)
   const uploadId = String(signatureBody.data?.upload_id ?? '').trim()
-  expect(uploadId, `${label}上传签名应返回 upload_id`).toBeTruthy()
+  if (!uploadId) throw new Error(`${label}上传签名接口未返回 upload_id`)
 
   if (themePromise) {
     const themeResponse = await themePromise
@@ -298,8 +388,8 @@ async function uploadImageThroughBrowser(page, input, imagePath, { includeTheme 
 
   const completeResponse = await completePromise
   const completeBody = await assertBusinessResponse(completeResponse, `${label}上传完成确认`)
-  expect(completeBody.data?.id, `${label}上传完成应返回文件 id`).toBeTruthy()
-  expect(completeBody.data?.full_path, `${label}上传完成应返回完整访问地址`).toBeTruthy()
+  if (!completeBody.data?.id) throw new Error(`${label}上传完成接口未返回文件 id`)
+  if (!completeBody.data?.full_path) throw new Error(`${label}上传完成接口未返回完整访问地址`)
   return uploadId
 }
 
@@ -360,20 +450,23 @@ async function chooseContactCollectionInDesigner(page, logger) {
     .catch(() => false)
   if (replaceDialogVisible) {
     await replaceDialog.getByText(/忽略，不替换|忽略，不替換/, { exact: true }).click()
-    const saveResult = await waitForApiResponse(
-      page,
-      '/config',
-      () => clickFirstVisible([
-        replaceDialog.getByRole('button', { name: /确定|確認|OK/i }),
-        replaceDialog.locator('button').last(),
-      ], '确认忽略不替换'),
-      '保存联系人收录策略',
-    )
-    expect(saveResult.body?.code ?? 0, '联系人收录策略应保存成功').toBe(0)
+    await clickFirstVisible([
+      replaceDialog.getByRole('button', { name: /确定|確認|OK/i }),
+      replaceDialog.locator('button').last(),
+    ], '确认忽略不替换')
     await expect(replaceDialog, '联系人收录设置保存后弹窗应关闭').toBeHidden()
   } else if (collectDialogVisible) {
     throw new Error('确认收录联系人后未进入“联系人信息替换确认”步骤')
   }
+
+  await expect(
+    page.locator('.fb-dialog-overlay[data-state="open"]'),
+    '联系人收录设置完成后不应残留遮罩弹窗',
+  ).toHaveCount(0)
+  await expect.poll(
+    () => hasPresetContactFields(page),
+    { message: '联系人收录设置完成后应生成姓名、手机号、邮箱三道预设题' },
+  ).toBe(true)
 }
 
 async function hasPresetContactFields(page) {
@@ -834,35 +927,38 @@ export async function run({
   apiBaseUrl,
   ignoreHTTPSErrors = false,
   extraHTTPHeaders,
-  headerImagePath = DEFAULT_HEADER_IMAGE_PATH,
+  variables = {},
+  headerImagePath,
   captureFailureScreenshot = true,
   signal,
   logger,
+  recordApiResponse,
 }) {
-  expect(siteBaseUrl, '运行环境必须提供 Web 基址').toBeTruthy()
-  expect(apiBaseUrl, '运行环境必须提供 API 基址').toBeTruthy()
+  if (!siteBaseUrl) throw new Error('运行环境必须提供 Web 基址')
+  if (!apiBaseUrl) throw new Error('运行环境必须提供 API 基址')
   const authorization = extraHTTPHeaders?.Authorization
-  expect(authorization, '所有业务请求必须使用环境登录后的 Token').toBeTruthy()
+  if (!authorization) throw new Error('所有业务请求必须使用环境登录后的 Token')
 
   const title = timestampTitle()
-  const imagePath = resolve(headerImagePath)
-  await access(imagePath).catch(() => {
-    throw new Error(`头图文件不存在或不可读取：${imagePath}`)
-  })
+  const configuredHeaderImagePath = headerImagePath?.trim()
+    || variables.HEADER_IMAGE_PATH?.trim()
+    || DEFAULT_HEADER_IMAGE_PATH
+  const imagePath = await ensureHeaderImage(configuredHeaderImagePath)
   const today = shanghaiDateParts()
   const endDate = addLocalDays(today, 30)
   const siteOrigin = new URL(siteBaseUrl).origin
   const apiOrigin = new URL(apiBaseUrl).origin
-  expect(siteOrigin, 'Web 基址与 API 基址必须同源').toBe(apiOrigin)
+  if (siteOrigin !== apiOrigin) throw new Error('Web 基址与 API 基址必须同源')
 
   let browser
   let context
   let page
   let stopAbortClose = () => undefined
+  let stopApiResponseRecorder = async () => undefined
   try {
     throwIfRunAborted(signal)
     logger('info', '启动 Chrome 无头浏览器，界面不会显示', { browser: 'Google Chrome', headless: true })
-    browser = await chromium.launch({ channel: 'chrome', headless: true })
+    browser = await launchGoogleChrome()
     stopAbortClose = closePlaywrightOnAbort(signal, () => ({ browser, context }), { logger })
     throwIfRunAborted(signal)
     context = await browser.newContext({
@@ -873,6 +969,10 @@ export async function run({
     })
     throwIfRunAborted(signal)
     page = await context.newPage()
+    stopApiResponseRecorder = attachApiResponseRecorder(page, {
+      onApiResponse: recordApiResponse,
+      shouldRecord: ({ url }) => url.origin === apiOrigin,
+    })
     page.setDefaultTimeout(ACTION_TIMEOUT_MS)
     page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS)
 
@@ -908,7 +1008,7 @@ export async function run({
     )
     await page.waitForURL(/\/form-activity\/designer\?[^#]*id=/, { timeout: NAVIGATION_TIMEOUT_MS })
     formId = new URL(page.url()).searchParams.get('id') || String(createResponse.body?.data?.id ?? '')
-    expect(formId, '创建表单后 URL 或响应中必须包含表单 id').toBeTruthy()
+    if (!formId) throw new Error('创建表单后 URL 或响应中未返回表单 id')
     logger('success', '已通过页面进入表单设计器', { formId })
 
     const contactPalette = page.locator('button[data-component-type="contactGroup"]')
@@ -1046,6 +1146,21 @@ export async function run({
     await expect(titleLink, '列表中的表单标题应完全匹配').toHaveText(title)
     logger('success', '已发布列表断言通过，目标表单可见', { formId, title })
 
+    const formDetailResponse = await fetchFormDetail(page, apiBaseUrl, formId, authorization)
+    const formCode = firstFormCode(publishBody, publishedRecord, formDetailResponse) || String(formId)
+    const formContract = createFormLinkContract({
+      formId,
+      formCode,
+      title,
+      revisionNo: savedRevisionNo,
+      items: formDetailResponse?.data?.items || formDetailResponse?.data?.form?.items || itemsPayload.items,
+    })
+    logger('success', '已生成可供后续填写脚本使用的表单联动参数', {
+      formId,
+      formCode,
+      fieldCount: Object.values(formContract.fieldKeys).filter(Boolean).length,
+    })
+
     expect(tokenViolations, '所有 API 业务请求都必须携带环境 Token').toEqual([])
     expect(authenticatedRequestCount, '至少应观察到一个携带 Token 的业务请求').toBeGreaterThan(0)
     expect(authenticatedRequestCount, '携带 Token 的请求数应等于全部业务请求数').toBe(businessRequestCount)
@@ -1058,6 +1173,8 @@ export async function run({
 
     return {
       formId,
+      formCode,
+      formContract,
       title,
       status: 'published',
       browser: 'chrome',
@@ -1076,6 +1193,8 @@ export async function run({
         end: formatLocalDate(endDate),
       },
       authenticatedRequestCount,
+      publishResponse: publishBody,
+      publishedRecord,
     }
   } catch (error) {
     if (signal?.aborted) {
@@ -1088,6 +1207,7 @@ export async function run({
     }
     throw error
   } finally {
+    await stopApiResponseRecorder()
     const abortCloseStarted = await stopAbortClose()
     if (!abortCloseStarted) await closePlaywrightHandles({ context, browser }, { logger })
   }
