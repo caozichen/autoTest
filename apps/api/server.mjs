@@ -1,8 +1,9 @@
 import { createServer } from 'node:http'
 import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
+import { RunRecordFileStore, RunRecordStoreError } from './run-record-store.mjs'
 import { executeRegisteredScript, validateRunRequest } from './script-runner.mjs'
 
 const DEFAULT_HOST = '127.0.0.1'
@@ -16,6 +17,27 @@ const allowedOrigins = new Set([
 const RUN_SNAPSHOT_TTL_MS = 5 * 60 * 1000
 const DEFAULT_CANCELLATION_REASON = '用户强制停止运行'
 const DEFAULT_CANCELLATION_WAIT_TIMEOUT_MS = 3_500
+const DEFAULT_RUN_RECORD_DIRECTORY = fileURLToPath(new URL('../../data/run-records/', import.meta.url))
+const DEFAULT_REQUEST_LIMIT_BYTES = 1024 * 1024
+export const RUN_RECORD_REQUEST_LIMIT_BYTES = 64 * 1024 * 1024
+
+class RequestBodyTooLargeError extends Error {
+  constructor(limitBytes) {
+    super(`请求体超过 ${Math.round(limitBytes / 1024 / 1024)} MB 限制`)
+    this.name = 'RequestBodyTooLargeError'
+    this.statusCode = 413
+    this.code = 'REQUEST_BODY_TOO_LARGE'
+  }
+}
+
+class InvalidJsonBodyError extends Error {
+  constructor() {
+    super('请求体不是有效 JSON')
+    this.name = 'InvalidJsonBodyError'
+    this.statusCode = 400
+    this.code = 'INVALID_JSON_BODY'
+  }
+}
 
 function requestPath(requestUrl) {
   return new URL(requestUrl || '/', 'http://runner.local').pathname
@@ -49,16 +71,41 @@ function sendJson(response, statusCode, body, origin = '') {
   response.end(JSON.stringify(body))
 }
 
-async function readJson(request) {
+async function readJson(request, limitBytes = DEFAULT_REQUEST_LIMIT_BYTES) {
   const chunks = []
   let size = 0
   for await (const chunk of request) {
     size += chunk.length
-    if (size > 1024 * 1024) throw new Error('请求体超过 1 MB 限制')
+    if (size > limitBytes) throw new RequestBodyTooLargeError(limitBytes)
     chunks.push(chunk)
   }
   const raw = Buffer.concat(chunks).toString('utf8')
-  return raw ? JSON.parse(raw) : null
+  if (!raw) return null
+  try {
+    return JSON.parse(raw)
+  } catch {
+    throw new InvalidJsonBodyError()
+  }
+}
+
+function decodePathSegment(value) {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    throw new RunRecordStoreError('URL 中的运行记录 ID 编码无效')
+  }
+}
+
+function sendRunRecordError(response, error, origin) {
+  const statusCode = Number.isInteger(error?.statusCode) ? error.statusCode : 500
+  const message = statusCode >= 500
+    ? '运行记录存储失败'
+    : error instanceof Error ? error.message : '运行记录请求无效'
+  sendJson(response, statusCode, {
+    ok: false,
+    error: message,
+    ...(typeof error?.code === 'string' ? { code: error.code } : {}),
+  }, origin)
 }
 
 function parseCancellationReason(payload) {
@@ -78,8 +125,11 @@ export function createRunnerServer({
   validateRequest = validateRunRequest,
   runSnapshotTtlMs = RUN_SNAPSHOT_TTL_MS,
   cancellationWaitTimeoutMs = DEFAULT_CANCELLATION_WAIT_TIMEOUT_MS,
+  runRecordDirectory = DEFAULT_RUN_RECORD_DIRECTORY,
+  runRecordStore,
 } = {}) {
   const activeRuns = new Map()
+  const storedRunRecords = runRecordStore ?? new RunRecordFileStore({ directory: runRecordDirectory })
 
   function appendRunLog(run, level, message) {
     run.logs.push({
@@ -188,7 +238,7 @@ export function createRunnerServer({
     response.writeHead(204, {
       'Access-Control-Allow-Origin': origin,
       'Access-Control-Allow-Headers': 'Content-Type',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Methods': 'GET, POST, PATCH, OPTIONS',
       Vary: 'Origin',
     })
     response.end()
@@ -201,6 +251,69 @@ export function createRunnerServer({
   }
 
   const pathname = requestPath(request.url)
+
+  if (request.method === 'GET' && pathname === '/run-records') {
+    try {
+      const records = await storedRunRecords.list()
+      sendJson(response, 200, { records }, origin)
+    } catch (error) {
+      sendRunRecordError(response, error, origin)
+    }
+    return
+  }
+
+  if (request.method === 'POST' && pathname === '/run-records') {
+    try {
+      const payload = await readJson(request, RUN_RECORD_REQUEST_LIMIT_BYTES)
+      const record = await storedRunRecords.create(payload?.record)
+      sendJson(response, 201, { record }, origin)
+    } catch (error) {
+      sendRunRecordError(response, error, origin)
+    }
+    return
+  }
+
+  if (request.method === 'POST' && pathname === '/run-records/migrations/local-storage-v1') {
+    try {
+      const payload = await readJson(request, RUN_RECORD_REQUEST_LIMIT_BYTES)
+      const result = await storedRunRecords.migrate(payload?.records)
+      sendJson(response, 200, result, origin)
+    } catch (error) {
+      sendRunRecordError(response, error, origin)
+    }
+    return
+  }
+
+  const storedRunRecordMatch = pathname.match(/^\/run-records\/([^/]+)$/)
+  if (storedRunRecordMatch && request.method === 'GET') {
+    try {
+      const id = decodePathSegment(storedRunRecordMatch[1])
+      const record = await storedRunRecords.get(id)
+      if (!record) {
+        sendJson(response, 404, { ok: false, error: '运行记录不存在' }, origin)
+        return
+      }
+      sendJson(response, 200, { record }, origin)
+    } catch (error) {
+      sendRunRecordError(response, error, origin)
+    }
+    return
+  }
+
+  if (storedRunRecordMatch && request.method === 'PATCH') {
+    try {
+      const id = decodePathSegment(storedRunRecordMatch[1])
+      const payload = await readJson(request, RUN_RECORD_REQUEST_LIMIT_BYTES)
+      const record = await storedRunRecords.update(id, payload?.record, {
+        expectedRevision: payload?.expectedRevision,
+        expectedUpdatedAt: payload?.expectedUpdatedAt,
+      })
+      sendJson(response, 200, { record }, origin)
+    } catch (error) {
+      sendRunRecordError(response, error, origin)
+    }
+    return
+  }
 
   const runCancellationMatch = pathname.match(/^\/runs\/([^/]+)\/cancel$/)
   if (request.method === 'POST' && runCancellationMatch) {

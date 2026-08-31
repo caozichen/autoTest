@@ -229,6 +229,16 @@ function executionFixture(
   return { service, contexts, runtimeVariables, scripts, environmentLogin, runRecords }
 }
 
+function seedRuntimeVariable(runtimeVariables: SessionRuntimeVariableService): void {
+  runtimeVariables.upsert({
+    key: 'STALE_VALUE',
+    value: 'remove-after-run',
+    secret: false,
+    sourceEnvironmentId: 'env-testing',
+    sourcePath: 'data.stale',
+  })
+}
+
 describe('LocalAutomationPipelineExecutionService', () => {
   it('logs in once, runs steps in order and injects mapped output variables', async () => {
     const fixture = executionFixture({
@@ -255,8 +265,57 @@ describe('LocalAutomationPipelineExecutionService', () => {
       FORM_CODE: 'FORM-001',
       FORM_CONTRACT: '{"fieldKeys":{"username":"username_dynamic"}}',
     })
-    expect(fixture.runtimeVariables.get('FORM_ID')).toBeNull()
-    expect(fixture.runtimeVariables.get('FORM_CODE')).toBeNull()
+    expect(fixture.runtimeVariables.list()).toEqual([])
+  })
+
+  it('persists a running script snapshot before the pipeline step completes', async () => {
+    const fixture = executionFixture({
+      create: success({ data: { form: { id: 123, code: 'FORM-001', contract: {} } } }),
+      publish: success(),
+      verify: success(),
+    })
+    const releaseFirstStep = deferred<void>()
+    const progressStored = deferred<void>()
+    vi.mocked(fixture.scripts.run).mockImplementation(async (ids, context, onProgress) => {
+      const id = ids[0]
+      if (!id) throw new Error('missing script id')
+      fixture.contexts.push({ id, context: structuredClone(context) })
+      const result = id === 'create'
+        ? success({ data: { form: { id: 123, code: 'FORM-001', contract: {} } } })
+        : success()
+      if (id === 'create') {
+        const liveScript = script(id)
+        liveScript.status = 'running'
+        liveScript.lastRunResult = {
+          ok: false,
+          durationMs: 450,
+          logs: [{
+            timestamp: '2026-08-12T10:00:00.500Z',
+            level: 'info',
+            message: '正在执行创建步骤',
+          }],
+        }
+        await onProgress?.(liveScript)
+        progressStored.resolve(undefined)
+        await releaseFirstStep.promise
+      }
+      return [script(id, result)]
+    })
+
+    const task = fixture.service.run(pipeline())
+    await progressStored.promise
+
+    const runningRecord = (await fixture.runRecords.list())[0]
+    expect(runningRecord?.status).toBe('running')
+    expect(runningRecord?.scripts[0]).toMatchObject({
+      id: 'create',
+      status: 'running',
+      durationMs: 450,
+      logs: [{ message: '正在执行创建步骤' }],
+    })
+
+    releaseFirstStep.resolve(undefined)
+    await expect(task).resolves.toMatchObject({ status: 'passed' })
   })
 
   it('stores configured response variables and injects them into later pipeline steps', async () => {
@@ -275,14 +334,9 @@ describe('LocalAutomationPipelineExecutionService', () => {
 
     await fixture.service.run(pipeline())
 
-    expect(fixture.runtimeVariables.get('AUTO_FORM_ID')).toMatchObject({
-      value: '123',
-      sourceEnvironmentId: 'env-testing',
-      sourceScriptId: 'create',
-      sourcePath: 'data.form.id',
-    })
     expect(fixture.contexts[1]?.context.variables).toMatchObject({ AUTO_FORM_ID: '123' })
     expect(fixture.contexts[2]?.context.variables).toMatchObject({ AUTO_FORM_ID: '123' })
+    expect(fixture.runtimeVariables.list()).toEqual([])
   })
 
   it('stops after a failed step and marks remaining scripts as skipped', async () => {
@@ -304,10 +358,12 @@ describe('LocalAutomationPipelineExecutionService', () => {
         { id: 'verify', status: 'skipped', error: '前序步骤失败，未执行' },
       ],
     })
+    expect(fixture.runtimeVariables.list()).toEqual([])
   })
 
   it('records a login failure and does not start scripts', async () => {
     const fixture = executionFixture({}, loginResult(false))
+    seedRuntimeVariable(fixture.runtimeVariables)
 
     const record = await fixture.service.run(pipeline())
 
@@ -317,6 +373,7 @@ describe('LocalAutomationPipelineExecutionService', () => {
       failureStage: 'login',
       counts: { total: 3, passed: 0, failed: 0, skipped: 3 },
     })
+    expect(fixture.runtimeVariables.list()).toEqual([])
   })
 
   it('fails the target step when a mapped output path cannot be resolved', async () => {
@@ -354,6 +411,7 @@ describe('LocalAutomationPipelineExecutionService', () => {
 
   it('stops before login when cancellation is requested immediately after start', async () => {
     const fixture = executionFixture({})
+    seedRuntimeVariable(fixture.runtimeVariables)
     const target = pipeline()
 
     const task = fixture.service.run(target)
@@ -369,6 +427,7 @@ describe('LocalAutomationPipelineExecutionService', () => {
       counts: { total: 3, passed: 0, failed: 0, skipped: 3 },
     })
     expect(fixture.service.isRunning(target.id)).toBe(false)
+    expect(fixture.runtimeVariables.list()).toEqual([])
   })
 
   it('interrupts a pending login and does not start the first script after login returns', async () => {
@@ -429,6 +488,7 @@ describe('LocalAutomationPipelineExecutionService', () => {
         { id: 'verify', status: 'skipped' },
       ],
     })
+    expect(fixture.runtimeVariables.list()).toEqual([])
   })
 
   it('reports that an inactive pipeline cannot be stopped', async () => {

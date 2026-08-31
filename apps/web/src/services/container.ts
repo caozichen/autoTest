@@ -10,7 +10,7 @@ import { LocalScriptService } from './scripts/local-script.service'
 import type { ScriptService } from './scripts/script-service'
 import type { RuntimeVariableService } from './runtime-variables/runtime-variable-service'
 import { SessionRuntimeVariableService } from './runtime-variables/session-runtime-variable.service'
-import { LocalRunRecordService } from './run-records/local-run-record.service'
+import { HttpRunRecordService } from './run-records/http-run-record.service'
 import type { RunRecordService } from './run-records/run-record-service'
 import type { AutomationPipelineService } from './automation-pipelines/automation-pipeline-service'
 import { LocalAutomationPipelineService } from './automation-pipelines/local-automation-pipeline.service'
@@ -36,7 +36,7 @@ export interface ServiceContainer {
 
 const scripts = new LocalScriptService()
 const environments = new LocalEnvironmentService()
-const runRecords = new LocalRunRecordService()
+const runRecords = new HttpRunRecordService()
 const automationPipelines = new LocalAutomationPipelineService()
 const environmentLogin = new FetchEnvironmentLoginService()
 const runtimeVariables = new SessionRuntimeVariableService()

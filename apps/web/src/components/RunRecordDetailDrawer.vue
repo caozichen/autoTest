@@ -57,6 +57,7 @@ const statusMap: Record<RunRecordStatus, { label: string; type: 'success' | 'war
 
 const scriptStatusMap: Record<RunScriptStatus, { label: string; type: 'success' | 'warning' | 'danger' | 'info' }> = {
   queued: { label: '排队中', type: 'info' },
+  running: { label: '执行中', type: 'warning' },
   passed: { label: '已通过', type: 'success' },
   failed: { label: '失败', type: 'danger' },
   skipped: { label: '未执行', type: 'info' },

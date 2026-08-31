@@ -5,11 +5,17 @@ export interface ScriptStopResult {
   cancelledRunIds: string[]
 }
 
+export type ScriptRunProgressHandler = (script: AutomationScript) => void | Promise<void>
+
 export interface ScriptService {
   list(): Promise<AutomationScript[]>
   create(draft: ScriptDraft): Promise<AutomationScript>
   update(id: string, draft: ScriptDraft): Promise<AutomationScript>
   remove(id: string): Promise<void>
-  run(ids: string[], context: ScriptRunContext): Promise<AutomationScript[]>
+  run(
+    ids: string[],
+    context: ScriptRunContext,
+    onProgress?: ScriptRunProgressHandler,
+  ): Promise<AutomationScript[]>
   stop(id: string): Promise<ScriptStopResult>
 }

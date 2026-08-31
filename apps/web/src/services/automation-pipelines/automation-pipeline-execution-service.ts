@@ -11,6 +11,7 @@ import { applyResponseVariable } from '@/services/environments/apply-response-va
 import type { EnvironmentLoginService } from '@/services/environments/environment-login-service'
 import type { EnvironmentService } from '@/services/environments/environment-service'
 import type { RunRecordService } from '@/services/run-records/run-record-service'
+import { createRunScriptProgressDraft } from '@/services/run-records/script-run-progress'
 import type { RuntimeVariableService } from '@/services/runtime-variables/runtime-variable-service'
 import { buildScriptRunContext } from '@/services/scripts/script-run-context'
 import { applyScriptResponseVariables } from '@/services/scripts/script-response-variables'
@@ -177,6 +178,7 @@ export class LocalAutomationPipelineExecutionService implements AutomationPipeli
       if (this.activeExecutions.get(pipeline.id) === execution) {
         this.activeExecutions.delete(pipeline.id)
       }
+      this.dependencies.runtimeVariables.clear()
     })
   }
 
@@ -294,7 +296,20 @@ export class LocalAutomationPipelineExecutionService implements AutomationPipeli
           extraHTTPHeaders: { ...baseContext.extraHTTPHeaders },
         }
         execution.currentScriptId = step.scriptId
-        const completedScript = (await this.dependencies.scripts.run([step.scriptId], context))[0]
+        const completedScript = (await this.dependencies.scripts.run(
+          [step.scriptId],
+          context,
+          async (script) => {
+            const currentSecrets = [
+              ...secretValues,
+              ...this.dependencies.runtimeVariables.list()
+                .filter((variable) => variable.secret)
+                .map((variable) => variable.value),
+            ].filter(Boolean)
+            const progress = createRunScriptProgressDraft(script, currentSecrets)
+            if (progress) await this.dependencies.runRecords.updateScriptProgress(recordId, progress)
+          },
+        ))[0]
         if (execution.cancelRequested || completedScript?.lastRunResult?.cancelled) {
           return this.interruptExecution(execution)
         }

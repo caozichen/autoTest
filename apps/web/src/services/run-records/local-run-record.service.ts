@@ -11,6 +11,7 @@ import type {
   RunScriptRecord,
   RunScriptSnapshot,
   StartRunRecordDraft,
+  UpdateRunScriptProgressDraft,
 } from '@/domain/run-record'
 import type { ScriptAssertionResult, ScriptAssertionStatus } from '@/domain/assertion'
 import type { ScriptApiResponse } from '@/domain/script'
@@ -23,7 +24,7 @@ const LEGACY_SEED_IDS = new Set(['seed-batch-001', 'seed-batch-002', 'seed-batch
 const REDACTED = '[REDACTED]'
 const SENSITIVE_KEY = /authorization|token|password|passwd|secret|cookie|verify[_-]?code|mobile/i
 const STATUS_VALUES: RunRecordStatus[] = ['running', 'passed', 'failed', 'partial', 'interrupted']
-const SCRIPT_STATUS_VALUES: RunScriptRecord['status'][] = ['queued', 'passed', 'failed', 'skipped']
+const SCRIPT_STATUS_VALUES: RunScriptRecord['status'][] = ['queued', 'running', 'passed', 'failed', 'skipped']
 const LOG_LEVEL_VALUES: RunRecordLogLevel[] = ['info', 'success', 'warning', 'error']
 const LOG_SCOPE_VALUES: RunRecordLog['scope'][] = ['batch', 'login', 'runner', 'script']
 const ASSERTION_STATUS_VALUES: ScriptAssertionStatus[] = ['passed', 'failed']
@@ -345,7 +346,7 @@ export class LocalRunRecordService implements RunRecordService {
   private records: RunRecord[]
 
   constructor(
-    private readonly storage: Storage = window.localStorage,
+    private readonly storage: Storage,
     private readonly now: () => Date = () => new Date(),
     private readonly idFactory: IdFactory = () => crypto.randomUUID(),
   ) {
@@ -434,6 +435,30 @@ export class LocalRunRecordService implements RunRecordService {
     return structuredClone(record)
   }
 
+  async updateScriptProgress(id: string, draft: UpdateRunScriptProgressDraft): Promise<RunRecord> {
+    const { record, expectedRevision, expectedUpdatedAt } = this.runningDraft(id)
+    const target = record.scripts.find((script) => script.id === draft.scriptId)
+    if (!target) throw new Error('运行批次中不存在该脚本')
+
+    const updatedScript = this.applyScriptResult(
+      record.id,
+      target,
+      draft,
+      draft.status,
+      draft.secretValues ?? [],
+    )
+    record.scripts = record.scripts.map((script) => script.id === draft.scriptId ? updatedScript : script)
+    const batchLogs = record.logs.filter((log) => log.scope !== 'script')
+    record.logs = [...batchLogs, ...record.scripts.flatMap((script) => script.logs)]
+    record.updatedAt = this.now().toISOString()
+    record.revision += 1
+    record.durationMs = durationBetween(record.startedAt, record.updatedAt)
+    record.counts = createCounts(record.scripts)
+    record.analysis = createAnalysis(record.scripts, record.logs)
+    this.replaceRecord(record, expectedRevision, expectedUpdatedAt)
+    return structuredClone(record)
+  }
+
   async complete(id: string, draft: CompleteRunRecordDraft): Promise<RunRecord> {
     const { record, expectedRevision, expectedUpdatedAt } = this.runningDraft(id)
     const secretValues = draft.secretValues ?? []
@@ -441,7 +466,7 @@ export class LocalRunRecordService implements RunRecordService {
     const finishedAt = this.now().toISOString()
     const scriptLogs = record.scripts.flatMap((script) => script.logs)
     record.logs = [
-      ...record.logs,
+      ...record.logs.filter((log) => log.scope !== 'script'),
       ...scriptLogs,
       {
         id: this.idFactory(),
@@ -500,7 +525,7 @@ export class LocalRunRecordService implements RunRecordService {
     record.updatedAt = finishedAt
     record.revision += 1
     record.durationMs = durationBetween(record.startedAt, finishedAt)
-    record.scripts = record.scripts.map((script) => script.status === 'queued'
+    record.scripts = record.scripts.map((script) => script.status === 'queued' || script.status === 'running'
       ? { ...script, status: 'skipped' }
       : script)
     record.logs.push({
@@ -536,7 +561,7 @@ export class LocalRunRecordService implements RunRecordService {
       record.updatedAt = finishedAt
       record.revision += 1
       record.durationMs = durationBetween(record.startedAt, finishedAt)
-      record.scripts = record.scripts.map((script) => script.status === 'queued'
+      record.scripts = record.scripts.map((script) => script.status === 'queued' || script.status === 'running'
         ? { ...script, status: 'skipped' }
         : script)
       record.logs.push({
@@ -571,6 +596,17 @@ export class LocalRunRecordService implements RunRecordService {
       }
     }
 
+    const status = completion.status ?? (completion.ok === true ? 'passed' : 'failed')
+    return this.applyScriptResult(batchId, script, completion, status, secretValues)
+  }
+
+  private applyScriptResult(
+    batchId: string,
+    script: RunScriptRecord,
+    completion: CompleteRunScriptDraft | UpdateRunScriptProgressDraft,
+    status: RunScriptRecord['status'],
+    secretValues: string[],
+  ): RunScriptRecord {
     const logs: RunRecordLog[] = completion.logs.map((log) => {
       const details = redactDetails(log.details, secretValues)
       return {
@@ -604,8 +640,6 @@ export class LocalRunRecordService implements RunRecordService {
         : {}),
       ...(response.error ? { error: replaceSecrets(response.error, secretValues) } : {}),
     }))
-    const status = completion.status ?? (completion.ok === true ? 'passed' : 'failed')
-
     return {
       ...script,
       status,
@@ -711,7 +745,7 @@ export class LocalRunRecordService implements RunRecordService {
         record.updatedAt = finishedAt
         record.revision += 1
         record.durationMs = durationBetween(record.startedAt, finishedAt)
-        record.scripts = record.scripts.map((script) => script.status === 'queued'
+        record.scripts = record.scripts.map((script) => script.status === 'queued' || script.status === 'running'
           ? { ...script, status: 'skipped' }
           : script)
         record.logs.push({

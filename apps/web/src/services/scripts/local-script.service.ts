@@ -24,7 +24,11 @@ import {
   extractScriptResponseVariables,
   normalizeScriptResponseVariableBindings,
 } from './script-response-variables'
-import type { ScriptService, ScriptStopResult } from './script-service'
+import type {
+  ScriptRunProgressHandler,
+  ScriptService,
+  ScriptStopResult,
+} from './script-service'
 
 const RUNNER_URL = 'http://127.0.0.1:4310'
 const CANCEL_REQUEST_TIMEOUT_MS = 5_000
@@ -435,7 +439,11 @@ export class LocalScriptService implements ScriptService {
     }
   }
 
-  async run(ids: string[], context: ScriptRunContext): Promise<AutomationScript[]> {
+  async run(
+    ids: string[],
+    context: ScriptRunContext,
+    onProgress?: ScriptRunProgressHandler,
+  ): Promise<AutomationScript[]> {
     if (!context.environmentId) throw new Error('运行脚本前必须选择环境')
     const activeIds = ids.filter((id) => this.activeExecutions.has(id))
     if (activeIds.length > 0) throw new Error('所选脚本正在运行，请先等待当前运行结束或强制停止')
@@ -460,6 +468,11 @@ export class LocalScriptService implements ScriptService {
     })
 
     for (const execution of executions) {
+      const notification = this.notifyProgress(onProgress, execution.script)
+      if (notification) await notification
+    }
+
+    for (const execution of executions) {
       const { script } = execution
       let result: ScriptRunResult
       if (execution.cancelRequested) {
@@ -468,6 +481,8 @@ export class LocalScriptService implements ScriptService {
         script.status = 'interrupted'
         script.lastDuration = formatDuration(result.durationMs)
         this.finishExecution(execution)
+        const notification = this.notifyProgress(onProgress, script)
+        if (notification) await notification
         continue
       }
 
@@ -513,6 +528,8 @@ export class LocalScriptService implements ScriptService {
               script.lastDuration = formatDuration(live.durationMs)
               if (liveResult.cancelled) script.status = 'interrupted'
               this.syncExecution(execution)
+              const notification = this.notifyProgress(onProgress, script)
+              if (notification) await notification
             } catch {
               // 最终 POST 仍负责报告连接或执行错误，轮询失败只跳过本次刷新。
             }
@@ -570,6 +587,8 @@ export class LocalScriptService implements ScriptService {
       script.status = result.cancelled ? 'interrupted' : result.ok ? 'passed' : 'failed'
       script.lastDuration = formatDuration(result.durationMs)
       this.finishExecution(execution)
+      const notification = this.notifyProgress(onProgress, script)
+      if (notification) await notification
     }
     return cloneScripts(executions.map((execution) => execution.script))
   }
@@ -595,6 +614,19 @@ export class LocalScriptService implements ScriptService {
     this.syncExecution(execution)
     if (this.activeExecutions.get(execution.script.id) === execution) {
       this.activeExecutions.delete(execution.script.id)
+    }
+  }
+
+  private notifyProgress(
+    onProgress: ScriptRunProgressHandler | undefined,
+    script: AutomationScript,
+  ): Promise<void> | undefined {
+    if (!onProgress) return
+    try {
+      const notification = onProgress(structuredClone(script))
+      if (notification) return notification.catch(() => undefined)
+    } catch {
+      // Progress reporting must not change the script execution result.
     }
   }
 }

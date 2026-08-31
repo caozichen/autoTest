@@ -8,5 +8,6 @@ playwright-report/
 test-results/
 blob-report/
 outputs/
+/data/run-records/
 *.tsbuildinfo
 *.log

@@ -4,6 +4,7 @@ import type {
   FailRunRecordDraft,
   RunRecord,
   StartRunRecordDraft,
+  UpdateRunScriptProgressDraft,
 } from '@/domain/run-record'
 
 export interface RunRecordService {
@@ -11,6 +12,7 @@ export interface RunRecordService {
   get(id: string): Promise<RunRecord | null>
   start(draft: StartRunRecordDraft): Promise<RunRecord>
   appendLog(id: string, draft: AppendRunLogDraft): Promise<RunRecord>
+  updateScriptProgress(id: string, draft: UpdateRunScriptProgressDraft): Promise<RunRecord>
   complete(id: string, draft: CompleteRunRecordDraft): Promise<RunRecord>
   fail(id: string, draft: FailRunRecordDraft): Promise<RunRecord>
   interrupt(id: string, reason: string): Promise<RunRecord>

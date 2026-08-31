@@ -42,6 +42,11 @@ Invoke-RestMethod http://127.0.0.1:4310/health
 | `GET /runs/:runId` | 查询实时状态、耗时和增量日志。 |
 | `POST /runs/:runId/cancel` | 按运行 ID 精确停止一个任务。 |
 | `POST /scripts/:scriptId/cancel` | 停止该脚本当前全部活动任务。 |
+| `GET /run-records` | 查询轻量运行记录列表，不返回日志和接口正文。 |
+| `GET /run-records/:id` | 查询一条完整运行记录。 |
+| `POST /run-records` | 创建运行记录。 |
+| `PATCH /run-records/:id` | 通过 revision 和 updatedAt 并发校验更新运行记录。 |
+| `POST /run-records/migrations/local-storage-v1` | 幂等导入旧版浏览器运行记录。 |
 
 运行状态包括 `running`、`passed`、`failed` 和 `interrupted`。完成后的运行快照保留约 5 分钟，用于页面获取最终状态。取消接口可接收 `{ "reason": "停止原因" }`，原因最多 200 个字符。
 
@@ -51,3 +56,14 @@ Invoke-RestMethod http://127.0.0.1:4310/health
 - 关闭发起请求的页面或断开客户端连接不会自动取消任务，必须调用取消接口。
 - Runner 只执行注册表中的脚本 ID，校验 API 与授权来源同源，并在保存日志前脱敏 Token、Authorization 和环境密钥。
 - Runner 只允许本地 `5174`、`4173` 端口的管理端 Origin 调用。
+
+## 运行记录存储
+
+运行记录默认持久化到仓库根目录的 `data/run-records/`，每个批次使用一个经过校验的
+`<id>.json` 文件。更新会先写入同目录临时文件，再原子替换正式文件；Runner 不会自动
+删除已结束的记录。该目录已加入 `.gitignore`，不会随代码提交。
+
+`PATCH /run-records/:id` 请求体格式为
+`{ "record": { ... }, "expectedRevision": 0, "expectedUpdatedAt": "..." }`。
+当前磁盘版本与两个期望值任一不符时返回 HTTP 409，避免其它页面的旧数据覆盖新记录。
+运行记录创建、更新和旧数据迁移请求允许最大 64 MB 请求体。

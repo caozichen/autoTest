@@ -18,7 +18,7 @@ const detailVisible = ref(false)
 const detailRecord = ref<RunRecord | null>(null)
 const detailLoadingId = ref('')
 const recordsRefreshing = ref(false)
-const pollIntervalMs = 3_000
+const pollIntervalMs = 1_000
 let detailRequestSequence = 0
 let pollTimer: number | undefined
 
@@ -75,11 +75,6 @@ const pagedRecords = computed(() => {
   return filteredRecords.value.slice(start, start + pageSize)
 })
 
-const hasRunningRecord = computed(() => (
-  records.value.some((record) => record.status === 'running') ||
-  (detailVisible.value && detailRecord.value?.status === 'running')
-))
-
 watch([keyword, statusFilter, environmentFilter], () => {
   currentPage.value = 1
 })
@@ -88,7 +83,9 @@ async function loadRecords(showSuccess = false, silent = false): Promise<void> {
   if (recordsRefreshing.value) return
   recordsRefreshing.value = true
   if (!silent) loading.value = true
-  const openDetailId = detailVisible.value ? detailRecord.value?.id : undefined
+  const openDetailId = detailVisible.value && detailRecord.value?.status === 'running'
+    ? detailRecord.value.id
+    : undefined
 
   try {
     const [nextRecords, nextDetail] = await Promise.all([
@@ -147,7 +144,7 @@ function formatDuration(durationMs: number | null): string {
 onMounted(() => {
   void loadRecords()
   pollTimer = window.setInterval(() => {
-    if (!hasRunningRecord.value || recordsRefreshing.value) return
+    if (recordsRefreshing.value) return
     void loadRecords(false, true)
   }, pollIntervalMs)
 })

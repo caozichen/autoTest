@@ -2,7 +2,7 @@ import type { ScriptAssertionResult } from './assertion'
 import type { ScriptApiResponse } from './script'
 
 export type RunRecordStatus = 'running' | 'passed' | 'failed' | 'partial' | 'interrupted'
-export type RunScriptStatus = 'queued' | 'passed' | 'failed' | 'skipped'
+export type RunScriptStatus = 'queued' | 'running' | 'passed' | 'failed' | 'skipped'
 export type RunRecordLogLevel = 'info' | 'success' | 'warning' | 'error'
 export type RunRecordLogScope = 'batch' | 'login' | 'runner' | 'script'
 export type RunFailureStage = 'login' | 'runner' | 'script'
@@ -95,7 +95,7 @@ export interface StartRunRecordDraft {
 
 export interface CompleteRunScriptDraft {
   scriptId: string
-  status?: Exclude<RunScriptStatus, 'queued'>
+  status?: Exclude<RunScriptStatus, 'queued' | 'running'>
   ok?: boolean
   durationMs: number
   logs: Array<{
@@ -108,6 +108,18 @@ export interface CompleteRunScriptDraft {
   apiResponses?: ScriptApiResponse[]
   output?: Record<string, unknown>
   error?: string
+}
+
+export interface UpdateRunScriptProgressDraft {
+  scriptId: string
+  status: Extract<RunScriptStatus, 'running' | 'passed' | 'failed'>
+  durationMs: number
+  logs: CompleteRunScriptDraft['logs']
+  assertions?: ScriptAssertionResult[]
+  apiResponses?: ScriptApiResponse[]
+  output?: Record<string, unknown>
+  error?: string
+  secretValues?: string[]
 }
 
 export interface CompleteRunRecordDraft {

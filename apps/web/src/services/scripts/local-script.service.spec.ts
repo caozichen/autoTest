@@ -106,6 +106,10 @@ describe('LocalScriptService', () => {
 
   it('runs the registered form script through the local runner', async () => {
     let resolveRun: ((response: Response) => void) | null = null
+    const progress: Array<{
+      status: string
+      logMessages: string[]
+    }> = []
     const fetcher = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
       if (url.includes('/runs/')) {
@@ -128,6 +132,11 @@ describe('LocalScriptService', () => {
       variables: { AUTH_TOKEN: 'runtime-token' },
       authorizationOrigin: 'https://lx.admin.lingxi.tech',
       extraHTTPHeaders: { Authorization: 'Bearer runtime-token' },
+    }, (script) => {
+      progress.push({
+        status: script.status,
+        logMessages: script.lastRunResult?.logs.map((log) => log.message) ?? [],
+      })
     })
 
     expect((await service.list()).find((script) => script.id === 'form-contact-publish')?.status).toBe('running')
@@ -135,6 +144,8 @@ describe('LocalScriptService', () => {
     const runningScript = (await service.list()).find((script) => script.id === 'form-contact-publish')
     expect(runningScript?.lastRunResult?.logs[0]?.message).toBe('正在执行 UI 步骤')
     expect(runningScript?.lastDuration).toBe('00:01')
+    expect(progress[0]).toEqual({ status: 'running', logMessages: [] })
+    expect(progress).toContainEqual({ status: 'running', logMessages: ['正在执行 UI 步骤'] })
     resolveRun?.(new Response(JSON.stringify({
       ok: true,
       durationMs: 1250,
@@ -163,6 +174,8 @@ describe('LocalScriptService', () => {
       method: 'POST',
       status: 200,
     })
+    expect(progress.at(-1)?.status).toBe('passed')
+    expect(progress.at(-1)?.logMessages).toContain('全部断言通过')
     expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:4310/runs', expect.objectContaining({ method: 'POST' }))
     const runCall = fetcher.mock.calls.find(([url]) => String(url) === 'http://127.0.0.1:4310/runs')
     const request = runCall?.[1]
@@ -173,6 +186,34 @@ describe('LocalScriptService', () => {
         variables: { AUTH_TOKEN: 'runtime-token' },
       },
     })
+  })
+
+  it('isolates rejected progress callbacks from the script result', async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({
+      ok: true,
+      durationMs: 100,
+      logs: [{ timestamp: '2026-08-12T10:00:00.000Z', level: 'success', message: '执行完成' }],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    const onProgress = vi.fn(async () => {
+      throw new Error('进度接收方异常')
+    })
+    const service = new LocalScriptService(fetcher as typeof fetch, 'http://127.0.0.1:4310', 1)
+
+    const completed = await service.run(['form-contact-publish'], {
+      environmentId: 'env-testing',
+      siteBaseUrl: 'https://lx.admin.lingxi.tech/',
+      apiBaseUrl: 'https://lx.admin.lingxi.tech/api',
+      ignoreHTTPSErrors: false,
+      variables: {},
+      authorizationOrigin: 'https://lx.admin.lingxi.tech',
+      extraHTTPHeaders: {},
+    }, onProgress)
+
+    expect(completed[0]).toMatchObject({
+      status: 'passed',
+      lastRunResult: { ok: true },
+    })
+    expect(onProgress).toHaveBeenCalledTimes(2)
   })
 
   it('persists the lpXAVN request path and passes it to the runner', async () => {

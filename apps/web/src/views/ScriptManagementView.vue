@@ -24,6 +24,7 @@ import type { RuntimeVariable } from '@/domain/runtime-variable'
 import type { AutomationScript, ScriptDraft, ScriptStatus } from '@/domain/script'
 import { services } from '@/services/container'
 import { applyResponseVariable } from '@/services/environments/apply-response-variable'
+import { createRunScriptProgressDraft } from '@/services/run-records/script-run-progress'
 import { collectBatchStopScriptIds } from '@/services/scripts/script-batch-stop-plan'
 import { buildScriptRunContext } from '@/services/scripts/script-run-context'
 import { applyScriptResponseVariables } from '@/services/scripts/script-response-variables'
@@ -375,9 +376,14 @@ async function runScripts(targets: AutomationScript[]): Promise<void> {
       secretValues: runSecretValues,
     })
 
+    const recordId = runRecord.id
     const runTask = services.scripts.run(
       runnable.map((script) => script.id),
       buildScriptRunContext(environment, services.runtimeVariables),
+      async (script) => {
+        const progress = createRunScriptProgressDraft(script, runSecretValues)
+        if (progress) await services.runRecords.updateScriptProgress(recordId, progress)
+      },
     )
     scripts.value = await services.scripts.list()
     startLiveRefresh()
@@ -426,7 +432,7 @@ async function runScripts(targets: AutomationScript[]): Promise<void> {
       ElMessage.error(`${failedCount} 个脚本执行失败，请查看运行日志`)
     } else {
       ElMessage.success(
-        `${runnable.length} 个脚本已在${environment.name}运行完成${appliedVariableCount > 0 ? `，已更新 ${appliedVariableCount} 个全局变量` : ''}`,
+        `${runnable.length} 个脚本已在${environment.name}运行完成${appliedVariableCount > 0 ? `，本次提取 ${appliedVariableCount} 个临时变量` : ''}`,
       )
     }
     if (failedVariableCount > 0) {
@@ -453,6 +459,7 @@ async function runScripts(targets: AutomationScript[]): Promise<void> {
       for (const id of lockedIds) nextRunningIds.delete(id)
       runningScriptIds.value = nextRunningIds
     })
+    services.runtimeVariables.clear()
   }
 }
 

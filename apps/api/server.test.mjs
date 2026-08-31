@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict'
 import { request as httpRequest } from 'node:http'
 import { once } from 'node:events'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 
 import { createRunnerServer } from './server.mjs'
@@ -42,12 +45,14 @@ function createControlledExecution() {
 async function startTestServer(t, {
   controlled = createControlledExecution(),
   cancellationWaitTimeoutMs = 500,
+  runRecordDirectory,
 } = {}) {
   const server = createRunnerServer({
     executeScript: controlled.executeScript,
     validateRequest: (payload) => ({ scriptId: payload.scriptId }),
     runSnapshotTtlMs: 60_000,
     cancellationWaitTimeoutMs,
+    ...(runRecordDirectory ? { runRecordDirectory } : {}),
   })
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')
@@ -56,6 +61,63 @@ async function startTestServer(t, {
   return {
     ...controlled,
     baseUrl: `http://127.0.0.1:${address.port}`,
+  }
+}
+
+function storedRecord(runId, responseBody = { ok: true }) {
+  const timestamp = '2026-08-31T08:00:00.000Z'
+  return {
+    schemaVersion: 1,
+    revision: 0,
+    id: runId,
+    displayId: `RUN-${runId}`,
+    name: 'API 文件记录',
+    status: 'running',
+    trigger: 'manual',
+    browser: 'Chromium',
+    environment: {
+      id: 'env-test',
+      name: '测试环境',
+      code: 'TEST',
+      apiBaseUrl: 'https://example.test/api',
+    },
+    startedAt: timestamp,
+    updatedAt: timestamp,
+    finishedAt: null,
+    durationMs: null,
+    counts: { total: 1, passed: 0, failed: 0, skipped: 0 },
+    scripts: [{
+      recordId: `${runId}:script-001`,
+      id: 'script-001',
+      name: '示例脚本',
+      directory: 'scripts',
+      entryFile: 'example.spec.mjs',
+      tags: ['P0'],
+      status: 'queued',
+      durationMs: null,
+      logs: [],
+      assertions: [],
+      apiResponses: [{
+        sequence: 1,
+        timestamp,
+        name: '/api/large',
+        method: 'GET',
+        url: 'https://example.test/api/large',
+        status: 200,
+        ok: true,
+        durationMs: 10,
+        responseBody,
+      }],
+      output: { code: 'fixture-output' },
+    }],
+    logs: [],
+    analysis: {
+      passRate: 0,
+      averageDurationMs: 0,
+      slowestScriptRecordId: null,
+      logCounts: { info: 0, success: 0, warning: 0, error: 0 },
+      failureGroups: [],
+    },
   }
 }
 
@@ -281,4 +343,97 @@ test('an unexpected executor exception cannot leave a run marked as running', as
   assert.equal(snapshot.ok, false)
   assert.equal(snapshot.error, '执行器意外异常')
   assert.equal(snapshot.logs.at(-1)?.level, 'error')
+})
+
+test('serves persistent run-record CRUD, summaries, migration, and PATCH CORS', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'autotest-server-records-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const { baseUrl } = await startTestServer(t, { runRecordDirectory: directory })
+  const record = storedRecord('stored-run-001', { data: 'x'.repeat(1024 * 1024 + 1024) })
+
+  const createResponse = await fetch(`${baseUrl}/run-records`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ record }),
+  })
+  assert.equal(createResponse.status, 201)
+  assert.equal((await createResponse.json()).record.id, record.id)
+
+  const listResponse = await fetch(`${baseUrl}/run-records`)
+  const list = await listResponse.json()
+  assert.equal(listResponse.status, 200)
+  assert.equal(list.records.length, 1)
+  assert.deepEqual(list.records[0].logs, [])
+  assert.deepEqual(list.records[0].scripts[0].apiResponses, [])
+  assert.equal(Object.hasOwn(list.records[0].scripts[0], 'output'), false)
+
+  const detailResponse = await fetch(`${baseUrl}/run-records/${record.id}`)
+  const detail = await detailResponse.json()
+  assert.equal(detailResponse.status, 200)
+  assert.equal(detail.record.scripts[0].apiResponses[0].responseBody.data.length, 1024 * 1024 + 1024)
+
+  const updatedAt = '2026-08-31T08:01:00.000Z'
+  const updated = {
+    ...record,
+    revision: 1,
+    updatedAt,
+    status: 'passed',
+    finishedAt: updatedAt,
+    durationMs: 60_000,
+    counts: { total: 1, passed: 1, failed: 0, skipped: 0 },
+    scripts: [{ ...record.scripts[0], status: 'passed', durationMs: 60_000 }],
+    analysis: { ...record.analysis, passRate: 100, averageDurationMs: 60_000 },
+  }
+  const patchResponse = await fetch(`${baseUrl}/run-records/${record.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      record: updated,
+      expectedRevision: record.revision,
+      expectedUpdatedAt: record.updatedAt,
+    }),
+  })
+  assert.equal(patchResponse.status, 200)
+  assert.equal((await patchResponse.json()).record.revision, 1)
+
+  const staleResponse = await fetch(`${baseUrl}/run-records/${record.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      record: updated,
+      expectedRevision: record.revision,
+      expectedUpdatedAt: record.updatedAt,
+    }),
+  })
+  assert.equal(staleResponse.status, 409)
+
+  const migrationRecord = storedRecord('stored-run-002')
+  const migrationPayload = JSON.stringify({ records: [migrationRecord] })
+  const firstMigration = await fetch(`${baseUrl}/run-records/migrations/local-storage-v1`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: migrationPayload,
+  })
+  const secondMigration = await fetch(`${baseUrl}/run-records/migrations/local-storage-v1`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: migrationPayload,
+  })
+  assert.deepEqual(await firstMigration.json(), {
+    importedCount: 1,
+    skippedCount: 0,
+    importedIds: ['stored-run-002'],
+    skippedIds: [],
+  })
+  assert.equal((await secondMigration.json()).skippedCount, 1)
+
+  const optionsResponse = await fetch(`${baseUrl}/run-records`, {
+    method: 'OPTIONS',
+    headers: { Origin: 'http://127.0.0.1:5174' },
+  })
+  assert.equal(optionsResponse.status, 204)
+  assert.match(optionsResponse.headers.get('access-control-allow-methods') ?? '', /PATCH/)
+
+  const unsafeIdResponse = await fetch(`${baseUrl}/run-records/%2Ftmp`)
+  assert.equal(unsafeIdResponse.status, 400)
 })

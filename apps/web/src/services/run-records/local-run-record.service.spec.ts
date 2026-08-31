@@ -84,6 +84,53 @@ describe('LocalRunRecordService', () => {
     expect(storage.getItem('autotest.run-records.v1')).toBeNull()
   })
 
+  it('replaces live script snapshots and does not duplicate their logs on completion', async () => {
+    let nextId = 0
+    const service = new LocalRunRecordService(
+      new MemoryStorage(),
+      nowFactory([firstTime, secondTime, thirdTime, thirdTime]),
+      () => `live-${++nextId}`,
+    )
+    const started = await service.start(startDraft())
+    const firstLog = {
+      timestamp: '2026-08-12T08:00:01.000Z',
+      level: 'info' as const,
+      message: '开始填写表单',
+    }
+    const secondLog = {
+      timestamp: '2026-08-12T08:00:02.000Z',
+      level: 'success' as const,
+      message: '表单提交完成',
+    }
+
+    await service.updateScriptProgress(started.id, {
+      scriptId: 'login-regression',
+      status: 'running',
+      durationMs: 1_000,
+      logs: [firstLog],
+    })
+    const live = await service.updateScriptProgress(started.id, {
+      scriptId: 'login-regression',
+      status: 'passed',
+      durationMs: 2_000,
+      logs: [firstLog, secondLog],
+    })
+
+    expect(live.scripts[0]).toMatchObject({ status: 'passed', durationMs: 2_000 })
+    expect(live.logs.filter((log) => log.scope === 'script').map((log) => log.message))
+      .toEqual(['开始填写表单', '表单提交完成'])
+
+    const completed = await service.complete(started.id, { scripts: [{
+      scriptId: 'login-regression',
+      ok: true,
+      durationMs: 2_000,
+      logs: [firstLog, secondLog],
+    }] })
+    expect(completed.status).toBe('passed')
+    expect(completed.logs.filter((log) => log.scope === 'script').map((log) => log.message))
+      .toEqual(['开始填写表单', '表单提交完成'])
+  })
+
   it('migrates only the three known legacy seed ids and preserves real records', async () => {
     const fixtureStorage = new MemoryStorage()
     const fixtureService = new LocalRunRecordService(
