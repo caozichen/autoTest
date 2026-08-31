@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict'
+import * as fileSystem from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 
 import {
   executeRegisteredScript,
   sanitizeErrorMessage,
+  validateRegisteredRunRequest,
   validateRunRequest,
 } from './script-runner.mjs'
 import { expect as recordedExpect } from '../../scripts/support/recorded-expect.mjs'
@@ -18,6 +22,40 @@ function validRunPayload(scriptId = 'form-contact-publish') {
       extraHTTPHeaders: { Authorization: 'Bearer test-token' },
     },
   }
+}
+
+function registeredConfig({
+  id = 'custom-runner-script',
+  entryFile = 'custom-runner-script.ui.spec.mjs',
+  timeoutMs = 12_345,
+  enabled = true,
+} = {}) {
+  return {
+    schemaVersion: 1,
+    revision: 0,
+    id,
+    name: '自定义 Runner 脚本',
+    description: '从持久配置解析入口',
+    directory: 'scripts',
+    entryFile,
+    timeoutMs,
+    enabled,
+    tags: ['Playwright'],
+    createdAt: '2026-08-31T08:00:00.000Z',
+    updatedAt: '2026-08-31T08:00:00.000Z',
+  }
+}
+
+async function temporaryScriptsDirectory(t) {
+  const root = await fileSystem.mkdtemp(join(tmpdir(), 'autotest-runner-config-'))
+  const scriptsDirectory = join(root, 'scripts')
+  await fileSystem.mkdir(scriptsDirectory)
+  await fileSystem.writeFile(
+    join(scriptsDirectory, 'custom-runner-script.ui.spec.mjs'),
+    'export async function run() { return { source: "file" } }\n',
+  )
+  t.after(() => fileSystem.rm(root, { recursive: true, force: true }))
+  return scriptsDirectory
 }
 
 test('accepts a registered script with a same-origin authorization context', () => {
@@ -185,6 +223,65 @@ test('rejects unregistered scripts and cross-origin token forwarding', () => {
       extraHTTPHeaders: { Authorization: 'Bearer test-token' },
     },
   }), /不同源/)
+})
+
+test('validates registration, enabled state, and default timeout from persistent config', async (t) => {
+  const scriptsDirectory = await temporaryScriptsDirectory(t)
+  const config = registeredConfig()
+  const scriptConfigRepository = { get: async (id) => id === config.id ? config : null }
+
+  const context = await validateRegisteredRunRequest({
+    ...validRunPayload(config.id),
+    timeoutMs: 1_800_000,
+  }, {
+    scriptConfigRepository,
+    scriptsDirectory,
+  })
+  assert.equal(context.scriptId, config.id)
+  assert.equal(context.timeoutMs, config.timeoutMs)
+
+  await assert.rejects(
+    validateRegisteredRunRequest(validRunPayload('missing-runner-script'), {
+      scriptConfigRepository,
+      scriptsDirectory,
+    }),
+    /脚本未登记/,
+  )
+  await assert.rejects(
+    validateRegisteredRunRequest(validRunPayload(config.id), {
+      scriptConfigRepository: { get: async () => ({ ...config, enabled: false }) },
+      scriptsDirectory,
+    }),
+    /脚本已禁用/,
+  )
+})
+
+test('executes a custom script with its persistent timeout instead of client overrides', async (t) => {
+  const scriptsDirectory = await temporaryScriptsDirectory(t)
+  const config = registeredConfig()
+  let loadedUrl
+
+  const result = await executeRegisteredScript({
+    ...validRunPayload(config.id),
+    timeoutMs: 1_800_000,
+  }, {
+    scriptsDirectory,
+    scriptConfigRepository: { get: async () => config },
+    loadScript: async (url) => {
+      loadedUrl = url
+      return { run: async (context) => ({
+        source: 'persistent-config',
+        timeoutMs: context.timeoutMs,
+      }) }
+    },
+  })
+
+  assert.equal(loadedUrl.pathname.endsWith('/scripts/custom-runner-script.ui.spec.mjs'), true)
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.result, {
+    source: 'persistent-config',
+    timeoutMs: config.timeoutMs,
+  })
 })
 
 test('redacts authorization values and ANSI control sequences from errors', () => {
@@ -357,11 +454,17 @@ test('returns structured API responses and redacts sensitive request and respons
 test('stops a script at its configured timeout and reports a failure instead of interruption', async () => {
   let receivedSignal
   let cleanupFinished = false
+  const config = registeredConfig({
+    id: 'form-contact-publish',
+    entryFile: 'form-contact-publish.ui.spec.mjs',
+    timeoutMs: 1_000,
+  })
   const result = await executeRegisteredScript({
     ...validRunPayload(),
-    timeoutMs: 1_000,
+    timeoutMs: 1_800_000,
   }, {
     abortCleanupTimeoutMs: 100,
+    scriptConfigRepository: { get: async () => config },
     loadScript: async () => ({
       run: ({ signal }) => new Promise((_, reject) => {
         receivedSignal = signal

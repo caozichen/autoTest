@@ -4,7 +4,13 @@ import { resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { RunRecordFileStore, RunRecordStoreError } from './run-record-store.mjs'
-import { executeRegisteredScript, validateRunRequest } from './script-runner.mjs'
+import {
+  DEFAULT_SCRIPT_CONFIG_DIRECTORY,
+  DEFAULT_SCRIPTS_DIRECTORY,
+  FileScriptConfigRepository,
+  ScriptConfigStoreError,
+} from './script-config-repository.mjs'
+import { executeRegisteredScript, validateRegisteredRunRequest } from './script-runner.mjs'
 
 const DEFAULT_HOST = '127.0.0.1'
 const DEFAULT_PORT = 4310
@@ -96,11 +102,31 @@ function decodePathSegment(value) {
   }
 }
 
+function decodeScriptConfigPathSegment(value) {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    throw new ScriptConfigStoreError('URL 中的脚本 ID 编码无效')
+  }
+}
+
 function sendRunRecordError(response, error, origin) {
   const statusCode = Number.isInteger(error?.statusCode) ? error.statusCode : 500
   const message = statusCode >= 500
     ? '运行记录存储失败'
     : error instanceof Error ? error.message : '运行记录请求无效'
+  sendJson(response, statusCode, {
+    ok: false,
+    error: message,
+    ...(typeof error?.code === 'string' ? { code: error.code } : {}),
+  }, origin)
+}
+
+function sendScriptConfigError(response, error, origin) {
+  const statusCode = Number.isInteger(error?.statusCode) ? error.statusCode : 500
+  const message = statusCode >= 500
+    ? '脚本配置存储失败'
+    : error instanceof Error ? error.message : '脚本配置请求无效'
   sendJson(response, statusCode, {
     ok: false,
     error: message,
@@ -121,15 +147,31 @@ function parseCancellationReason(payload) {
 }
 
 export function createRunnerServer({
-  executeScript = executeRegisteredScript,
-  validateRequest = validateRunRequest,
+  executeScript,
+  validateRequest,
   runSnapshotTtlMs = RUN_SNAPSHOT_TTL_MS,
   cancellationWaitTimeoutMs = DEFAULT_CANCELLATION_WAIT_TIMEOUT_MS,
   runRecordDirectory = DEFAULT_RUN_RECORD_DIRECTORY,
   runRecordStore,
+  scriptConfigDirectory = DEFAULT_SCRIPT_CONFIG_DIRECTORY,
+  scriptsDirectory = DEFAULT_SCRIPTS_DIRECTORY,
+  scriptConfigRepository,
 } = {}) {
   const activeRuns = new Map()
   const storedRunRecords = runRecordStore ?? new RunRecordFileStore({ directory: runRecordDirectory })
+  const storedScriptConfigs = scriptConfigRepository ?? new FileScriptConfigRepository({
+    directory: scriptConfigDirectory,
+    scriptsDirectory,
+  })
+  const runValidator = validateRequest ?? ((payload) => validateRegisteredRunRequest(payload, {
+    scriptConfigRepository: storedScriptConfigs,
+    scriptsDirectory,
+  }))
+  const scriptExecutor = executeScript ?? ((payload, options) => executeRegisteredScript(payload, {
+    ...options,
+    scriptConfigRepository: storedScriptConfigs,
+    scriptsDirectory,
+  }))
 
   function appendRunLog(run, level, message) {
     run.logs.push({
@@ -184,7 +226,7 @@ export function createRunnerServer({
 
   async function executeLiveRun(run, payload) {
     try {
-      const rawResult = await executeScript(payload, {
+      const rawResult = await scriptExecutor(payload, {
         onLog: (log) => run.logs.push(log),
         signal: run.abortController.signal,
       })
@@ -238,7 +280,7 @@ export function createRunnerServer({
     response.writeHead(204, {
       'Access-Control-Allow-Origin': origin,
       'Access-Control-Allow-Headers': 'Content-Type',
-      'Access-Control-Allow-Methods': 'GET, POST, PATCH, OPTIONS',
+      'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
       Vary: 'Origin',
     })
     response.end()
@@ -251,6 +293,79 @@ export function createRunnerServer({
   }
 
   const pathname = requestPath(request.url)
+
+  if (request.method === 'GET' && pathname === '/script-configs') {
+    try {
+      const scripts = await storedScriptConfigs.list()
+      sendJson(response, 200, { scripts }, origin)
+    } catch (error) {
+      sendScriptConfigError(response, error, origin)
+    }
+    return
+  }
+
+  if (request.method === 'POST' && pathname === '/script-configs') {
+    try {
+      const payload = await readJson(request)
+      const script = await storedScriptConfigs.create(payload?.script)
+      sendJson(response, 201, { script }, origin)
+    } catch (error) {
+      sendScriptConfigError(response, error, origin)
+    }
+    return
+  }
+
+  const scriptConfigMatch = pathname.match(/^\/script-configs\/([^/]+)$/)
+  if (scriptConfigMatch && request.method === 'GET') {
+    try {
+      const id = decodeScriptConfigPathSegment(scriptConfigMatch[1])
+      const script = await storedScriptConfigs.get(id)
+      if (!script) {
+        sendJson(response, 404, { ok: false, error: '脚本配置不存在' }, origin)
+        return
+      }
+      sendJson(response, 200, { script }, origin)
+    } catch (error) {
+      sendScriptConfigError(response, error, origin)
+    }
+    return
+  }
+
+  if (scriptConfigMatch && request.method === 'PATCH') {
+    try {
+      const id = decodeScriptConfigPathSegment(scriptConfigMatch[1])
+      const payload = await readJson(request)
+      const script = await storedScriptConfigs.update(id, payload?.script, {
+        expectedRevision: payload?.expectedRevision,
+        expectedUpdatedAt: payload?.expectedUpdatedAt,
+      })
+      sendJson(response, 200, { script }, origin)
+    } catch (error) {
+      sendScriptConfigError(response, error, origin)
+    }
+    return
+  }
+
+  if (scriptConfigMatch && request.method === 'DELETE') {
+    try {
+      const id = decodeScriptConfigPathSegment(scriptConfigMatch[1])
+      const payload = await readJson(request)
+      await storedScriptConfigs.remove(id, {
+        expectedRevision: payload?.expectedRevision,
+        expectedUpdatedAt: payload?.expectedUpdatedAt,
+      })
+      response.writeHead(204, {
+        'Cache-Control': 'no-store',
+        ...(allowedOrigins.has(origin)
+          ? { 'Access-Control-Allow-Origin': origin, Vary: 'Origin' }
+          : {}),
+      })
+      response.end()
+    } catch (error) {
+      sendScriptConfigError(response, error, origin)
+    }
+    return
+  }
 
   if (request.method === 'GET' && pathname === '/run-records') {
     try {
@@ -409,7 +524,7 @@ export function createRunnerServer({
       if (activeRuns.has(runId)) {
         throw new Error('运行任务 ID 已存在')
       }
-      const context = validateRequest(payload)
+      const context = await runValidator(payload)
       const abortController = new AbortController()
       liveRun = {
         runId,

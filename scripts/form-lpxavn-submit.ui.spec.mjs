@@ -247,6 +247,9 @@ function assertPublishedFormContract(payload, expectedFormCode = FORM_CODE, link
   )
     .toEqual(EXPECTED_NAME_TITLES)
 
+  const email = itemFor('email', '邮箱')
+  expectEnabled(email?.rule_config?.regex_format?.enabled, '邮箱格式校验')
+
   const idCard = itemFor('idCard', '身份证件')
   expectEnabled(idCard?.common_config?.collect_mode?.custom_enabled, '自定义证件类型')
   expect(idCard?.common_config?.collect_mode?.choices?.length, '身份证件应包含完整证件类型集合').toBeGreaterThanOrEqual(10)
@@ -713,6 +716,20 @@ async function replaceWithUserInputAndBlur(input, value, label) {
   await expect(input, `“${label}”修正值应回显`).toHaveValue(value)
 }
 
+async function assertEmailFormatBoundary(input, invalidValue, validValue) {
+  await expect(input, '邮箱控件应使用原生 email 类型').toHaveAttribute('type', 'email')
+  await replaceWithUserInputAndBlur(input, invalidValue, '邮箱非法格式值')
+  await expect.poll(
+    () => input.evaluate((element) => element.validity.valid),
+    { message: '邮箱非法格式值应触发浏览器原生格式校验' },
+  ).toBe(false)
+  await replaceWithUserInputAndBlur(input, validValue, '邮箱合法恢复值')
+  await expect.poll(
+    () => input.evaluate((element) => element.validity.valid),
+    { message: '邮箱合法恢复值应通过浏览器原生格式校验' },
+  ).toBe(true)
+}
+
 async function selectOption(page, trigger, optionName, label, logger = () => undefined) {
   const optionNames = (Array.isArray(optionName) ? optionName : [optionName])
     .map((name) => String(name).trim())
@@ -971,6 +988,27 @@ function findNestedProperty(value, propertyName, visited = new WeakSet()) {
   return undefined
 }
 
+function assertRuleValidationRejected(body, key, label) {
+  if (!body || typeof body !== 'object') throw new Error(`“${label}”规则校验接口未返回有效 JSON`)
+
+  const hasBusinessCode = Object.prototype.hasOwnProperty.call(body, 'code')
+    && Number.isFinite(Number(body.code))
+  const businessCodeMessage = `“${label}”规则校验响应应包含有效业务码`
+  expect(hasBusinessCode, businessCodeMessage).toBe(true)
+  hardExpect(hasBusinessCode, businessCodeMessage).toBe(true)
+
+  const businessCode = Number(body.code)
+  const rejectedMessage = `“${label}”越界值不应通过业务校验；validate-page 实际返回 businessCode: ${businessCode}`
+  expect(businessCode, rejectedMessage).not.toBe(0)
+  hardExpect(businessCode, rejectedMessage).not.toBe(0)
+
+  const firstErrorItemKey = findNestedProperty(body, 'first_error_item_key')
+  const firstErrorMessage = `“${label}”应成为首个服务端错误字段`
+  expect(firstErrorItemKey, firstErrorMessage).toBe(key)
+  hardExpect(firstErrorItemKey, firstErrorMessage).toBe(key)
+  return businessCode
+}
+
 async function assertRuleValidationBlocked(page, publicOrigin, {
   currentPage,
   key,
@@ -998,20 +1036,28 @@ async function assertRuleValidationBlocked(page, publicOrigin, {
     logger('success', `“${label}”越界值已被客户端规则拦截`)
   } else {
     if (!response) {
-      expect(response, `“${label}”越界值应被客户端或服务端规则拦截`).toBeTruthy()
+      const message = `“${label}”越界值应被客户端或服务端规则拦截`
+      expect(response, message).toBeTruthy()
+      hardExpect(response, message).toBeTruthy()
     } else {
       if (!response.ok()) throw new Error(`“${label}”规则校验接口返回 HTTP ${response.status()}`)
       const body = await response.json().catch(() => null)
-      if (!body || typeof body !== 'object') throw new Error(`“${label}”规则校验接口未返回有效 JSON`)
-      expect(Number(body?.code), `“${label}”越界值不应通过业务校验`).not.toBe(0)
-      expect(findNestedProperty(body, 'first_error_item_key'), `“${label}”应成为首个服务端错误字段`).toBe(key)
-      logger('success', `“${label}”越界值已被服务端规则拦截`, { businessCode: body?.code })
+      const businessCode = assertRuleValidationRejected(body, key, label)
+      logger('success', `“${label}”越界值已被服务端规则拦截`, { businessCode })
     }
   }
   await dismissPublicErrorDialog(page)
-  await expect(fieldCard(page, pageFieldKeys[currentPage - 1][0]), `“${label}”校验失败后应停留在第 ${currentPage} 页`).toBeVisible()
+  const currentPageCard = fieldCard(page, pageFieldKeys[currentPage - 1][0])
+  const currentPageMessage = `“${label}”校验失败后应停留在第 ${currentPage} 页`
+  await expect(currentPageCard, currentPageMessage).toBeVisible({ timeout: CLIENT_VALIDATION_SETTLE_TIMEOUT_MS })
+  await hardExpect(currentPageCard, currentPageMessage).toBeVisible({ timeout: CLIENT_VALIDATION_SETTLE_TIMEOUT_MS })
   const nextPageFirstKey = pageFieldKeys[currentPage]?.[0]
-  if (nextPageFirstKey) await expect(fieldCard(page, nextPageFirstKey), `“${label}”校验失败后不应翻页`).toBeHidden()
+  if (nextPageFirstKey) {
+    const nextPageCard = fieldCard(page, nextPageFirstKey)
+    const nextPageMessage = `“${label}”校验失败后不应翻页`
+    await expect(nextPageCard, nextPageMessage).toBeHidden({ timeout: CLIENT_VALIDATION_SETTLE_TIMEOUT_MS })
+    await hardExpect(nextPageCard, nextPageMessage).toBeHidden({ timeout: CLIENT_VALIDATION_SETTLE_TIMEOUT_MS })
+  }
 }
 
 function isRetryablePageValidationError(error) {
@@ -1364,16 +1410,8 @@ export async function run({
       logger,
     })
     await replaceWithUserInputAndBlur(mobile.locator('input').first(), data.mobile, '手机号合法恢复值')
-    await fillAndAssert(email.locator('input').first(), data.invalidEmail, '邮箱非法格式值')
-    await assertRuleValidationBlocked(page, publicOrigin, {
-      currentPage: 1,
-      key: FIELD_KEYS.email,
-      label: '邮箱',
-      formCode: configuredFormCode,
-      pageFieldKeys: PAGE_FIELD_KEYS,
-      logger,
-    })
-    await replaceWithUserInputAndBlur(email.locator('input').first(), data.email, '邮箱合法恢复值')
+    await assertEmailFormatBoundary(email.locator('input').first(), data.invalidEmail, data.email)
+    logger('success', '邮箱格式边界已通过原生 email 控件验证，并已恢复合法值')
     logger('success', '第 1 页联系人题目全部填写并逐项断言通过', {
       nameTitle: data.nameTitle,
       username: data.username,
@@ -1693,7 +1731,9 @@ export {
   REQUIRED_ROOT_FIELD_KEYS,
   SUBMISSION_RESULT_SELECTOR,
   SUBMISSION_RESULT_URL_PATTERN,
+  assertEmailFormatBoundary,
   assertPublishedFormContract,
+  assertRuleValidationBlocked,
   assertSubmissionPayload,
   assertVisibleSubmissionResult,
   buildFormUrl,

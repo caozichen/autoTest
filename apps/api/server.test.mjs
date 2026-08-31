@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { request as httpRequest } from 'node:http'
 import { once } from 'node:events'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -46,6 +46,8 @@ async function startTestServer(t, {
   controlled = createControlledExecution(),
   cancellationWaitTimeoutMs = 500,
   runRecordDirectory,
+  scriptConfigDirectory,
+  scriptsDirectory,
 } = {}) {
   const server = createRunnerServer({
     executeScript: controlled.executeScript,
@@ -53,6 +55,8 @@ async function startTestServer(t, {
     runSnapshotTtlMs: 60_000,
     cancellationWaitTimeoutMs,
     ...(runRecordDirectory ? { runRecordDirectory } : {}),
+    ...(scriptConfigDirectory ? { scriptConfigDirectory } : {}),
+    ...(scriptsDirectory ? { scriptsDirectory } : {}),
   })
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')
@@ -61,6 +65,27 @@ async function startTestServer(t, {
   return {
     ...controlled,
     baseUrl: `http://127.0.0.1:${address.port}`,
+  }
+}
+
+function scriptConfigFixture({
+  id = 'server-script',
+  revision = 0,
+  updatedAt = '2026-08-31T08:00:00.000Z',
+} = {}) {
+  return {
+    schemaVersion: 1,
+    revision,
+    id,
+    name: 'API 脚本配置',
+    description: '服务接口持久化测试',
+    directory: 'scripts',
+    entryFile: 'server-script.ui.spec.mjs',
+    timeoutMs: 300_000,
+    enabled: true,
+    tags: ['Playwright', 'P0'],
+    createdAt: '2026-08-31T08:00:00.000Z',
+    updatedAt,
   }
 }
 
@@ -435,5 +460,96 @@ test('serves persistent run-record CRUD, summaries, migration, and PATCH CORS', 
   assert.match(optionsResponse.headers.get('access-control-allow-methods') ?? '', /PATCH/)
 
   const unsafeIdResponse = await fetch(`${baseUrl}/run-records/%2Ftmp`)
+  assert.equal(unsafeIdResponse.status, 400)
+})
+
+test('serves persistent script-config CRUD with CAS and DELETE CORS', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'autotest-server-script-configs-'))
+  const scriptConfigDirectory = join(root, 'config', 'scripts')
+  const scriptsDirectory = join(root, 'scripts')
+  await mkdir(scriptsDirectory, { recursive: true })
+  await writeFile(
+    join(scriptsDirectory, 'server-script.ui.spec.mjs'),
+    'export async function run() { return { ok: true } }\n',
+  )
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const { baseUrl } = await startTestServer(t, { scriptConfigDirectory, scriptsDirectory })
+  const submitted = scriptConfigFixture()
+
+  const createResponse = await fetch(`${baseUrl}/script-configs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ script: submitted }),
+  })
+  const created = (await createResponse.json()).script
+  assert.equal(createResponse.status, 201)
+  assert.equal(created.id, submitted.id)
+  assert.equal(created.revision, 0)
+  assert.equal(Number.isFinite(Date.parse(created.updatedAt)), true)
+
+  const listResponse = await fetch(`${baseUrl}/script-configs`)
+  const list = await listResponse.json()
+  assert.equal(listResponse.status, 200)
+  assert.deepEqual(list.scripts.map(({ id }) => id), [submitted.id])
+
+  const detailResponse = await fetch(`${baseUrl}/script-configs/${submitted.id}`)
+  assert.equal(detailResponse.status, 200)
+  assert.deepEqual((await detailResponse.json()).script, created)
+
+  const patchResponse = await fetch(`${baseUrl}/script-configs/${submitted.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      script: { ...created, name: 'API 脚本配置已修改' },
+      expectedRevision: created.revision,
+      expectedUpdatedAt: created.updatedAt,
+    }),
+  })
+  const updated = (await patchResponse.json()).script
+  assert.equal(patchResponse.status, 200)
+  assert.equal(updated.name, 'API 脚本配置已修改')
+  assert.equal(updated.revision, 1)
+
+  const stalePatchResponse = await fetch(`${baseUrl}/script-configs/${submitted.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      script: created,
+      expectedRevision: created.revision,
+      expectedUpdatedAt: created.updatedAt,
+    }),
+  })
+  assert.equal(stalePatchResponse.status, 409)
+  assert.equal((await stalePatchResponse.json()).code, 'SCRIPT_CONFIG_CONFLICT')
+
+  const staleDeleteResponse = await fetch(`${baseUrl}/script-configs/${submitted.id}`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      expectedRevision: created.revision,
+      expectedUpdatedAt: created.updatedAt,
+    }),
+  })
+  assert.equal(staleDeleteResponse.status, 409)
+
+  const deleteResponse = await fetch(`${baseUrl}/script-configs/${submitted.id}`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      expectedRevision: updated.revision,
+      expectedUpdatedAt: updated.updatedAt,
+    }),
+  })
+  assert.equal(deleteResponse.status, 204)
+  assert.equal((await fetch(`${baseUrl}/script-configs/${submitted.id}`)).status, 404)
+
+  const optionsResponse = await fetch(`${baseUrl}/script-configs`, {
+    method: 'OPTIONS',
+    headers: { Origin: 'http://127.0.0.1:5174' },
+  })
+  assert.equal(optionsResponse.status, 204)
+  assert.match(optionsResponse.headers.get('access-control-allow-methods') ?? '', /DELETE/)
+
+  const unsafeIdResponse = await fetch(`${baseUrl}/script-configs/%2Ftmp`)
   assert.equal(unsafeIdResponse.status, 400)
 })

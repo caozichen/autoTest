@@ -11,6 +11,11 @@ const REQUEST_PATH_SCRIPT_IDS = new Set([
 ])
 const VARIABLE_PATTERN = /{{\s*([^{}]+?)\s*}}/g
 
+export interface ScriptRequestPathSegment {
+  text: string
+  variable: boolean
+}
+
 export type ScriptRequestOriginMode = 'public' | 'admin'
 
 export function supportsScriptRequestPath(scriptId?: string): boolean {
@@ -32,6 +37,25 @@ function pathWithoutVariableWhitespace(value: string): string {
   return value.replace(VARIABLE_PATTERN, 'VARIABLE')
 }
 
+function normalizedVariableKey(value: string): string {
+  return value.trim().toLowerCase()
+}
+
+export function segmentScriptRequestPath(value: string): ScriptRequestPathSegment[] {
+  const segments: ScriptRequestPathSegment[] = []
+  let offset = 0
+
+  for (const match of value.matchAll(VARIABLE_PATTERN)) {
+    const index = match.index ?? 0
+    if (index > offset) segments.push({ text: value.slice(offset, index), variable: false })
+    segments.push({ text: match[0], variable: true })
+    offset = index + match[0].length
+  }
+
+  if (offset < value.length) segments.push({ text: value.slice(offset), variable: false })
+  return segments
+}
+
 export function normalizeScriptRequestPath(value: string): string {
   const requestPath = value.trim()
   if (!requestPath) throw new Error('请输入 URL 路径')
@@ -51,14 +75,20 @@ export function resolveScriptRequestPath(
   variables: Readonly<Record<string, string>>,
 ): string {
   const normalizedTemplate = normalizeScriptRequestPath(requestPath)
+  const variablesByKey = new Map<string, string>()
+  for (const [key, value] of Object.entries(variables)) {
+    const normalizedKey = normalizedVariableKey(key)
+    if (normalizedKey) variablesByKey.set(normalizedKey, value)
+  }
   const missingVariables = new Set<string>()
   const resolvedPath = normalizedTemplate.replace(VARIABLE_PATTERN, (_placeholder, rawKey: string) => {
     const key = rawKey.trim()
-    if (!key || !Object.prototype.hasOwnProperty.call(variables, key)) {
+    const normalizedKey = normalizedVariableKey(key)
+    if (!normalizedKey || !variablesByKey.has(normalizedKey)) {
       missingVariables.add(key || '空变量名')
       return ''
     }
-    return variables[key] ?? ''
+    return variablesByKey.get(normalizedKey) ?? ''
   })
 
   if (missingVariables.size > 0) {

@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "revision": 0,
+  "id": "form-lpxavn-submit",
+  "name": "lpXAVN 全题型表单填写并提交",
+  "description": "根据所选环境公开域名与可配置 URL 路径拼接请求地址，校验全题型三页表单的发布契约、必填与格式边界、跨页答案保持及结构化提交载荷。",
+  "directory": "scripts",
+  "entryFile": "form-lpxavn-submit.ui.spec.mjs",
+  "timeoutMs": 300000,
+  "enabled": true,
+  "requestPath": "/form/?id={{FORM_CODE}}",
+  "tags": [
+    "Playwright",
+    "UI",
+    "Headless Chrome",
+    "表单填写",
+    "lpXAVN",
+    "P0"
+  ],
+  "createdAt": "2026-08-31T08:00:00.000Z",
+  "updatedAt": "2026-08-31T08:05:00.000Z"
+}

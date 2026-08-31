@@ -1,10 +1,140 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import { LocalScriptService } from './local-script.service'
+import type { ScriptConfig, ScriptConfigRepository } from './script-config-repository'
+
+const timestamp = '2026-08-31T08:00:00.000Z'
+
+function config(
+  value: Pick<ScriptConfig, 'id' | 'name' | 'entryFile'> & Partial<ScriptConfig>,
+): ScriptConfig {
+  return {
+    schemaVersion: 1,
+    revision: 1,
+    description: '自动化测试脚本',
+    directory: 'scripts',
+    timeoutMs: 300_000,
+    enabled: true,
+    tags: ['Playwright', 'UI', 'P0'],
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    ...value,
+  }
+}
+
+function initialConfigs(): ScriptConfig[] {
+  return [
+    config({
+      id: 'form-lpxavn-submit',
+      name: 'lpXAVN 全题型表单填写并提交',
+      description: '根据所选环境公开域名与可配置 URL 路径拼接请求地址，校验全题型三页表单的发布契约、必填与格式边界、跨页答案保持及结构化提交载荷。',
+      entryFile: 'form-lpxavn-submit.ui.spec.mjs',
+      requestPath: '/form/?id={{FORM_CODE}}',
+    }),
+    config({
+      id: 'form-all-fields-submit',
+      name: '已发布全题型表单填写并提交',
+      entryFile: 'form-all-fields-submit.ui.spec.mjs',
+      requestPath: '/form/?id={{FORM_CODE}}',
+    }),
+    config({
+      id: 'form-submission-reply-edit',
+      name: '表单提交记录回复编辑',
+      entryFile: 'form-submission-reply-edit.ui.spec.mjs',
+      requestPath: '/form-activity/submission/preview/reply/{{SUBMISSION_ID}}?fid={{FORM_ID}}',
+      inputParameters: [
+        { id: 'reply-submission-id', key: 'SUBMISSION_ID', value: 'lpXAWZ', description: '提交记录 ID' },
+        { id: 'reply-form-id', key: 'FORM_ID', value: 'lg2bkk', description: '表单 ID' },
+        { id: 'reply-submission-assertions', key: 'SUBMISSION_ASSERTIONS', value: '{}', description: '断言 JSON' },
+        { id: 'reply-submission-edit-values', key: 'SUBMISSION_EDIT_VALUES', value: '{}', description: '修改 JSON' },
+      ],
+    }),
+    config({
+      id: 'form-all-fields-publish',
+      name: '表单全题型三页发布',
+      entryFile: 'form-all-fields-publish.ui.spec.mjs',
+      responseVariableBindings: [
+        { id: 'published-form-id', variableName: 'FORM_ID', responsePath: 'formId', secret: false },
+        { id: 'published-form-code', variableName: 'FORM_CODE', responsePath: 'formCode', secret: false },
+        { id: 'published-form-contract', variableName: 'FORM_CONTRACT', responsePath: 'formContract', secret: false },
+      ],
+    }),
+    config({
+      id: 'form-contact-publish',
+      name: '表单联系人收录并发布',
+      entryFile: 'form-contact-publish.ui.spec.mjs',
+      responseVariableBindings: [
+        { id: 'contact-form-id', variableName: 'FORM_ID', responsePath: 'formId', secret: false },
+        { id: 'contact-form-code', variableName: 'FORM_CODE', responsePath: 'formCode', secret: false },
+        { id: 'contact-form-contract', variableName: 'FORM_CONTRACT', responsePath: 'formContract', secret: false },
+      ],
+    }),
+  ]
+}
+
+class MemoryScriptConfigRepository implements ScriptConfigRepository {
+  private configs = initialConfigs()
+
+  async list(): Promise<ScriptConfig[]> {
+    return structuredClone(this.configs)
+  }
+
+  async get(id: string): Promise<ScriptConfig | null> {
+    return structuredClone(this.configs.find((item) => item.id === id) ?? null)
+  }
+
+  async create(value: ScriptConfig): Promise<ScriptConfig> {
+    const created = { ...structuredClone(value), revision: 1 }
+    this.configs.unshift(created)
+    return structuredClone(created)
+  }
+
+  async update(
+    value: ScriptConfig,
+    expectedRevision: number,
+    expectedUpdatedAt: string,
+  ): Promise<ScriptConfig> {
+    const index = this.configs.findIndex((item) => item.id === value.id)
+    const current = this.configs[index]
+    if (!current) throw new Error('脚本不存在或已被删除')
+    if (current.revision !== expectedRevision || current.updatedAt !== expectedUpdatedAt) {
+      throw new Error('脚本配置已被其他页面修改')
+    }
+    const updated = { ...structuredClone(value), revision: current.revision + 1 }
+    this.configs[index] = updated
+    return structuredClone(updated)
+  }
+
+  async remove(id: string, expectedRevision: number, expectedUpdatedAt: string): Promise<void> {
+    const index = this.configs.findIndex((item) => item.id === id)
+    const current = this.configs[index]
+    if (!current) throw new Error('脚本不存在或已被删除')
+    if (current.revision !== expectedRevision || current.updatedAt !== expectedUpdatedAt) {
+      throw new Error('脚本配置已被其他页面修改')
+    }
+    this.configs.splice(index, 1)
+  }
+}
+
+function createService(
+  fetcher: typeof fetch = vi.fn(async () => {
+    throw new Error('unexpected runner request')
+  }) as typeof fetch,
+  livePollIntervalMs = 1,
+  cancelRequestTimeoutMs = 5_000,
+): LocalScriptService {
+  return new LocalScriptService(
+    fetcher,
+    'http://127.0.0.1:4310',
+    livePollIntervalMs,
+    cancelRequestTimeoutMs,
+    new MemoryScriptConfigRepository(),
+  )
+}
 
 describe('LocalScriptService', () => {
   it('starts with submission, reply editing and publishing scripts', async () => {
-    const scripts = await new LocalScriptService().list()
+    const scripts = await createService().list()
 
     expect(scripts).toHaveLength(5)
     expect(scripts.every((script) => script.timeoutMs === 300_000)).toBe(true)
@@ -56,7 +186,7 @@ describe('LocalScriptService', () => {
   })
 
   it('creates and updates a script without exposing internal state', async () => {
-    const service = new LocalScriptService()
+    const service = createService()
     const created = await service.create({
       name: '新增回归脚本',
       description: '用于测试本地服务',
@@ -123,7 +253,7 @@ describe('LocalScriptService', () => {
         resolveRun = resolve
       })
     })
-    const service = new LocalScriptService(fetcher as typeof fetch, 'http://127.0.0.1:4310', 1)
+    const service = createService(fetcher as typeof fetch)
     const runTask = service.run(['form-contact-publish'], {
       environmentId: 'env-testing',
       siteBaseUrl: 'https://lx.admin.lingxi.tech/',
@@ -180,12 +310,12 @@ describe('LocalScriptService', () => {
     const runCall = fetcher.mock.calls.find(([url]) => String(url) === 'http://127.0.0.1:4310/runs')
     const request = runCall?.[1]
     expect(JSON.parse(String(request?.body))).toMatchObject({
-      timeoutMs: 300_000,
       context: {
         siteBaseUrl: 'https://lx.admin.lingxi.tech/',
         variables: { AUTH_TOKEN: 'runtime-token' },
       },
     })
+    expect(JSON.parse(String(request?.body))).not.toHaveProperty('timeoutMs')
   })
 
   it('isolates rejected progress callbacks from the script result', async () => {
@@ -197,7 +327,7 @@ describe('LocalScriptService', () => {
     const onProgress = vi.fn(async () => {
       throw new Error('进度接收方异常')
     })
-    const service = new LocalScriptService(fetcher as typeof fetch, 'http://127.0.0.1:4310', 1)
+    const service = createService(fetcher as typeof fetch)
 
     const completed = await service.run(['form-contact-publish'], {
       environmentId: 'env-testing',
@@ -229,7 +359,7 @@ describe('LocalScriptService', () => {
         result: { submitted: true },
       }), { status: 200, headers: { 'Content-Type': 'application/json' } })
     })
-    const service = new LocalScriptService(fetcher as typeof fetch, 'http://127.0.0.1:4310', 1)
+    const service = createService(fetcher as typeof fetch)
     const current = (await service.list()).find((script) => script.id === 'form-lpxavn-submit')
     expect(current).toBeDefined()
 
@@ -261,9 +391,9 @@ describe('LocalScriptService', () => {
 
     expect(requestBody).toMatchObject({
       scriptId: 'form-lpxavn-submit',
-      timeoutMs: 123_000,
       context: { requestPath: '/form/?id=configured' },
     })
+    expect(requestBody).not.toHaveProperty('timeoutMs')
   })
 
   it('injects an extracted response variable into the next script and resolves its URL', async () => {
@@ -296,7 +426,7 @@ describe('LocalScriptService', () => {
           : { submissionId: 'submission-1', status: 'submitted' },
       }), { status: 200, headers: { 'Content-Type': 'application/json' } })
     })
-    const service = new LocalScriptService(fetcher as typeof fetch, 'http://127.0.0.1:4310', 1)
+    const service = createService(fetcher as typeof fetch)
     const scripts = await service.list()
     const publish = scripts.find((script) => script.id === 'form-all-fields-publish')!
     const submit = scripts.find((script) => script.id === 'form-lpxavn-submit')!
@@ -346,7 +476,7 @@ describe('LocalScriptService', () => {
         result: { completed: true },
       }), { status: 200, headers: { 'Content-Type': 'application/json' } })
     })
-    const service = new LocalScriptService(fetcher as typeof fetch, 'http://127.0.0.1:4310', 1)
+    const service = createService(fetcher as typeof fetch)
 
     await service.run(['form-submission-reply-edit', 'form-contact-publish'], {
       environmentId: 'env-testing',
@@ -405,7 +535,7 @@ describe('LocalScriptService', () => {
         logs: [],
       }), { status: 200, headers: { 'Content-Type': 'application/json' } })
     })
-    const service = new LocalScriptService(fetcher as typeof fetch, 'http://127.0.0.1:4310', 1)
+    const service = createService(fetcher as typeof fetch)
     const runTask = service.run(['form-contact-publish'], {
       environmentId: 'env-testing',
       siteBaseUrl: 'https://lx.admin.lingxi.tech/',
@@ -453,7 +583,7 @@ describe('LocalScriptService', () => {
       status: 404,
       headers: { 'Content-Type': 'application/json' },
     }))
-    const service = new LocalScriptService(fetcher as typeof fetch)
+    const service = createService(fetcher as typeof fetch)
 
     await expect(service.stop('form-all-fields-publish')).resolves.toEqual({
       runnerFound: false,
@@ -474,7 +604,7 @@ describe('LocalScriptService', () => {
       status: 404,
       headers: { 'Content-Type': 'application/json' },
     }))
-    const service = new LocalScriptService(fetcher as typeof fetch)
+    const service = createService(fetcher as typeof fetch)
 
     await expect(service.stop('form-all-fields-publish')).rejects.toThrow('接口不存在')
     expect((await service.list()).find((script) => script.id === 'form-all-fields-publish')?.status).toBe('ready')
@@ -486,7 +616,7 @@ describe('LocalScriptService', () => {
       requestSignal = init?.signal ?? undefined
       return new Promise<Response>(() => {})
     })
-    const service = new LocalScriptService(fetcher as typeof fetch, 'http://127.0.0.1:4310', 1, 10)
+    const service = createService(fetcher as typeof fetch, 1, 10)
 
     await expect(service.stop('form-all-fields-publish')).rejects.toThrow(
       'Runner 强制停止请求超时（10ms），请确认 Runner 服务正常后重试',
@@ -500,7 +630,7 @@ describe('LocalScriptService', () => {
       status: 500,
       headers: { 'Content-Type': 'application/json' },
     }))
-    const service = new LocalScriptService(fetcher as typeof fetch)
+    const service = createService(fetcher as typeof fetch)
 
     await expect(service.stop('form-all-fields-publish')).rejects.toThrow('Runner 内部错误')
     expect((await service.list()).find((script) => script.id === 'form-all-fields-publish')?.status).toBe('ready')

@@ -9,7 +9,7 @@ AutoTest 是一个本地优先的自动化测试管理平台。V0 提供 Vue 3 +
 - **执行控制**：实时刷新运行日志；运行中的脚本可从操作栏强制停止，并将当前任务及同批次后续任务标记为已中断。
 - **自动化配置**：按顺序组合多个已注册脚本，可将前序脚本输出映射为后续脚本的运行时变量。
 - **运行记录**：按批次保存脚本状态、耗时、日志、输出和数据分析；运行概览只统计真实记录。
-- **安全边界**：Runner 只执行注册表内的脚本 ID，校验 API 与授权来源同源，持久化日志和结果前对敏感数据脱敏。
+- **安全边界**：Runner 只执行持久配置中已启用的脚本 ID，校验入口真实路径及 API 与授权来源同源，持久化日志和结果前对敏感数据脱敏。
 
 ## 技术栈
 
@@ -19,7 +19,7 @@ AutoTest 是一个本地优先的自动化测试管理平台。V0 提供 Vue 3 +
 | 本地 Runner | Node.js 22、原生 HTTP Server |
 | 自动化执行 | Playwright + Google Chrome 无头模式 |
 | 测试 | Vitest、Node Test Runner |
-| 本地数据 | `localStorage`、`sessionStorage` |
+| 本地数据 | JSON 文件、`localStorage`、`sessionStorage` |
 
 ## 快速开始
 
@@ -148,7 +148,7 @@ flowchart TD
     K -- "否" --> M["完成运行批次"]
     I -- "否" --> L["停止流水线并标记后续步骤未执行"]
     L --> M
-    M --> N["脱敏后写入 localStorage"]
+    M --> N["脱敏后写入 data/run-records"]
     N --> O["运行记录与运行概览读取真实结果"]
 ```
 
@@ -166,6 +166,10 @@ autoTest/
 │  │     ├─ views/         # 管理页面
 │  │     └─ components/    # 业务组件
 │  └─ api/                 # 本地 Playwright HTTP Runner
+├─ config/
+│  └─ scripts/             # 按脚本拆分的持久化 JSON 配置
+├─ data/
+│  └─ run-records/         # 按批次拆分的本地运行记录
 ├─ scripts/                # 自动化脚本与本地 Supervisor
 ├─ package.json            # npm workspaces 与统一命令
 └─ README.md
@@ -173,22 +177,22 @@ autoTest/
 
 ## 接入新脚本
 
-V0 的 Runner 不接受任意文件路径。接入脚本需要：
+Runner 不接受运行请求传入任意文件路径。接入脚本需要：
 
 1. 在 `scripts/` 新增模块并导出 `run(context)`；长任务必须检查 `context.signal`，并通过 `playwright-run-control.mjs` 注册 abort 清理，保证强制停止能及时关闭浏览器。
-2. 在 `apps/api/script-runner.mjs` 的 `scriptRegistry` 注册脚本 ID。
-3. 在 `apps/web/src/services/scripts/local-script.service.ts` 增加相同 ID 的脚本元数据。
-4. 重启 Runner，并执行测试与构建校验。
+2. 在脚本管理页面新增配置，或在 `config/scripts/` 新增对应的版本化 JSON 文件；入口只允许使用项目 `scripts/` 目录内真实存在的 `.mjs` 文件。
+3. 重启 Runner，并执行测试与构建校验。通过页面创建或修改的配置会立即原子写入 `config/scripts/`，无需维护第二份静态注册表。
 
 内置脚本的行为、依赖和副作用见“已注册脚本”。
 
 ## 数据与安全
 
-- 环境、自动化配置和最近 200 条运行记录保存在浏览器 `localStorage`。
+- 环境和自动化配置保存在浏览器 `localStorage`。
+- 脚本配置以一脚本一文件的方式保存在 `config/scripts/`，应随 Git 提交；运行记录保存在 `data/run-records/`，不会因清理浏览器数据而删除。
 - 登录状态、Token 和运行时变量保存在 `sessionStorage`，退出平台时清空。
 - Token、Authorization、手机号、验证码、密码及标记为 secret 的变量不会写入运行记录明文。
-- Git clone 只迁移代码和已注册脚本，不迁移浏览器本地配置或历史记录。
-- 后续接入数据库时，可保留领域模型和服务接口，为认证、环境、脚本、流水线、运行记录与概览提供 HTTP 实现。
+- Git clone 会迁移代码和 `config/scripts/` 中已提交的脚本配置，不迁移浏览器本地配置或被 `.gitignore` 排除的运行历史。
+- 脚本配置通过 Repository 接口访问；后续可将文件仓储替换为 MySQL 实现，而不改变 Web API 和 Runner 执行协议。
 
 ## 开发校验
 
@@ -202,6 +206,6 @@ npm.cmd run build
 
 - 当前真实脚本依赖本机已安装 Google Chrome；以 `headless: true` 启动，不显示浏览器窗口。
 - 全题型填写脚本仍依赖固定公开表单结构；发布与填写脚本尚未通过流水线输出自动衔接。
-- 页面新增的脚本元数据仅保存在当前内存，刷新后重置；可执行脚本仍需写入仓库并注册。
+- 实际脚本代码仍需写入项目 `scripts/` 目录；脚本管理页面只负责持久化配置，不在线创建或修改 `.mjs` 源码。
 - 自动化配置只支持串行执行和失败即停止，暂不支持并行、分支、定时任务或远程执行节点。
 - 当前无数据库、用户权限系统和生产级身份认证。

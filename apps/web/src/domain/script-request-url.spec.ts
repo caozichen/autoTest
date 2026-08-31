@@ -8,6 +8,7 @@ import {
   publicOriginForEnvironment,
   requestOriginForScript,
   resolveScriptRequestPath,
+  segmentScriptRequestPath,
   supportsScriptRequestPath,
 } from './script-request-url'
 
@@ -66,6 +67,38 @@ describe('script request URL', () => {
       '/form/?id={{FORM_ID}}',
       { FORM_ID: 'dynamic-123' },
     )).toBe('https://lx.lingxi.tech/form/?id=dynamic-123')
+  })
+
+  it('matches request path variables without regard to English letter casing', () => {
+    expect(resolveScriptRequestPath('/form/?id={{form_code}}', { FORM_CODE: 'upper-source' }))
+      .toBe('/form/?id=upper-source')
+    expect(resolveScriptRequestPath('/form/?id={{ FORM_CODE }}', { form_code: 'lower-source' }))
+      .toBe('/form/?id=lower-source')
+    expect(resolveScriptRequestPath('/form/?id={{Form_Code}}', { FORM_CODE: 'mixed-source' }))
+      .toBe('/form/?id=mixed-source')
+  })
+
+  it('lets later variable sources override earlier keys with different casing', () => {
+    expect(resolveScriptRequestPath('/form/?id={{FORM_CODE}}', {
+      FORM_CODE: 'default-code',
+      form_code: 'runtime-code',
+    })).toBe('/form/?id=runtime-code')
+  })
+
+  it('segments complete variable placeholders for request path highlighting', () => {
+    expect(segmentScriptRequestPath('/form/?id={{form_code}}&next={{ Form_Id }}')).toEqual([
+      { text: '/form/?id=', variable: false },
+      { text: '{{form_code}}', variable: true },
+      { text: '&next=', variable: false },
+      { text: '{{ Form_Id }}', variable: true },
+    ])
+    expect(segmentScriptRequestPath('/form/?id={{FORM_CODE}')).toEqual([
+      { text: '/form/?id={{FORM_CODE}', variable: false },
+    ])
+    expect(segmentScriptRequestPath('/form/?query=<value>&id={{FORM_CODE}}')).toEqual([
+      { text: '/form/?query=<value>&id=', variable: false },
+      { text: '{{FORM_CODE}}', variable: true },
+    ])
   })
 
   it('rejects absolute URLs and empty paths', () => {

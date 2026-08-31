@@ -950,14 +950,16 @@ npm run start --workspace @autotest/api
 
 当前版本没有数据库：
 
-- 环境、流水线和最近运行记录保存在浏览器 `localStorage`。
+- 环境和流水线保存在浏览器 `localStorage`。
 - 登录状态、Token 和运行时变量保存在浏览器 `sessionStorage`。
+- 脚本基础配置保存在项目 `config/scripts/`，每个脚本一个 JSON 文件。
+- 运行记录保存在项目 `data/run-records/`，每个运行批次一个 JSON 文件。
 - 脚本生成的截图、临时文件和 Supervisor 日志写在项目根目录 `outputs/`。
 
 因此：
 
-- 清除浏览器网站数据会清除本地配置或登录状态。
-- 换浏览器、换电脑或重新克隆 Git 仓库，不会自动迁移本地数据。
+- 清除浏览器网站数据会清除环境、流水线或登录状态，但不会删除脚本配置和运行记录文件。
+- `config/scripts/` 应随 Git 提交，可以随代码迁移；`data/run-records/` 默认被 Git 忽略，需要单独备份才能迁移历史记录。
 - `outputs/` 需要保持可写，但它不应作为数据库或长期备份。
 
 ## 11. 关于环境变量

@@ -30,6 +30,7 @@ import {
   scriptInputParameterDefaults,
 } from '@/services/scripts/script-input-parameters'
 import { normalizeScriptResponseVariableBindings } from '@/services/scripts/script-response-variables'
+import TemplateVariableInput from './TemplateVariableInput.vue'
 
 interface ScriptVariableOption {
   key: string
@@ -68,9 +69,12 @@ const requestVariableOptions = computed<ScriptVariableOption[]>(() => {
   const byKey = new Map<string, ScriptVariableOption>()
   for (const parameter of form.inputParameters ?? []) {
     const key = parameter.key.trim()
-    if (key) byKey.set(key, { key, value: parameter.value, secret: false })
+    if (key) byKey.set(key.toLowerCase(), { key, value: parameter.value, secret: false })
   }
-  for (const variable of props.variables) byKey.set(variable.key, variable)
+  for (const variable of props.variables) {
+    const key = variable.key.trim()
+    if (key) byKey.set(key.toLowerCase(), { ...variable, key })
+  }
   return [...byKey.values()]
 })
 const finalRequestUrl = computed(() => {
@@ -106,7 +110,7 @@ const lastOutputJson = computed(() => {
 const form = reactive<ScriptDraft>({
   name: '',
   description: '',
-  directory: '',
+  directory: 'scripts',
   entryFile: '',
   timeoutMs: DEFAULT_SCRIPT_TIMEOUT_MS,
   requestPath: '',
@@ -122,8 +126,26 @@ const rules: FormRules<ScriptDraft> = {
     { min: 2, max: 40, message: '名称长度应为 2 到 40 个字符', trigger: 'blur' },
   ],
   description: [{ required: true, message: '请输入脚本简介', trigger: 'blur' }],
-  directory: [{ required: true, message: '请输入项目目录', trigger: 'blur' }],
-  entryFile: [{ required: true, message: '请输入入口文件', trigger: 'blur' }],
+  directory: [{
+    validator: (_rule, value, callback) => {
+      if (value !== 'scripts') {
+        callback(new Error('项目目录必须是 scripts'))
+        return
+      }
+      callback()
+    },
+    trigger: 'blur',
+  }],
+  entryFile: [{
+    validator: (_rule, value, callback) => {
+      if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*\.mjs$/.test(String(value ?? '').trim())) {
+        callback(new Error('请输入 scripts 目录下的 .mjs 文件名'))
+        return
+      }
+      callback()
+    },
+    trigger: 'blur',
+  }],
   timeoutMs: [{
     validator: (_rule, value, callback) => {
       if (!Number.isInteger(value)
@@ -156,7 +178,7 @@ watch(
     if (!visible) return
     form.name = script?.name ?? ''
     form.description = script?.description ?? ''
-    form.directory = script?.directory ?? ''
+    form.directory = script?.directory ?? 'scripts'
     form.entryFile = script?.entryFile ?? ''
     form.timeoutMs = script?.timeoutMs ?? DEFAULT_SCRIPT_TIMEOUT_MS
     form.requestPath = script?.requestPath
@@ -205,6 +227,10 @@ function insertRequestVariable(variableName: string): void {
   if (!variableName) return
   form.requestPath = `${form.requestPath ?? ''}{{${variableName}}}`
   selectedRequestVariable.value = ''
+}
+
+function validateRequestPath(): void {
+  void formRef.value?.validateField('requestPath').catch(() => false)
 }
 
 function addInputParameter(): void {
@@ -273,11 +299,11 @@ function extractedPreview(binding: ScriptResponseVariableBinding): string {
       </el-form-item>
 
       <el-form-item label="项目目录" prop="directory">
-        <el-input v-model="form.directory" placeholder="D:\automation-tests\project-name" />
+        <el-input v-model="form.directory" disabled />
       </el-form-item>
 
       <el-form-item label="入口文件" prop="entryFile">
-        <el-input v-model="form.entryFile" placeholder="请输入入口文件路径" />
+        <el-input v-model="form.entryFile" placeholder="example.ui.spec.mjs" />
       </el-form-item>
 
       <el-form-item label="脚本执行超时（毫秒）" prop="timeoutMs">
@@ -344,9 +370,14 @@ function extractedPreview(binding: ScriptResponseVariableBinding): string {
         <el-alert v-else title="当前未选择运行环境，请先在脚本列表选择环境" type="warning" :closable="false" show-icon />
 
         <el-form-item label="URL 路径" prop="requestPath" class="request-config__path">
-          <el-input v-model="form.requestPath" placeholder="/form/?id=lpXAVN" clearable>
-            <template #prepend>{{ requestOrigin || `环境${requestOriginLabel}` }}</template>
-          </el-input>
+          <TemplateVariableInput
+            v-model="form.requestPath"
+            :prepend="requestOrigin || `环境${requestOriginLabel}`"
+            placeholder="/form/?id=lpXAVN"
+            aria-label="URL 路径"
+            clearable
+            @blur="validateRequestPath"
+          />
         </el-form-item>
 
         <div class="request-config__variables">
@@ -692,10 +723,6 @@ function extractedPreview(binding: ScriptResponseVariableBinding): string {
     flex-direction: column;
     align-items: stretch;
     gap: 10px;
-  }
-
-  :deep(.request-config .el-input-group__prepend) {
-    display: none;
   }
 
   .request-config__variables,

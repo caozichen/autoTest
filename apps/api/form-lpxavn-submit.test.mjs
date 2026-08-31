@@ -16,7 +16,9 @@ import {
   PUBLISHED_FIELD_TYPES,
   REQUIRED_ROOT_FIELD_KEYS,
   SUBMISSION_RESULT_SELECTOR,
+  assertEmailFormatBoundary,
   assertPublishedFormContract,
+  assertRuleValidationBlocked,
   assertSubmissionPayload,
   assertVisibleSubmissionResult,
   buildFormUrl,
@@ -56,6 +58,7 @@ function createPublishedFormFixture() {
       choices: NAME_TITLES.map((title, index) => ({ code: `title_${index + 1}`, title })),
     },
   })
+  field(FIELD_KEYS.email).rule_config.regex_format = { enabled: 1 }
   const documentTypes = Array.from({ length: 10 }, (_, index) => ({
     code: `document_${index + 1}`,
     title: `证件${index + 1}`,
@@ -331,6 +334,17 @@ test('rejects a published-form contract when a configured boundary drifts', () =
   )
 })
 
+test('rejects a published form that disables email format validation', () => {
+  const fixture = createPublishedFormFixture()
+  const email = fixture.data.items.find((item) => item.item_key === FIELD_KEYS.email)
+  email.rule_config.regex_format.enabled = 2
+
+  assert.throws(
+    () => assertPublishedFormContract(fixture),
+    /邮箱格式校验应开启/,
+  )
+})
+
 test('indexes both entry arrays and object-shaped answers by item_key', () => {
   const first = { item_key: FIELD_KEYS.input, answer: '答案1' }
   const second = { item_key: FIELD_KEYS.input, answer: '答案2' }
@@ -405,6 +419,111 @@ test('creates unique answers for the main contact and nested field-group contact
   assert.deepEqual(data.checkboxIndexes, [0, 1, 2])
   assert.equal(data.nps, 10)
   assert.equal(data.matrix[2][2], '题目3-项目3答案')
+})
+
+test('checks the native email format boundary and restores a valid value before pagination', async () => {
+  const browser = await launchGoogleChrome()
+  try {
+    const page = await browser.newPage()
+    await page.setContent(`
+      <label for="email">邮箱</label>
+      <input id="email" type="email" value="valid@example.com">
+      <button type="button">下一页</button>
+    `)
+    const assertions = []
+
+    await runWithAssertionRecorder('form-lpxavn-submit', (assertion) => assertions.push(assertion), async () => {
+      await assertEmailFormatBoundary(
+        page.locator('#email'),
+        'invalid-email',
+        'valid@example.com',
+      )
+    })
+
+    assert.equal(assertions.filter((assertion) => assertion.status === 'failed').length, 0)
+    assert.equal(await page.locator('#email').inputValue(), 'valid@example.com')
+    assert.equal(await page.locator('#email').evaluate((input) => input.validity.valid), true)
+  } finally {
+    await browser.close()
+  }
+})
+
+test('hard-stops when page validation unexpectedly accepts an invalid email', async () => {
+  const browser = await launchGoogleChrome()
+  try {
+    const page = await browser.newPage()
+    await page.route('https://public.example.test/**', async (route) => {
+      const request = route.request()
+      const url = new URL(request.url())
+      if (request.method() === 'POST' && url.pathname.endsWith('/submission/validate-page')) {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ code: 0, data: {} }),
+        })
+        return
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        body: `
+          <main>
+            <section id="page-1">
+              <div class="fb-runtime-field-card" data-item-key="username_test"><input></div>
+              <div class="fb-runtime-field-card" data-item-key="email_test"><input value="invalid-email"></div>
+              <div class="fb-runtime-pagination-buttons">
+                <button class="fb-runtime-submit-button" type="button">下一页</button>
+              </div>
+            </section>
+            <section id="page-2" hidden>
+              <div class="fb-runtime-field-card" data-item-key="input_test"><input></div>
+            </section>
+          </main>
+          <script>
+            document.querySelector('.fb-runtime-submit-button').addEventListener('click', async () => {
+              const response = await fetch('/f/form/test-form/submission/validate-page', { method: 'POST' })
+              const body = await response.json()
+              if (Number(body.code) === 0) {
+                document.querySelector('#page-1').hidden = true
+                document.querySelector('#page-2').hidden = false
+              }
+            })
+          </script>
+        `,
+      })
+    })
+    await page.goto('https://public.example.test/form')
+    const assertions = []
+
+    await assert.rejects(
+      () => runWithAssertionRecorder(
+        'form-lpxavn-submit',
+        (assertion) => assertions.push(assertion),
+        () => assertRuleValidationBlocked(page, 'https://public.example.test', {
+          currentPage: 1,
+          key: 'email_test',
+          label: '邮箱',
+          formCode: 'test-form',
+          pageFieldKeys: [
+            ['username_test', 'email_test'],
+            ['input_test'],
+          ],
+          logger: () => undefined,
+        }),
+      ),
+      /validate-page 实际返回 businessCode: 0/,
+    )
+
+    assert.ok(assertions.some((assertion) => (
+      assertion.status === 'failed'
+      && assertion.name.includes('邮箱')
+      && assertion.name.includes('businessCode: 0')
+    )))
+    await page.locator('#page-2').waitFor({ state: 'visible', timeout: 1_000 })
+    assert.equal(await page.locator('[data-item-key="email_test"]:visible').count(), 0)
+  } finally {
+    await browser.close()
+  }
 })
 
 test('excludes hidden and unflagged system fields from the linked form contract', () => {

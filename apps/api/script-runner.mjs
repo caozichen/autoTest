@@ -1,18 +1,28 @@
 import { runWithAssertionRecorder } from '../../scripts/support/recorded-expect.mjs'
+import {
+  DEFAULT_SCRIPT_CONFIG_DIRECTORY,
+  DEFAULT_SCRIPT_TIMEOUT_MS,
+  DEFAULT_SCRIPTS_DIRECTORY,
+  FileScriptConfigRepository,
+  MAX_SCRIPT_TIMEOUT_MS,
+  MIN_SCRIPT_TIMEOUT_MS,
+  assertSafeScriptConfigId,
+  resolveScriptEntryUrl,
+} from './script-config-repository.mjs'
 
-const scriptRegistry = Object.freeze({
-  'form-submission-reply-edit': new URL('../../scripts/form-submission-reply-edit.ui.spec.mjs', import.meta.url),
-  'form-lpxavn-submit': new URL('../../scripts/form-lpxavn-submit.ui.spec.mjs', import.meta.url),
-  'form-all-fields-submit': new URL('../../scripts/form-all-fields-submit.ui.spec.mjs', import.meta.url),
-  'form-all-fields-publish': new URL('../../scripts/form-all-fields-publish.ui.spec.mjs', import.meta.url),
-  'form-contact-publish': new URL('../../scripts/form-contact-publish.ui.spec.mjs', import.meta.url),
-})
 const DEFAULT_ABORT_CLEANUP_TIMEOUT_MS = 3_000
 const MAX_API_RESPONSES = 500
 const SENSITIVE_CAPTURE_KEY = /authorization|token|password|passwd|secret|cookie|verify[_-]?code|mobile/i
-export const DEFAULT_SCRIPT_TIMEOUT_MS = 300_000
-export const MIN_SCRIPT_TIMEOUT_MS = 1_000
-export const MAX_SCRIPT_TIMEOUT_MS = 1_800_000
+const defaultScriptConfigRepository = new FileScriptConfigRepository({
+  directory: DEFAULT_SCRIPT_CONFIG_DIRECTORY,
+  scriptsDirectory: DEFAULT_SCRIPTS_DIRECTORY,
+})
+
+export {
+  DEFAULT_SCRIPT_TIMEOUT_MS,
+  MAX_SCRIPT_TIMEOUT_MS,
+  MIN_SCRIPT_TIMEOUT_MS,
+}
 
 function assertHttpUrl(rawUrl, label) {
   let url
@@ -41,9 +51,13 @@ function normalizeRequestPath(rawPath) {
   return requestPath.startsWith('/') ? requestPath : `/${requestPath}`
 }
 
-export function validateRunRequest(payload) {
+export function validateRunRequest(payload, {
+  defaultTimeoutMs = DEFAULT_SCRIPT_TIMEOUT_MS,
+} = {}) {
   if (!payload || typeof payload !== 'object') throw new Error('运行参数不能为空')
-  if (typeof payload.scriptId !== 'string' || !scriptRegistry[payload.scriptId]) {
+  try {
+    assertSafeScriptConfigId(payload.scriptId)
+  } catch {
     throw new Error('脚本未登记，Runner 拒绝执行')
   }
   const context = payload.context
@@ -73,7 +87,7 @@ export function validateRunRequest(payload) {
     throw new Error('运行时变量名称不能为空，且变量值必须是字符串')
   }
   const requestPath = normalizeRequestPath(context.requestPath)
-  const timeoutMs = payload.timeoutMs ?? DEFAULT_SCRIPT_TIMEOUT_MS
+  const timeoutMs = payload.timeoutMs ?? defaultTimeoutMs
   if (!Number.isInteger(timeoutMs)
     || timeoutMs < MIN_SCRIPT_TIMEOUT_MS
     || timeoutMs > MAX_SCRIPT_TIMEOUT_MS) {
@@ -93,6 +107,28 @@ export function validateRunRequest(payload) {
     extraHTTPHeaders: { Authorization: authorization.trim() },
     ...(requestPath ? { requestPath } : {}),
   }
+}
+
+async function runnableScriptConfig(scriptId, {
+  scriptConfigRepository = defaultScriptConfigRepository,
+  scriptsDirectory = DEFAULT_SCRIPTS_DIRECTORY,
+} = {}) {
+  const config = await scriptConfigRepository.get(scriptId)
+  if (!config) throw new Error('脚本未登记，Runner 拒绝执行')
+  if (!config.enabled) throw new Error('脚本已禁用，Runner 拒绝执行')
+  const scriptUrl = await resolveScriptEntryUrl(config, { scriptsDirectory })
+  return { config, scriptUrl }
+}
+
+export async function validateRegisteredRunRequest(payload, options = {}) {
+  if (!payload || typeof payload !== 'object') throw new Error('运行参数不能为空')
+  try {
+    assertSafeScriptConfigId(payload.scriptId)
+  } catch {
+    throw new Error('脚本未登记，Runner 拒绝执行')
+  }
+  const { config } = await runnableScriptConfig(payload.scriptId, options)
+  return validateRunRequest({ ...payload, timeoutMs: config.timeoutMs })
 }
 
 export function sanitizeErrorMessage(error, secrets = []) {
@@ -189,9 +225,20 @@ export async function executeRegisteredScript(payload, {
   signal,
   loadScript = (scriptUrl) => import(scriptUrl.href),
   abortCleanupTimeoutMs = DEFAULT_ABORT_CLEANUP_TIMEOUT_MS,
+  scriptConfigRepository = defaultScriptConfigRepository,
+  scriptsDirectory = DEFAULT_SCRIPTS_DIRECTORY,
 } = {}) {
-  const context = validateRunRequest(payload)
-  const scriptUrl = scriptRegistry[context.scriptId]
+  if (!payload || typeof payload !== 'object') throw new Error('运行参数不能为空')
+  try {
+    assertSafeScriptConfigId(payload.scriptId)
+  } catch {
+    throw new Error('脚本未登记，Runner 拒绝执行')
+  }
+  const { config, scriptUrl } = await runnableScriptConfig(payload.scriptId, {
+    scriptConfigRepository,
+    scriptsDirectory,
+  })
+  const context = validateRunRequest({ ...payload, timeoutMs: config.timeoutMs })
   const logs = []
   const assertions = []
   const apiResponses = []
