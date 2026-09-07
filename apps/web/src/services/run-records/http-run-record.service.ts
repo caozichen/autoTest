@@ -12,6 +12,7 @@ import type { RunRecordService } from './run-record-service'
 
 const LEGACY_STORAGE_KEY = 'autotest.run-records.v1'
 const DEFAULT_CONFLICT_RETRIES = 2
+const DEFAULT_REQUEST_TIMEOUT_MS = 15_000
 
 type RecordTransition = (service: LocalRunRecordService) => Promise<RunRecord>
 
@@ -29,6 +30,7 @@ export interface HttpRunRecordServiceOptions {
   now?: () => Date
   idFactory?: () => string
   conflictRetries?: number
+  requestTimeoutMs?: number
 }
 
 class MemoryStorage implements Storage {
@@ -53,6 +55,13 @@ class RunRecordHttpError extends Error {
   }
 }
 
+class RunRecordRequestTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`Runner 运行记录请求超时（${timeoutMs}ms）`)
+    this.name = 'RunRecordRequestTimeoutError'
+  }
+}
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
@@ -67,6 +76,12 @@ function defaultLegacyStorage(): Storage | null {
 
 function joinUrl(baseUrl: string, path: string): string {
   return `${baseUrl.replace(/\/+$/, '')}/${path.replace(/^\/+/, '')}`
+}
+
+function sameRecordVersion(left: RunRecord, right: RunRecord): boolean {
+  return left.id === right.id
+    && left.revision === right.revision
+    && left.updatedAt === right.updatedAt
 }
 
 function cloneRecord(value: unknown): RunRecord {
@@ -110,6 +125,7 @@ export class HttpRunRecordService implements RunRecordService {
   private readonly now: () => Date
   private readonly idFactory: () => string
   private readonly conflictRetries: number
+  private readonly requestTimeoutMs: number
   private readonly mutationTails = new Map<string, Promise<void>>()
   private migrationComplete = false
   private migrationPromise: Promise<void> | null = null
@@ -124,6 +140,9 @@ export class HttpRunRecordService implements RunRecordService {
     this.now = options.now ?? (() => new Date())
     this.idFactory = options.idFactory ?? (() => crypto.randomUUID())
     this.conflictRetries = Math.max(0, Math.floor(options.conflictRetries ?? DEFAULT_CONFLICT_RETRIES))
+    this.requestTimeoutMs = Number.isFinite(options.requestTimeoutMs) && Number(options.requestTimeoutMs) > 0
+      ? Math.max(1, Math.floor(Number(options.requestTimeoutMs)))
+      : DEFAULT_REQUEST_TIMEOUT_MS
   }
 
   async list(): Promise<RunRecord[]> {
@@ -140,10 +159,20 @@ export class HttpRunRecordService implements RunRecordService {
     await this.ensureLegacyMigration()
     const existingRecords = await this.fetchList()
     const record = await this.createTransformer(existingRecords).start(draft)
-    const { response, payload } = await this.request('/run-records', {
-      method: 'POST',
-      body: JSON.stringify({ record }),
-    })
+    let response: Response
+    let payload: unknown
+    try {
+      ({ response, payload } = await this.request('/run-records', {
+        method: 'POST',
+        body: JSON.stringify({ record }),
+      }))
+    } catch (error) {
+      if (error instanceof RunRecordRequestTimeoutError) {
+        const reconciled = await this.fetchRecord(record.id).catch(() => null)
+        if (reconciled && sameRecordVersion(reconciled, record)) return reconciled
+      }
+      throw error
+    }
     this.assertOk(response, payload)
     return recordFromPayload(payload)
   }
@@ -246,14 +275,24 @@ export class HttpRunRecordService implements RunRecordService {
   }
 
   private async patchRecord(current: RunRecord, next: RunRecord): Promise<RunRecord> {
-    const { response, payload } = await this.request(`/run-records/${encodeURIComponent(current.id)}`, {
-      method: 'PATCH',
-      body: JSON.stringify({
-        record: next,
-        expectedRevision: current.revision,
-        expectedUpdatedAt: current.updatedAt,
-      }),
-    })
+    let response: Response
+    let payload: unknown
+    try {
+      ({ response, payload } = await this.request(`/run-records/${encodeURIComponent(current.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          record: next,
+          expectedRevision: current.revision,
+          expectedUpdatedAt: current.updatedAt,
+        }),
+      }))
+    } catch (error) {
+      if (error instanceof RunRecordRequestTimeoutError) {
+        const reconciled = await this.fetchRecord(current.id).catch(() => null)
+        if (reconciled && sameRecordVersion(reconciled, next)) return reconciled
+      }
+      throw error
+    }
     this.assertOk(response, payload)
     const persisted = recordFromPayload(payload)
     if (
@@ -321,22 +360,43 @@ export class HttpRunRecordService implements RunRecordService {
   }
 
   private async request(path: string, init: RequestInit = {}): Promise<{ response: Response; payload: unknown }> {
-    let response: Response
+    const controller = new AbortController()
+    const externalSignal = init.signal
+    const abortFromExternalSignal = () => controller.abort(externalSignal?.reason)
+    if (externalSignal?.aborted) abortFromExternalSignal()
+    else externalSignal?.addEventListener('abort', abortFromExternalSignal, { once: true })
+    let timeoutId: ReturnType<typeof globalThis.setTimeout> | undefined
+    let timedOut = false
+    const timeout = new Promise<never>((_, reject) => {
+      timeoutId = globalThis.setTimeout(() => {
+        timedOut = true
+        controller.abort()
+        reject(new RunRecordRequestTimeoutError(this.requestTimeoutMs))
+      }, this.requestTimeoutMs)
+    })
+
     try {
-      response = await this.fetcher(joinUrl(this.runnerBaseUrl, path), {
-        ...init,
-        headers: {
-          Accept: 'application/json',
-          ...(init.body === undefined ? {} : { 'Content-Type': 'application/json' }),
-          ...init.headers,
-        },
-      })
+      return await Promise.race([(async () => {
+        const response = await this.fetcher(joinUrl(this.runnerBaseUrl, path), {
+          ...init,
+          headers: {
+            Accept: 'application/json',
+            ...(init.body === undefined ? {} : { 'Content-Type': 'application/json' }),
+            ...init.headers,
+          },
+          signal: controller.signal,
+        })
+        const payload = await response.json().catch(() => null) as unknown
+        return { response, payload }
+      })(), timeout])
     } catch (error) {
+      if (timedOut) throw new RunRecordRequestTimeoutError(this.requestTimeoutMs)
       const detail = error instanceof Error ? `：${error.message}` : ''
       throw new Error(`无法连接本地 Playwright Runner（${this.runnerBaseUrl}）${detail}`)
+    } finally {
+      if (timeoutId !== undefined) globalThis.clearTimeout(timeoutId)
+      externalSignal?.removeEventListener('abort', abortFromExternalSignal)
     }
-    const payload = await response.json().catch(() => null) as unknown
-    return { response, payload }
   }
 
   private assertOk(response: Response, payload: unknown): void {

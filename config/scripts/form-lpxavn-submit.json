@@ -8,7 +8,7 @@
   "entryFile": "form-lpxavn-submit.ui.spec.mjs",
   "timeoutMs": 300000,
   "enabled": true,
-  "requestPath": "/form/?id={{FORM_CODE}}",
+  "requestPath": "/form/?id={{FORM_ID}}",
   "tags": [
     "Playwright",
     "UI",

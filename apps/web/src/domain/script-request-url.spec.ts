@@ -18,8 +18,8 @@ describe('script request URL', () => {
     expect(supportsScriptRequestPath('form-all-fields-submit')).toBe(true)
     expect(supportsScriptRequestPath('form-submission-reply-edit')).toBe(true)
     expect(supportsScriptRequestPath('form-all-fields-publish')).toBe(false)
-    expect(defaultRequestPathForScript('form-lpxavn-submit')).toBe('/form/?id={{FORM_CODE}}')
-    expect(defaultRequestPathForScript('form-all-fields-submit')).toBe('/form/?id={{FORM_CODE}}')
+    expect(defaultRequestPathForScript('form-lpxavn-submit')).toBe('/form/?id={{FORM_ID}}')
+    expect(defaultRequestPathForScript('form-all-fields-submit')).toBe('/form/?id={{FORM_ID}}')
     expect(defaultRequestPathForScript('form-submission-reply-edit')).toBe(
       '/form-activity/submission/preview/reply/{{SUBMISSION_ID}}?fid={{FORM_ID}}',
     )
@@ -70,34 +70,34 @@ describe('script request URL', () => {
   })
 
   it('matches request path variables without regard to English letter casing', () => {
-    expect(resolveScriptRequestPath('/form/?id={{form_code}}', { FORM_CODE: 'upper-source' }))
+    expect(resolveScriptRequestPath('/form/?id={{form_id}}', { FORM_ID: 'upper-source' }))
       .toBe('/form/?id=upper-source')
-    expect(resolveScriptRequestPath('/form/?id={{ FORM_CODE }}', { form_code: 'lower-source' }))
+    expect(resolveScriptRequestPath('/form/?id={{ FORM_ID }}', { form_id: 'lower-source' }))
       .toBe('/form/?id=lower-source')
-    expect(resolveScriptRequestPath('/form/?id={{Form_Code}}', { FORM_CODE: 'mixed-source' }))
+    expect(resolveScriptRequestPath('/form/?id={{Form_Id}}', { FORM_ID: 'mixed-source' }))
       .toBe('/form/?id=mixed-source')
   })
 
   it('lets later variable sources override earlier keys with different casing', () => {
-    expect(resolveScriptRequestPath('/form/?id={{FORM_CODE}}', {
-      FORM_CODE: 'default-code',
-      form_code: 'runtime-code',
-    })).toBe('/form/?id=runtime-code')
+    expect(resolveScriptRequestPath('/form/?id={{FORM_ID}}', {
+      FORM_ID: 'default-id',
+      form_id: 'runtime-id',
+    })).toBe('/form/?id=runtime-id')
   })
 
   it('segments complete variable placeholders for request path highlighting', () => {
-    expect(segmentScriptRequestPath('/form/?id={{form_code}}&next={{ Form_Id }}')).toEqual([
+    expect(segmentScriptRequestPath('/form/?id={{form_id}}&next={{ Submission_Id }}')).toEqual([
       { text: '/form/?id=', variable: false },
-      { text: '{{form_code}}', variable: true },
+      { text: '{{form_id}}', variable: true },
       { text: '&next=', variable: false },
-      { text: '{{ Form_Id }}', variable: true },
+      { text: '{{ Submission_Id }}', variable: true },
     ])
-    expect(segmentScriptRequestPath('/form/?id={{FORM_CODE}')).toEqual([
-      { text: '/form/?id={{FORM_CODE}', variable: false },
+    expect(segmentScriptRequestPath('/form/?id={{FORM_ID}')).toEqual([
+      { text: '/form/?id={{FORM_ID}', variable: false },
     ])
-    expect(segmentScriptRequestPath('/form/?query=<value>&id={{FORM_CODE}}')).toEqual([
+    expect(segmentScriptRequestPath('/form/?query=<value>&id={{FORM_ID}}')).toEqual([
       { text: '/form/?query=<value>&id=', variable: false },
-      { text: '{{FORM_CODE}}', variable: true },
+      { text: '{{FORM_ID}}', variable: true },
     ])
   })
 

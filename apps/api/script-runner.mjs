@@ -1,4 +1,10 @@
+import { randomUUID } from 'node:crypto'
+
 import { runWithAssertionRecorder } from '../../scripts/support/recorded-expect.mjs'
+import {
+  DEFAULT_ARTIFACT_ROOT_DIRECTORY,
+  createArtifactWriter,
+} from './artifact-writer.mjs'
 import {
   DEFAULT_SCRIPT_CONFIG_DIRECTORY,
   DEFAULT_SCRIPT_TIMEOUT_MS,
@@ -12,7 +18,15 @@ import {
 
 const DEFAULT_ABORT_CLEANUP_TIMEOUT_MS = 3_000
 const MAX_API_RESPONSES = 500
-const SENSITIVE_CAPTURE_KEY = /authorization|token|password|passwd|secret|cookie|verify[_-]?code|mobile/i
+const MAX_RESOURCE_RESPONSES = 2_000
+const MAX_NETWORK_FAILURE_LOGS = 200
+const MAX_CAPTURE_TEXT_LENGTH = 1_200
+const SENSITIVE_CAPTURE_KEY = /authorization|token|password|passwd|secret|cookie|verify[_-]?code|mobile|signature|credential|session|api[_-]?key|x-amz|expires?/i
+const CAPTURE_STRING_KEY_PATTERN = '(?:authorization|token|password|passwd|secret|cookie|verify[_-]?code|mobile|signature|credential|session|api[_-]?key|x-amz[^"\'\\s:=&]*|expires?)'
+const HTTP_CAPTURE_PROTOCOLS = new Set(['http:', 'https:'])
+const NETWORK_CAPTURE_PROTOCOLS = new Set(['http:', 'https:', 'ws:', 'wss:'])
+const EXECUTION_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$/
+const RUN_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{7,99}$/
 const defaultScriptConfigRepository = new FileScriptConfigRepository({
   directory: DEFAULT_SCRIPT_CONFIG_DIRECTORY,
   scriptsDirectory: DEFAULT_SCRIPTS_DIRECTORY,
@@ -51,6 +65,51 @@ function normalizeRequestPath(rawPath) {
   return requestPath.startsWith('/') ? requestPath : `/${requestPath}`
 }
 
+function normalizeExecutionId(rawExecutionId) {
+  if (rawExecutionId === undefined) return undefined
+  if (typeof rawExecutionId !== 'string' || !EXECUTION_ID_PATTERN.test(rawExecutionId)) {
+    throw new Error('制品执行 ID 格式无效')
+  }
+  return rawExecutionId
+}
+
+function normalizeRunId(rawRunId) {
+  if (rawRunId === undefined) return undefined
+  if (typeof rawRunId !== 'string' || !RUN_ID_PATTERN.test(rawRunId)) {
+    throw new Error('运行任务 ID 格式无效')
+  }
+  return rawRunId
+}
+
+function normalizeFirstPartyOrigins(rawOrigins) {
+  if (rawOrigins === undefined) return []
+  if (!Array.isArray(rawOrigins) || rawOrigins.length > 20) {
+    throw new Error('一方网络来源必须是不超过 20 项的 URL 数组')
+  }
+  return [...new Set(rawOrigins.map((rawOrigin, index) => (
+    assertHttpUrl(rawOrigin, `一方网络来源[${index}]`).origin
+  )))]
+}
+
+function inferredPublicOrigin(siteBaseUrl) {
+  const url = new URL(siteBaseUrl)
+  if (url.hostname.includes('.admin.')) {
+    url.hostname = url.hostname.replace('.admin.', '.')
+  } else if (url.hostname.includes('.b.lingxi-hk.localtest')) {
+    url.hostname = url.hostname.replace('.b.lingxi-hk.localtest', '.f.lingxi-hk.localtest')
+  }
+  return url.origin
+}
+
+function firstPartyOriginsForContext(context) {
+  return new Set([
+    ...context.firstPartyOrigins,
+    new URL(context.siteBaseUrl).origin,
+    new URL(context.apiBaseUrl).origin,
+    inferredPublicOrigin(context.siteBaseUrl),
+  ])
+}
+
 export function validateRunRequest(payload, {
   defaultTimeoutMs = DEFAULT_SCRIPT_TIMEOUT_MS,
 } = {}) {
@@ -87,6 +146,9 @@ export function validateRunRequest(payload, {
     throw new Error('运行时变量名称不能为空，且变量值必须是字符串')
   }
   const requestPath = normalizeRequestPath(context.requestPath)
+  const firstPartyOrigins = normalizeFirstPartyOrigins(context.firstPartyOrigins)
+  const executionId = normalizeExecutionId(payload.executionId)
+  normalizeRunId(payload.runId)
   const timeoutMs = payload.timeoutMs ?? defaultTimeoutMs
   if (!Number.isInteger(timeoutMs)
     || timeoutMs < MIN_SCRIPT_TIMEOUT_MS
@@ -105,6 +167,8 @@ export function validateRunRequest(payload, {
     variables: Object.fromEntries(variableEntries),
     authorizationOrigin: authorizationOrigin.origin,
     extraHTTPHeaders: { Authorization: authorization.trim() },
+    firstPartyOrigins,
+    ...(executionId ? { executionId } : {}),
     ...(requestPath ? { requestPath } : {}),
   }
 }
@@ -142,6 +206,21 @@ export function sanitizeErrorMessage(error, secrets = []) {
     if (typeof secret !== 'string' || !secret) continue
     message = message.split(secret).join('[REDACTED]')
   }
+  message = message.replace(
+    new RegExp(`(["']?${CAPTURE_STRING_KEY_PATTERN}["']?\\s*[:=]\\s*)["']?[^&\\s,}"']+`, 'gi'),
+    '$1[REDACTED]',
+  )
+  message = message.replace(/(?:https?|wss?):\/\/[^\s"'<>]+/gi, (candidate) => {
+    const trailingPunctuation = candidate.match(/[),.;!?]+$/)?.[0] ?? ''
+    const rawUrl = trailingPunctuation
+      ? candidate.slice(0, -trailingPunctuation.length)
+      : candidate
+    try {
+      return `${sanitizeCapturedUrl(rawUrl, [], { sanitizeText: false })}${trailingPunctuation}`
+    } catch {
+      return candidate
+    }
+  })
   return message
 }
 
@@ -156,12 +235,87 @@ function sanitizeCapturedValue(value, secrets, key = '') {
   ]))
 }
 
-function sanitizeCapturedUrl(rawUrl, secrets) {
+function sanitizeCapturedUrl(rawUrl, secrets, { sanitizeText = true } = {}) {
   const url = new URL(rawUrl)
+  if (url.username) url.username = '[REDACTED]'
+  if (url.password) url.password = '[REDACTED]'
   for (const key of url.searchParams.keys()) {
     if (SENSITIVE_CAPTURE_KEY.test(key)) url.searchParams.set(key, '[REDACTED]')
   }
-  return sanitizeErrorMessage(url.toString(), secrets)
+  if (url.hash && SENSITIVE_CAPTURE_KEY.test(url.hash)) {
+    url.hash = url.hash.replace(
+      new RegExp(`(${CAPTURE_STRING_KEY_PATTERN}=)[^&]+`, 'gi'),
+      '$1[REDACTED]',
+    )
+  }
+  return sanitizeText ? sanitizeErrorMessage(url.toString(), secrets) : url.toString()
+}
+
+function sanitizedOptionalString(value, secrets, { maxLength = MAX_CAPTURE_TEXT_LENGTH } = {}) {
+  if (typeof value !== 'string' || !value.trim()) return undefined
+  return sanitizeErrorMessage(value.trim(), secrets).slice(0, maxLength)
+}
+
+function sanitizeOptionalUrl(value, secrets, {
+  protocols = HTTP_CAPTURE_PROTOCOLS,
+} = {}) {
+  if (typeof value !== 'string' || !value.trim()) return undefined
+  try {
+    const url = new URL(value)
+    if (!protocols.has(url.protocol)) return undefined
+    return sanitizeCapturedUrl(url.toString(), secrets)
+  } catch {
+    return undefined
+  }
+}
+
+function isFirstPartyUrl(url, origins) {
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol === 'ws:') parsed.protocol = 'http:'
+    if (parsed.protocol === 'wss:') parsed.protocol = 'https:'
+    return origins.has(parsed.origin)
+  } catch {
+    return false
+  }
+}
+
+function createCaptureBuffer(limit, { isWarning = (record) => !record.isFirstParty } = {}) {
+  const records = []
+  const stats = {
+    observed: 0,
+    recorded: 0,
+    dropped: 0,
+    passed: 0,
+    failed: 0,
+    warnings: 0,
+  }
+
+  return {
+    records,
+    stats,
+    add(record) {
+      if (record.ignored) return null
+      stats.observed += 1
+      record.sequence = stats.observed
+      if (record.warning || (!record.ok && isWarning(record))) stats.warnings += 1
+      else if (record.ok) stats.passed += 1
+      else stats.failed += 1
+
+      if (records.length < limit) {
+        records.push(record)
+      } else if (!record.ok || record.warning) {
+        const replaceIndex = records.findIndex((captured) => captured.ok && !captured.warning)
+        if (replaceIndex >= 0) {
+          records.splice(replaceIndex, 1)
+          records.push(record)
+        }
+      }
+      stats.recorded = records.length
+      stats.dropped = stats.observed - stats.recorded
+      return record
+    },
+  }
 }
 
 function cancellationReason(signal) {
@@ -220,11 +374,225 @@ async function waitForSettlement(promise, timeoutMs) {
   return outcome.settled
 }
 
+function normalizeNetworkRecord(response, {
+  kind,
+  origins,
+  secrets,
+}) {
+  if (!response || typeof response !== 'object') return null
+  const url = sanitizeOptionalUrl(response.url, secrets, {
+    protocols: NETWORK_CAPTURE_PROTOCOLS,
+  })
+  if (!url) return null
+
+  const status = Number.isInteger(response.status) && response.status >= 0 && response.status <= 599
+    ? response.status
+    : 0
+  const ignored = response.ignored === true
+  const ok = ignored || (response.ok === true && status < 400)
+  const warning = response.warning === true
+  const incomplete = response.incomplete === true
+  const phase = sanitizedOptionalString(response.phase, secrets, { maxLength: 200 })
+    ?? '未标记阶段'
+  const pageUrl = sanitizeOptionalUrl(response.pageUrl, secrets)
+  const frameUrl = sanitizeOptionalUrl(response.frameUrl, secrets)
+  const mimeType = sanitizedOptionalString(response.mimeType, secrets, { maxLength: 200 })
+  const error = sanitizedOptionalString(response.error, secrets)
+  const bodyReadError = sanitizedOptionalString(response.bodyReadError, secrets)
+  const failureKind = sanitizedOptionalString(response.failureKind, secrets, { maxLength: 80 })
+  const diagnostics = Array.isArray(response.diagnostics)
+    ? response.diagnostics
+      .map((diagnostic) => sanitizedOptionalString(diagnostic, secrets))
+      .filter(Boolean)
+      .slice(0, 20)
+    : []
+  const parsedUrl = new URL(url)
+  const common = {
+    sequence: 0,
+    timestamp: typeof response.timestamp === 'string' && Number.isFinite(Date.parse(response.timestamp))
+      ? response.timestamp
+      : new Date().toISOString(),
+    name: sanitizedOptionalString(response.name, secrets, { maxLength: 500 })
+      ?? parsedUrl.pathname,
+    url,
+    status,
+    ok,
+    durationMs: Number.isFinite(response.durationMs)
+      ? Math.max(0, Math.round(response.durationMs))
+      : 0,
+    phase,
+    isFirstParty: isFirstPartyUrl(url, origins),
+    ...(pageUrl ? { pageUrl } : {}),
+    ...(frameUrl ? { frameUrl } : {}),
+    ...(mimeType ? { mimeType } : {}),
+    ...(error ? { error } : {}),
+    ...(bodyReadError ? { bodyReadError } : {}),
+    ...(failureKind ? { failureKind } : {}),
+    ...(diagnostics.length > 0 ? { diagnostics } : {}),
+    ...(typeof response.streaming === 'boolean' ? { streaming: response.streaming } : {}),
+    ...(ignored ? { ignored: true } : {}),
+    ...(warning ? { warning: true } : {}),
+    ...(incomplete ? { incomplete: true } : {}),
+  }
+
+  if (kind === 'api') {
+    const method = typeof response.method === 'string' ? response.method.trim().toUpperCase() : ''
+    if (!method) return null
+    return {
+      ...common,
+      method,
+      ...('requestBody' in response
+        ? { requestBody: sanitizeCapturedValue(response.requestBody, secrets) }
+        : {}),
+      ...('responseBody' in response
+        ? { responseBody: sanitizeCapturedValue(response.responseBody, secrets) }
+        : {}),
+    }
+  }
+
+  const resourceType = sanitizedOptionalString(response.resourceType, secrets, { maxLength: 80 })
+    ?? 'other'
+  return {
+    ...common,
+    method: typeof response.method === 'string' && response.method.trim()
+      ? response.method.trim().toUpperCase()
+      : 'GET',
+    resourceType,
+    ...(typeof response.fromCache === 'boolean' ? { fromCache: response.fromCache } : {}),
+    ...(typeof response.fromServiceWorker === 'boolean'
+      ? { fromServiceWorker: response.fromServiceWorker }
+      : {}),
+  }
+}
+
+function createNetworkHealthAccumulator(groupKey, {
+  shouldAssert = (record) => record.isFirstParty,
+  maxFailures = Number.POSITIVE_INFINITY,
+} = {}) {
+  const failures = []
+  const passedGroups = new Map()
+  let omittedFailures = 0
+  return {
+    failures,
+    passedGroups,
+    get omittedFailures() {
+      return omittedFailures
+    },
+    add(record) {
+      if (!shouldAssert(record)) return
+      if (record.ignored) return
+      if (record.warning) return
+      if (!record.ok) {
+        const failure = {
+          phase: record.phase,
+          method: record.method,
+          url: record.url,
+          status: record.status,
+          ...(record.resourceType ? { resourceType: record.resourceType } : {}),
+          ...(record.error ? { error: record.error } : {}),
+          ...(record.failureKind ? { failureKind: record.failureKind } : {}),
+          ...(record.diagnostics ? { diagnostics: record.diagnostics } : {}),
+        }
+        if (failures.length < maxFailures) failures.push(failure)
+        else omittedFailures += 1
+        return
+      }
+      const key = groupKey(record)
+      passedGroups.set(key, (passedGroups.get(key) ?? 0) + 1)
+    },
+  }
+}
+
+function networkFailureReason(record) {
+  return record.error
+    ?? record.bodyReadError
+    ?? (record.diagnostics?.length ? record.diagnostics.join(' | ') : undefined)
+    ?? record.failureKind
+    ?? 'unknown'
+}
+
+function appendNetworkHealthAssertions(assertions, apiHealth, resourceHealth) {
+  const append = ({ module, name, status, error }) => {
+    assertions.push({
+      sequence: assertions.length + 1,
+      timestamp: new Date().toISOString(),
+      name,
+      module,
+      matcher: 'networkHealth',
+      status,
+      durationMs: 0,
+      ...(error ? { error } : {}),
+    })
+  }
+
+  for (const record of apiHealth.failures) {
+    const reason = networkFailureReason(record)
+    const evidence = `phase=${record.phase}; method=${record.method}; url=${record.url}; status=${record.status}; error=${reason}`
+    append({
+      module: '接口健康',
+      name: `[${record.phase}] ${record.method} ${record.url} 请求失败（status=${record.status}，error=${reason}）`,
+      status: 'failed',
+      error: `接口请求失败：${evidence}`.slice(0, 1_200),
+    })
+  }
+  for (const [phase, count] of apiHealth.passedGroups) {
+    append({
+      module: '接口健康',
+      name: `[${phase}] ${count} 个一方接口请求成功`,
+      status: 'passed',
+    })
+  }
+  if (apiHealth.omittedFailures > 0) {
+    append({
+      module: '接口健康',
+      name: `另有 ${apiHealth.omittedFailures} 个失败接口因断言明细上限未逐条展开`,
+      status: 'failed',
+      error: `失败接口数量超过 ${MAX_API_RESPONSES} 条，完整数量请结合网络汇总中的 failed 与 dropped 查看`,
+    })
+  }
+
+  for (const record of resourceHealth.failures) {
+    const reason = networkFailureReason(record)
+    const evidence = `phase=${record.phase}; method=${record.method}; type=${record.resourceType}; url=${record.url}; status=${record.status}; error=${reason}`
+    append({
+      module: '资源加载健康',
+      name: `[${record.phase}] ${record.method} ${record.resourceType} ${record.url} 加载失败（status=${record.status}，error=${reason}）`,
+      status: 'failed',
+      error: `资源加载失败：${evidence}`.slice(0, 1_200),
+    })
+  }
+  for (const [group, count] of resourceHealth.passedGroups) {
+    const separatorIndex = group.indexOf('\u0000')
+    const phase = group.slice(0, separatorIndex)
+    const resourceType = group.slice(separatorIndex + 1)
+    append({
+      module: '资源加载健康',
+      name: `[${phase}] ${count} 个 ${resourceType} 资源加载成功`,
+      status: 'passed',
+    })
+  }
+  if (resourceHealth.omittedFailures > 0) {
+    append({
+      module: '资源加载健康',
+      name: `另有 ${resourceHealth.omittedFailures} 个失败资源因断言明细上限未逐条展开`,
+      status: 'failed',
+      error: `失败资源数量超过 ${MAX_RESOURCE_RESPONSES} 条，完整数量请结合网络汇总中的 failed 与 dropped 查看`,
+    })
+  }
+
+  return apiHealth.failures.length
+    + resourceHealth.failures.length
+    + Number(apiHealth.omittedFailures > 0)
+    + Number(resourceHealth.omittedFailures > 0)
+}
+
 export async function executeRegisteredScript(payload, {
   onLog,
   signal,
   loadScript = (scriptUrl) => import(scriptUrl.href),
   abortCleanupTimeoutMs = DEFAULT_ABORT_CLEANUP_TIMEOUT_MS,
+  artifactRootDirectory = DEFAULT_ARTIFACT_ROOT_DIRECTORY,
+  artifactWriterFactory = createArtifactWriter,
   scriptConfigRepository = defaultScriptConfigRepository,
   scriptsDirectory = DEFAULT_SCRIPTS_DIRECTORY,
 } = {}) {
@@ -239,10 +607,38 @@ export async function executeRegisteredScript(payload, {
     scriptsDirectory,
   })
   const context = validateRunRequest({ ...payload, timeoutMs: config.timeoutMs })
+  const attemptId = payload.runId ?? randomUUID()
+  const artifactWriter = artifactWriterFactory({
+    rootDirectory: artifactRootDirectory,
+    executionId: context.executionId ?? attemptId,
+    stepId: context.scriptId,
+    attemptId,
+  })
   const logs = []
   const assertions = []
-  const apiResponses = []
+  const apiCapture = createCaptureBuffer(MAX_API_RESPONSES)
+  const resourceCapture = createCaptureBuffer(MAX_RESOURCE_RESPONSES, { isWarning: () => false })
+  const firstPartyOrigins = firstPartyOriginsForContext(context)
+  const apiHealth = createNetworkHealthAccumulator(
+    (record) => record.phase,
+    { maxFailures: MAX_API_RESPONSES },
+  )
+  const resourceHealth = createNetworkHealthAccumulator(
+    (record) => `${record.phase}\u0000${record.resourceType}`,
+    {
+      shouldAssert: () => true,
+      maxFailures: MAX_RESOURCE_RESPONSES,
+    },
+  )
   const startedAt = performance.now()
+  const executionDeadline = startedAt + context.timeoutMs
+  const executionController = new AbortController()
+  let timedOut = false
+  let networkHealthSealed = false
+  let networkFailedAssertionCount = 0
+  let networkFailureLogCount = 0
+  let networkFailureLogLimitReported = false
+  const timeoutMessage = `脚本执行超过 ${context.timeoutMs} ms，已自动终止`
   const logger = (level, message, details) => {
     const log = {
       timestamp: new Date().toISOString(),
@@ -255,6 +651,56 @@ export async function executeRegisteredScript(payload, {
       onLog?.(structuredClone(log))
     } catch {
       // 实时日志订阅失败不能中断业务脚本。
+    }
+  }
+  const sealNetworkHealthAssertions = () => {
+    if (networkHealthSealed) return networkFailedAssertionCount
+    networkHealthSealed = true
+    networkFailedAssertionCount = appendNetworkHealthAssertions(
+      assertions,
+      apiHealth,
+      resourceHealth,
+    )
+    return networkFailedAssertionCount
+  }
+  const finalizeResult = async (terminalResult, sealTimeoutMs = abortCleanupTimeoutMs) => {
+    sealNetworkHealthAssertions()
+    const remainingExecutionMs = Math.max(0, Math.ceil(executionDeadline - performance.now()))
+    const boundedSealTimeoutMs = Math.min(
+      Math.max(0, sealTimeoutMs),
+      remainingExecutionMs,
+    )
+    const sealed = await artifactWriter.seal({ timeoutMs: boundedSealTimeoutMs })
+    if (sealed.timedOut) {
+      logger(
+        'warning',
+        `制品捕获清理超过 ${boundedSealTimeoutMs} ms，已放弃 ${sealed.abandonedCaptureCount} 个未完成制品`,
+      )
+    }
+    if (!timedOut && performance.now() >= executionDeadline) {
+      timedOut = true
+      executionController.abort(new Error(timeoutMessage))
+    }
+    const finalTerminalResult = timedOut
+      ? {
+          ok: false,
+          timedOut: true,
+          status: 'failed',
+          error: timeoutMessage,
+        }
+      : terminalResult
+    return {
+      ...finalTerminalResult,
+      durationMs: Math.round(performance.now() - startedAt),
+      logs,
+      assertions,
+      apiResponses: apiCapture.records,
+      resourceResponses: resourceCapture.records,
+      networkSummary: {
+        api: { ...apiCapture.stats },
+        resources: { ...resourceCapture.stats },
+      },
+      artifacts: sealed.artifacts,
     }
   }
 
@@ -273,48 +719,73 @@ export async function executeRegisteredScript(payload, {
         : {}),
     })
   }
-  const recordApiResponse = (response) => {
-    if (!response || typeof response !== 'object' || apiResponses.length >= MAX_API_RESPONSES) return
-    const method = typeof response.method === 'string' ? response.method.toUpperCase() : ''
-    if (!method || typeof response.url !== 'string') return
-    let url
+  const recordNetworkResponse = (response, kind) => {
     try {
-      url = sanitizeCapturedUrl(response.url, secrets)
+      const record = normalizeNetworkRecord(response, {
+        kind,
+        origins: firstPartyOrigins,
+        secrets,
+      })
+      if (!record) return
+      const capture = kind === 'api' ? apiCapture : resourceCapture
+      const health = kind === 'api' ? apiHealth : resourceHealth
+      capture.add(record)
+      health.add(record)
+      if (record.warning) {
+        const category = kind === 'api' ? '接口' : '资源'
+        const target = kind === 'api'
+          ? `${record.method} ${record.url}`
+          : `${record.method} ${record.resourceType} ${record.url}`
+        if (networkFailureLogCount < MAX_NETWORK_FAILURE_LOGS) {
+          networkFailureLogCount += 1
+          logger('warning', `${category}响应采集不完整：[${record.phase}] ${target}`, {
+            phase: record.phase,
+            method: record.method,
+            ...(kind === 'resource' ? { resourceType: record.resourceType } : {}),
+            url: record.url,
+            status: record.status,
+            error: networkFailureReason(record),
+          })
+        } else if (!networkFailureLogLimitReported) {
+          networkFailureLogLimitReported = true
+          logger('warning', `网络诊断日志超过 ${MAX_NETWORK_FAILURE_LOGS} 条，后续明细仅保留在网络记录和汇总中`)
+        }
+      } else if (!record.ok) {
+        const category = kind === 'api' ? '接口' : '资源'
+        const target = kind === 'api'
+          ? `${record.method} ${record.url}`
+          : `${record.method} ${record.resourceType} ${record.url}`
+        const warningOnly = kind === 'api' && !record.isFirstParty
+        if (networkFailureLogCount < MAX_NETWORK_FAILURE_LOGS) {
+          networkFailureLogCount += 1
+          logger(warningOnly ? 'warning' : 'error', warningOnly
+            ? `第三方接口请求失败：[${record.phase}] ${target}`
+            : `${category}健康检查失败：[${record.phase}] ${target}`, {
+            phase: record.phase,
+            method: record.method,
+            ...(kind === 'resource' ? { resourceType: record.resourceType } : {}),
+            url: record.url,
+            status: record.status,
+            error: networkFailureReason(record),
+          })
+        } else if (!networkFailureLogLimitReported) {
+          networkFailureLogLimitReported = true
+          logger('warning', `网络失败日志超过 ${MAX_NETWORK_FAILURE_LOGS} 条，后续明细仅保留在网络记录和汇总中`)
+        }
+      }
     } catch {
-      return
+      // 网络证据格式异常不能打断业务脚本。
     }
-    apiResponses.push({
-      sequence: apiResponses.length + 1,
-      timestamp: typeof response.timestamp === 'string' ? response.timestamp : new Date().toISOString(),
-      name: typeof response.name === 'string' && response.name.trim()
-        ? response.name.trim()
-        : new URL(url).pathname,
-      method,
-      url,
-      status: Number.isInteger(response.status) ? response.status : 0,
-      ok: response.ok === true,
-      durationMs: Number.isFinite(response.durationMs) ? Math.max(0, Math.round(response.durationMs)) : 0,
-      ...('requestBody' in response
-        ? { requestBody: sanitizeCapturedValue(response.requestBody, secrets) }
-        : {}),
-      ...('responseBody' in response
-        ? { responseBody: sanitizeCapturedValue(response.responseBody, secrets) }
-        : {}),
-      ...(typeof response.error === 'string'
-        ? { error: sanitizeErrorMessage(response.error, secrets) }
-        : {}),
-    })
   }
-  const executionController = new AbortController()
-  let timedOut = false
-  const timeoutMessage = `脚本执行超过 ${context.timeoutMs} ms，已自动终止`
+  const recordApiResponse = (response) => recordNetworkResponse(response, 'api')
+  const recordResourceResponse = (response) => recordNetworkResponse(response, 'resource')
   const relayExternalAbort = () => executionController.abort(signal?.reason)
   if (signal?.aborted) relayExternalAbort()
   else signal?.addEventListener('abort', relayExternalAbort, { once: true })
   const timeoutId = setTimeout(() => {
     timedOut = true
     executionController.abort(new Error(timeoutMessage))
-  }, context.timeoutMs)
+  }, Math.max(0, executionDeadline - performance.now()))
   const abortGate = createAbortGate(
     executionController.signal,
     logger,
@@ -331,41 +802,41 @@ export async function executeRegisteredScript(payload, {
       recordAssertion,
       () => scriptModule.run({
         ...context,
+        scriptName: config.name,
+        artifactWriter,
         logger,
         signal: executionController.signal,
         recordApiResponse,
+        recordResourceResponse,
       }),
     ))
     const result = await waitWithAbort(scriptRunPromise, abortGate)
     if (executionController.signal.aborted) throw abortGate?.error()
-    const failedAssertions = assertions.filter((assertion) => assertion.status === 'failed')
-    if (failedAssertions.length > 0) {
-      const message = `脚本已执行完成，共有 ${failedAssertions.length} 条断言失败`
+    const scriptFailedAssertions = assertions.filter((assertion) => assertion.status === 'failed').length
+    const networkFailedAssertions = sealNetworkHealthAssertions()
+    const failedAssertions = scriptFailedAssertions + networkFailedAssertions
+    if (failedAssertions > 0) {
+      const message = `脚本已执行完成，共有 ${failedAssertions} 条断言失败`
       logger('warning', message, {
-        failedAssertions: failedAssertions.length,
+        failedAssertions,
+        networkFailedAssertions,
         totalAssertions: assertions.length,
       })
-      return {
+      return await finalizeResult({
         ok: false,
         status: 'failed',
-        durationMs: Math.round(performance.now() - startedAt),
-        logs,
-        assertions,
-        apiResponses,
+        continuePipeline: true,
         result,
         error: message,
-      }
+      })
     }
-    return {
+    return await finalizeResult({
       ok: true,
-      durationMs: Math.round(performance.now() - startedAt),
-      logs,
-      assertions,
-      apiResponses,
       result,
-    }
+    })
   } catch (error) {
     if (abortGate?.wasTriggered(error)) {
+      const cleanupDeadline = performance.now() + abortCleanupTimeoutMs
       if (scriptRunPromise) {
         const cleanupSettled = await waitForSettlement(scriptRunPromise, abortCleanupTimeoutMs)
         if (!cleanupSettled) {
@@ -375,39 +846,28 @@ export async function executeRegisteredScript(payload, {
           )
         }
       }
+      const artifactSealTimeoutMs = Math.max(0, Math.ceil(cleanupDeadline - performance.now()))
       if (timedOut) {
-        return {
+        return await finalizeResult({
           ok: false,
           timedOut: true,
           status: 'failed',
-          durationMs: Math.round(performance.now() - startedAt),
-          logs,
-          assertions,
-          apiResponses,
           error: timeoutMessage,
-        }
+        }, artifactSealTimeoutMs)
       }
-      return {
+      return await finalizeResult({
         ok: false,
         cancelled: true,
         status: 'interrupted',
-        durationMs: Math.round(performance.now() - startedAt),
-        logs,
-        assertions,
-        apiResponses,
         error: sanitizeErrorMessage(cancellationReason(signal), secrets),
-      }
+      }, artifactSealTimeoutMs)
     }
     const message = sanitizeErrorMessage(error, secrets)
     logger('error', `执行失败：${message}`)
-    return {
+    return await finalizeResult({
       ok: false,
-      durationMs: Math.round(performance.now() - startedAt),
-      logs,
-      assertions,
-      apiResponses,
       error: message,
-    }
+    })
   } finally {
     clearTimeout(timeoutId)
     signal?.removeEventListener('abort', relayExternalAbort)

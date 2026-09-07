@@ -1,11 +1,7 @@
-import { mkdir, writeFile } from 'node:fs/promises'
-import { dirname, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
-
-import { expect as hardExpect } from '@playwright/test'
+import { expect as flowExpect } from '@playwright/test'
 
 import { expect } from './support/recorded-expect.mjs'
-import { attachApiResponseRecorder } from './support/api-response-recorder.mjs'
+import { attachNetworkObserver } from './support/api-response-recorder.mjs'
 import { launchGoogleChrome } from './support/google-chrome.mjs'
 import {
   FIELD_TYPE_CODES,
@@ -29,8 +25,8 @@ import {
   FORM_SUBTITLE,
 } from './form-all-fields-publish.ui.spec.mjs'
 
-const FORM_CODE = 'lpXAVN'
-const FORM_PATH = `/form/?id=${FORM_CODE}`
+const FORM_ID = 'lpXAVN'
+const FORM_PATH = `/form/?id=${FORM_ID}`
 const EXPECTED_FORM_TITLE = '自动化测试全题型表单-1787048650389'
 const NAVIGATION_TIMEOUT_MS = 45_000
 const ACTION_TIMEOUT_MS = 30_000
@@ -48,9 +44,7 @@ const CLIENT_VALIDATION_SETTLE_TIMEOUT_MS = 4_000
 const RETRYABLE_PAGE_VALIDATION_STATUSES = new Set([405, 408, 425, 429, 500, 502, 503, 504])
 const SUBMISSION_RESULT_SELECTOR = 'form-submission-result'
 const SUBMISSION_RESULT_URL_PATTERN = /\/form\/submission-result\/?(?:[?#]|$)/
-const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
-const OUTPUT_DIR = resolve(SCRIPT_DIR, '..', 'outputs', 'form-lpxavn-submit')
-const FIXTURE_DIR = resolve(OUTPUT_DIR, 'fixtures')
+const SCRIPT_ID = 'form-lpxavn-submit'
 
 const FIELD_KEYS = Object.freeze({
   username: 'username_eluhbv',
@@ -167,6 +161,43 @@ function expectHexColor(value, label) {
   expect(String(value ?? ''), `${label}应为十六进制颜色`).toMatch(/^#[0-9a-f]{6}$/i)
 }
 
+function isRecord(value) {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value))
+}
+
+function normalizedObjectArray(value, label) {
+  const isArray = Array.isArray(value)
+  if (!isArray) expect(isArray, `${label}应为数组`).toBe(true)
+  const source = isArray ? value : []
+  const invalidIndexes = source
+    .flatMap((entry, index) => (isRecord(entry) ? [] : [index + 1]))
+  if (invalidIndexes.length > 0) {
+    expect(
+      invalidIndexes,
+      `${label}的每一项都应为对象；异常位置：${invalidIndexes.join('、')}`,
+    ).toEqual([])
+  }
+  return source.map((entry) => (isRecord(entry) ? entry : {}))
+}
+
+function optionValueMap(choices, label, keyName = 'name', valueName = 'value') {
+  const invalidIndexes = choices.flatMap((choice, index) => (
+    String(choice?.[keyName] ?? '').trim() && String(choice?.[valueName] ?? '').trim()
+      ? []
+      : [index + 1]
+  ))
+  if (invalidIndexes.length > 0) {
+    expect(
+      invalidIndexes,
+      `${label}的每个选项都应包含名称和选项值；异常位置：${invalidIndexes.join('、')}`,
+    ).toEqual([])
+  }
+  return Object.fromEntries(choices.flatMap((choice) => {
+    const key = String(choice?.[keyName] ?? '').trim()
+    return key ? [[key, choice?.[valueName] ?? '']] : []
+  }))
+}
+
 function assertUploadContract(item, { label, mediaType, extensions }) {
   expect(Number(item?.common_config?.max_size), `${label}最大文件大小应为 20 MB`).toBe(20)
   expect(Number(item?.common_config?.max_file_quantity), `${label}最多应上传 1 个文件`).toBe(1)
@@ -178,14 +209,27 @@ function assertUploadContract(item, { label, mediaType, extensions }) {
   }
 }
 
-function assertPublishedFormContract(payload, expectedFormCode = FORM_CODE, linkedContract = null) {
-  if (!payload || typeof payload !== 'object') throw new Error('公开表单配置接口未返回有效 JSON')
-  if (Number(payload.code) !== 0) throw new Error(`公开表单配置接口业务码异常：${payload.code}`)
-  const form = payload?.data?.form
-  const items = payload?.data?.items
-  if (!form || typeof form !== 'object') throw new Error('公开表单配置接口响应缺少 form')
-  if (!Array.isArray(items)) throw new Error('公开表单配置接口响应缺少 items 数组')
-  const fieldKeys = resolveFormFieldKeys(items, linkedContract?.fieldKeys)
+function assertPublishedFormContract(payload, expectedFormId = FORM_ID, linkedContract = null) {
+  const validPayload = isRecord(payload)
+  expect(validPayload, '公开表单配置接口应返回有效 JSON 对象').toBe(true)
+  const safePayload = validPayload ? payload : {}
+  expect(
+    Number(safePayload.code),
+    `公开表单配置接口业务码应为 0，实际 ${String(safePayload.code)}`,
+  ).toBe(0)
+  const formValid = isRecord(safePayload?.data?.form)
+  const itemsValid = Array.isArray(safePayload?.data?.items)
+  expect(formValid, '公开表单配置接口响应应包含 form 对象').toBe(true)
+  expect(itemsValid, '公开表单配置接口响应应包含 items 数组').toBe(true)
+  const form = formValid ? safePayload.data.form : {}
+  const items = itemsValid ? safePayload.data.items : []
+  const publishedFormId = String(form?.form_id ?? '').trim() || String(form?.id ?? '').trim()
+  const linkedFieldKeys = linkedContract?.fieldKeys
+  const hasLinkedFieldKeys = isRecord(linkedFieldKeys)
+  if (linkedContract) {
+    expect(hasLinkedFieldKeys, '前序发布脚本字段映射应为对象').toBe(true)
+  }
+  const fieldKeys = resolveFormFieldKeys(items, hasLinkedFieldKeys ? linkedFieldKeys : {})
   const pageFieldKeys = pageFieldKeysFor(fieldKeys)
   const requiredFieldNames = [
     'username', 'mobile', 'email', 'idCard', 'landlinePhone', 'address', 'birthday',
@@ -196,15 +240,15 @@ function assertPublishedFormContract(payload, expectedFormCode = FORM_CODE, link
   const structuralFieldNames = ['fieldGroup', 'description', 'divider']
   const itemFor = (name, label = name) => findPublishedItem(items, fieldKeys[name], label)
 
-  expect(Number(payload?.data?.revision_no), '公开表单 revision_no 应至少为 1').toBeGreaterThanOrEqual(1)
-  expect(form?.form_code, '公开配置应属于目标表单').toBe(expectedFormCode)
+  expect(Number(safePayload?.data?.revision_no), '公开表单 revision_no 应至少为 1').toBeGreaterThanOrEqual(1)
+  expect(publishedFormId, '公开配置应属于目标表单 ID').toBe(expectedFormId)
   expect(form?.status, '目标表单应保持已发布状态').toBe('published')
   expect(String(form?.title ?? ''), '公开配置标题应为全题型发布脚本生成的标题')
     .toMatch(/^自动化测试全题型表单-\d+$/)
   if (linkedContract) {
-    expect(form?.form_code, '公开表单短码应与前序发布脚本输出一致').toBe(linkedContract.formCode)
+    expect(publishedFormId, '公开表单 ID 应与前序发布脚本输出一致').toBe(linkedContract.formId)
     expect(form?.title, '公开表单标题应与前序发布脚本输出一致').toBe(linkedContract.title)
-    expect(Number(payload?.data?.revision_no), '公开表单版本应与前序发布脚本输出一致')
+    expect(Number(safePayload?.data?.revision_no), '公开表单版本应与前序发布脚本输出一致')
       .toBe(Number(linkedContract.revisionNo))
   }
   expect(form?.subtitle, '公开配置描述应与发布脚本一致').toBe(FORM_SUBTITLE)
@@ -239,8 +283,12 @@ function assertPublishedFormContract(payload, expectedFormCode = FORM_CODE, link
 
   const username = itemFor('username', '姓名')
   expectEnabled(username?.common_config?.name_title?.enabled, '姓名称谓采集')
+  const nameTitleChoices = normalizedObjectArray(
+    username?.common_config?.name_title?.choices,
+    '姓名称谓选项',
+  )
   expect(
-    username?.common_config?.name_title?.choices?.map((choice) => (
+    nameTitleChoices.map((choice) => (
       String(choice?.title ?? '').replace('醫生', '医生')
     )),
     '姓名应提供四个称谓边界选项',
@@ -252,9 +300,13 @@ function assertPublishedFormContract(payload, expectedFormCode = FORM_CODE, link
 
   const idCard = itemFor('idCard', '身份证件')
   expectEnabled(idCard?.common_config?.collect_mode?.custom_enabled, '自定义证件类型')
-  expect(idCard?.common_config?.collect_mode?.choices?.length, '身份证件应包含完整证件类型集合').toBeGreaterThanOrEqual(10)
+  const idCardChoices = normalizedObjectArray(
+    idCard?.common_config?.collect_mode?.choices,
+    '身份证件类型选项',
+  )
+  expect(idCardChoices.length, '身份证件应包含完整证件类型集合').toBeGreaterThanOrEqual(10)
   expect(idCard?.common_config?.collect_mode?.selected, '身份证件已选证件类型应与可用选项一致')
-    .toEqual(idCard?.common_config?.collect_mode?.choices?.map((choice) => choice.code))
+    .toEqual(idCardChoices.map((choice) => choice?.code ?? ''))
 
   const input = itemFor('input', '单行文本')
   expectEnabled(input?.rule_config?.length?.enabled, '单行文本字数限制')
@@ -263,7 +315,7 @@ function assertPublishedFormContract(payload, expectedFormCode = FORM_CODE, link
   const radio = itemFor('radio', '单项选择')
   expectEnabled(radio?.common_config?.allow_image, '单项选择图片模式')
   expectEnabled(radio?.common_config?.allow_customized_text?.enabled, '单项选择用户自定义输入')
-  const radioChoices = Array.isArray(radio?.option?.choices) ? radio.option.choices : []
+  const radioChoices = normalizedObjectArray(radio?.option?.choices, '单项选择选项')
   expect(radioChoices, '单项选择应包含两个图片选项和一个“其他”选项').toHaveLength(3)
   for (const [index, choice] of radioChoices.slice(0, 2).entries()) {
     expect(String(choice?.image_id ?? ''), `单项选择第 ${index + 1} 项应包含图片 ID`).toMatch(/\S+/)
@@ -275,11 +327,13 @@ function assertPublishedFormContract(payload, expectedFormCode = FORM_CODE, link
   expectEnabled(checkbox?.rule_config?.length?.enabled, '多项选择数量限制')
   expect(Number(checkbox?.rule_config?.length?.min), '多项选择最少应选 2 项').toBe(2)
   expect(Number(checkbox?.rule_config?.length?.max), '多项选择最多应选 3 项').toBe(3)
-  expect(checkbox?.option?.choices?.map((choice) => choice?.name), '多项选择应保留三个选项')
+  const checkboxChoices = normalizedObjectArray(checkbox?.option?.choices, '多项选择选项')
+  expect(checkboxChoices.map((choice) => choice?.name), '多项选择应保留三个选项')
     .toEqual(['选项1', '选项2', '选项3'])
 
   const select = itemFor('select', '下拉选择')
-  expect(select?.option?.choices?.map((choice) => choice?.name), '下拉选择应保留两个选项')
+  const selectChoices = normalizedObjectArray(select?.option?.choices, '下拉选择选项')
+  expect(selectChoices.map((choice) => choice?.name), '下拉选择应保留两个选项')
     .toEqual(['选项1', '选项2'])
 
   const number = itemFor('number', '数字')
@@ -312,11 +366,10 @@ function assertPublishedFormContract(payload, expectedFormCode = FORM_CODE, link
   const cascader = itemFor('cascader', '级联选择')
   expect(cascader?.common_config?.type_mode, '级联选择应为多选模式').toBe('multiple')
   expect(Number(cascader?.common_config?.levels), '级联选择应为三级').toBe(3)
-  const cascaderChoices = [
-    cascader?.option?.choices?.[0],
-    cascader?.option?.choices?.[0]?.sub_choices?.[0],
-    cascader?.option?.choices?.[0]?.sub_choices?.[0]?.sub_choices?.[0],
-  ]
+  const cascaderLevelOne = normalizedObjectArray(cascader?.option?.choices, '级联选择第一级选项')
+  const cascaderLevelTwo = normalizedObjectArray(cascaderLevelOne[0]?.sub_choices, '级联选择第二级选项')
+  const cascaderLevelThree = normalizedObjectArray(cascaderLevelTwo[0]?.sub_choices, '级联选择第三级选项')
+  const cascaderChoices = [cascaderLevelOne[0] || {}, cascaderLevelTwo[0] || {}, cascaderLevelThree[0] || {}]
   expect(cascaderChoices.map((choice) => choice?.name), '级联选择应与发布脚本的固定三级路径一致')
     .toEqual(CASCADER_LEVEL_VALUES)
 
@@ -343,14 +396,19 @@ function assertPublishedFormContract(payload, expectedFormCode = FORM_CODE, link
   expect(itemFor('divider', '分割线')?.label, '分割线文案应与发布脚本一致').toBe(DIVIDER_TEXT)
 
   const matrix = itemFor('matrix', '矩阵题')
-  expect(matrix?.option?.statements?.map((row) => row?.label), '矩阵题应有三行').toEqual(['题目1', '题目2', '题目3'])
-  expect(matrix?.option?.dimensions?.map((column) => column?.name), '矩阵题应有三列').toEqual(['项目1', '项目2', '项目3'])
+  const matrixStatements = normalizedObjectArray(matrix?.option?.statements, '矩阵题行配置')
+  const matrixDimensions = normalizedObjectArray(matrix?.option?.dimensions, '矩阵题列配置')
+  expect(matrixStatements.map((row) => row?.label), '矩阵题应有三行').toEqual(['题目1', '题目2', '题目3'])
+  expect(matrixDimensions.map((column) => column?.name), '矩阵题应有三列').toEqual(['项目1', '项目2', '项目3'])
   const matrixChoice = itemFor('matrixChoice', '矩阵选择')
   expect(matrixChoice?.option?.choice_style, '矩阵选择应为每行单选').toBe('single')
-  expect(matrixChoice?.option?.statements, '矩阵选择应有三行').toHaveLength(3)
-  expect(matrixChoice?.option?.choices, '矩阵选择应有三列').toHaveLength(3)
+  const matrixChoiceStatements = normalizedObjectArray(matrixChoice?.option?.statements, '矩阵选择行配置')
+  const matrixChoiceChoices = normalizedObjectArray(matrixChoice?.option?.choices, '矩阵选择列选项')
+  expect(matrixChoiceStatements, '矩阵选择应有三行').toHaveLength(3)
+  expect(matrixChoiceChoices, '矩阵选择应有三列').toHaveLength(3)
   const ranking = itemFor('ranking', '排序题')
-  expect(ranking?.option?.choices?.map((choice) => choice?.name), '排序题应包含三个选项').toEqual(['选项1', '选项2', '选项3'])
+  const rankingChoices = normalizedObjectArray(ranking?.option?.choices, '排序题选项')
+  expect(rankingChoices.map((choice) => choice?.name), '排序题应包含三个选项').toEqual(['选项1', '选项2', '选项3'])
   expect(Number(itemFor('rating', '评分题')?.common_config?.rating_max), '评分题上边界应为 5').toBe(5)
   expect(Number(itemFor('nps', 'NPS')?.common_config?.rating_max), 'NPS 上边界应为 10').toBe(10)
 
@@ -364,22 +422,23 @@ function assertPublishedFormContract(payload, expectedFormCode = FORM_CODE, link
   expectHexColor(form?.theme_config?.wallpaper?.background_color?.color, '系统推荐页面底色')
 
   return {
-    revisionNo: Number(payload.data.revision_no),
+    revisionNo: Number(safePayload?.data?.revision_no) || 0,
     pageKeys: pageItems.map((item) => item.item_key),
     requiredRootKeys,
     fieldKeys,
     pageFieldKeys,
     title: String(form.title ?? ''),
+    formId: publishedFormId,
     formCode: String(form.form_code ?? ''),
     dateRange,
     optionValues: {
-      nameTitle: Object.fromEntries((username?.common_config?.name_title?.choices || []).map((choice) => [choice.title, choice.code])),
-      radio: Object.fromEntries(radioChoices.map((choice) => [choice.name, choice.value])),
-      checkbox: Object.fromEntries((checkbox?.option?.choices || []).map((choice) => [choice.name, choice.value])),
-      select: Object.fromEntries((select?.option?.choices || []).map((choice) => [choice.name, choice.value])),
-      cascader: cascaderChoices.map((choice) => choice.value),
-      matrixChoice: (matrixChoice?.option?.choices || []).map((choice) => choice.value),
-      ranking: Object.fromEntries((ranking?.option?.choices || []).map((choice) => [choice.name, choice.value])),
+      nameTitle: optionValueMap(nameTitleChoices, '姓名称谓选项', 'title', 'code'),
+      radio: optionValueMap(radioChoices, '单项选择选项'),
+      checkbox: optionValueMap(checkboxChoices, '多项选择选项'),
+      select: optionValueMap(selectChoices, '下拉选择选项'),
+      cascader: cascaderChoices.map((choice) => choice?.value ?? ''),
+      matrixChoice: matrixChoiceChoices.map((choice) => choice?.value ?? ''),
+      ranking: optionValueMap(rankingChoices, '排序题选项'),
     },
   }
 }
@@ -697,7 +756,7 @@ async function assertCurrentPage(page, pageNumber, expectedKeys, expectedLabels,
     await expect(fieldCard(page, key), `第 ${pageNumber} 页应包含“${label}”`).toHaveCount(1)
     await expect(fieldCard(page, key), `第 ${pageNumber} 页的“${label}”应可见`).toBeVisible()
   }
-  logger('success', `第 ${pageNumber} 页结构断言通过`, {
+  logger('info', `第 ${pageNumber} 页结构断言执行完成`, {
     questionCount: expectedLabels.length,
     labels: expectedLabels,
   })
@@ -745,39 +804,38 @@ async function selectOption(page, trigger, optionName, label, logger = () => und
     try {
       await trigger.scrollIntoViewIfNeeded({ timeout: SELECT_VISIBILITY_TIMEOUT_MS })
       await trigger.click({ timeout: SELECT_VISIBILITY_TIMEOUT_MS })
-      await hardExpect(trigger, `“${label}”下拉框点击后应展开`).toHaveAttribute('aria-expanded', 'true', {
+      await flowExpect(trigger, `“${label}”下拉框点击后应展开`).toHaveAttribute('aria-expanded', 'true', {
         timeout: SELECT_VISIBILITY_TIMEOUT_MS,
       })
 
       const listboxId = await trigger.getAttribute('aria-controls')
-      hardExpect(listboxId, `“${label}”下拉框应关联当前选项列表`).toBeTruthy()
+      flowExpect(listboxId, `“${label}”下拉框应关联当前选项列表`).toBeTruthy()
       listbox = page.locator(`[role="listbox"][id=${JSON.stringify(listboxId)}]:visible`)
-      await hardExpect(listbox, `“${label}”当前选项列表应打开`).toBeVisible({
+      await flowExpect(listbox, `“${label}”当前选项列表应打开`).toBeVisible({
         timeout: SELECT_VISIBILITY_TIMEOUT_MS,
       })
       const option = listbox.getByRole('option', { name: optionPattern })
-      await hardExpect(option, `“${label}”应唯一提供“${expectedOptionLabel}”中的一个选项`).toHaveCount(1, {
+      await flowExpect(option, `“${label}”应唯一提供“${expectedOptionLabel}”中的一个选项`).toHaveCount(1, {
         timeout: SELECT_VISIBILITY_TIMEOUT_MS,
       })
       const selectedOptionName = (await option.innerText()).trim()
       await option.scrollIntoViewIfNeeded({ timeout: SELECT_VISIBILITY_TIMEOUT_MS })
-      await hardExpect(option, `“${label}”选项“${selectedOptionName}”应可见`).toBeVisible({
+      await flowExpect(option, `“${label}”选项“${selectedOptionName}”应可见`).toBeVisible({
         timeout: SELECT_VISIBILITY_TIMEOUT_MS,
       })
       await option.click({ timeout: SELECT_VISIBILITY_TIMEOUT_MS })
-      await hardExpect(listbox, `选择“${selectedOptionName}”后选项列表应关闭`).toBeHidden({
+      await flowExpect(listbox, `选择“${selectedOptionName}”后选项列表应关闭`).toBeHidden({
         timeout: SELECT_COMMIT_TIMEOUT_MS,
       })
-      await hardExpect(trigger, `“${label}”应精确回显“${selectedOptionName}”`).toHaveText(selectedOptionName, {
+      await expect(trigger, `“${label}”成功选择“${selectedOptionName}”`).toHaveText(selectedOptionName, {
         timeout: SELECT_COMMIT_TIMEOUT_MS,
       })
-      await expect(trigger, `“${label}”成功选择“${selectedOptionName}”`).toHaveText(selectedOptionName)
       return selectedOptionName
     } catch (error) {
       lastError = error
       await page.keyboard.press('Escape').catch(() => undefined)
-      if (listbox) await hardExpect(listbox).toBeHidden({ timeout: 500 }).catch(() => undefined)
-      await hardExpect(trigger).toHaveAttribute('aria-expanded', 'false', { timeout: 500 }).catch(() => undefined)
+      if (listbox) await flowExpect(listbox).toBeHidden({ timeout: 500 }).catch(() => undefined)
+      await flowExpect(trigger).toHaveAttribute('aria-expanded', 'false', { timeout: 500 }).catch(() => undefined)
       const actualText = await trigger.innerText({ timeout: 500 }).catch(() => '')
       if (attempt < SELECT_MAX_ATTEMPTS) {
         logger('warning', `“${label}”第 ${attempt} 次选择未生效，准备重新选择“${expectedOptionLabel}”`, {
@@ -907,32 +965,51 @@ async function waitForPublicMutation(
   const responseOutcome = await responsePromise
   if (responseOutcome.error) throw responseOutcome.error
   const { response } = responseOutcome
-  const responseText = await response.text().catch(() => '')
+  const responseRead = await response.text().then(
+    (text) => ({ text }),
+    (error) => ({
+      text: '',
+      error: error instanceof Error ? error.message : String(error),
+    }),
+  )
+  const responseText = responseRead.text
   let body = null
+  let bodyValid = false
   try {
     body = responseText ? JSON.parse(responseText) : null
+    bodyValid = isRecord(body)
   } catch {
     body = null
   }
-  if (!response.ok()) {
-    const responseSummary = responseText.replace(/\s+/g, ' ').trim().slice(0, 500)
-    const error = new Error([
-      `${label}请求失败：${response.request().method()} ${response.url()} 返回 HTTP ${response.status()}`,
-      responseSummary ? `响应：${responseSummary}` : '',
-    ].filter(Boolean).join('；'))
-    error.name = 'PublicMutationError'
-    error.status = response.status()
-    error.method = response.request().method()
-    error.url = response.url()
-    error.responseSummary = responseSummary
-    throw error
-  }
+  const httpSucceeded = response.ok()
+  expect(
+    httpSucceeded,
+    `${label}接口应返回成功 HTTP 状态，实际 ${response.status()}`,
+  ).toBe(true)
+  let businessSucceeded = true
   if (expectBusinessSuccess) {
-    if (!body || typeof body !== 'object') throw new Error(`${label}接口未返回有效 JSON`)
-    if (!Object.prototype.hasOwnProperty.call(body, 'code')) throw new Error(`${label}接口响应缺少业务码`)
-    if (Number(body.code) !== 0) throw new Error(`${label}接口业务码异常：${body.code}`)
+    if (!responseRead.error) {
+      expect(bodyValid, `${label}接口应返回有效 JSON 对象`).toBe(true)
+    }
+    const hasBusinessCode = bodyValid && Object.prototype.hasOwnProperty.call(body, 'code')
+    if (bodyValid) {
+      expect(hasBusinessCode, `${label}接口响应应包含业务码`).toBe(true)
+    }
+    businessSucceeded = hasBusinessCode && Number(body.code) === 0
+    if (hasBusinessCode) {
+      expect(
+        businessSucceeded,
+        `${label}接口业务码应为 0，实际 ${String(body.code)}`,
+      ).toBe(true)
+    }
   }
-  return { response, body }
+  return {
+    response,
+    body: bodyValid ? body : {},
+    httpSucceeded,
+    businessSucceeded,
+    ...(responseRead.error ? { bodyReadError: responseRead.error } : {}),
+  }
 }
 
 function paginationActionButton(page) {
@@ -970,7 +1047,7 @@ async function assertClientValidationBlocked(page, {
   }
   await page.waitForTimeout(100)
   expect(getMutationCount(), `客户端拦截时不应发送${mutationLabel}请求`).toBe(requestCountBefore)
-  logger('success', `第 ${currentPage} 页客户端校验已正确拦截`, {
+  logger('info', `第 ${currentPage} 页客户端校验断言执行完成`, {
     fields: expectedFields.map((field) => field.label),
     requestCountBefore,
     requestCountAfter: getMutationCount(),
@@ -989,23 +1066,22 @@ function findNestedProperty(value, propertyName, visited = new WeakSet()) {
 }
 
 function assertRuleValidationRejected(body, key, label) {
-  if (!body || typeof body !== 'object') throw new Error(`“${label}”规则校验接口未返回有效 JSON`)
+  const validBody = Boolean(body && typeof body === 'object' && !Array.isArray(body))
+  expect(validBody, `“${label}”规则校验接口应返回有效 JSON 对象`).toBe(true)
+  const responseBody = validBody ? body : {}
 
-  const hasBusinessCode = Object.prototype.hasOwnProperty.call(body, 'code')
-    && Number.isFinite(Number(body.code))
+  const hasBusinessCode = Object.prototype.hasOwnProperty.call(responseBody, 'code')
+    && Number.isFinite(Number(responseBody.code))
   const businessCodeMessage = `“${label}”规则校验响应应包含有效业务码`
   expect(hasBusinessCode, businessCodeMessage).toBe(true)
-  hardExpect(hasBusinessCode, businessCodeMessage).toBe(true)
 
-  const businessCode = Number(body.code)
+  const businessCode = Number(responseBody.code)
   const rejectedMessage = `“${label}”越界值不应通过业务校验；validate-page 实际返回 businessCode: ${businessCode}`
-  expect(businessCode, rejectedMessage).not.toBe(0)
-  hardExpect(businessCode, rejectedMessage).not.toBe(0)
+  if (hasBusinessCode) expect(businessCode, rejectedMessage).not.toBe(0)
 
-  const firstErrorItemKey = findNestedProperty(body, 'first_error_item_key')
+  const firstErrorItemKey = findNestedProperty(responseBody, 'first_error_item_key')
   const firstErrorMessage = `“${label}”应成为首个服务端错误字段`
   expect(firstErrorItemKey, firstErrorMessage).toBe(key)
-  hardExpect(firstErrorItemKey, firstErrorMessage).toBe(key)
   return businessCode
 }
 
@@ -1013,8 +1089,8 @@ async function assertRuleValidationBlocked(page, publicOrigin, {
   currentPage,
   key,
   label,
-  formCode = FORM_CODE,
-  pathSuffix = `/f/form/${formCode}/submission/validate-page`,
+  formId = FORM_ID,
+  pathSuffix = `/f/form/${formId}/submission/validate-page`,
   logger,
   pageFieldKeys = PAGE_FIELD_KEYS,
 }) {
@@ -1038,9 +1114,11 @@ async function assertRuleValidationBlocked(page, publicOrigin, {
     if (!response) {
       const message = `“${label}”越界值应被客户端或服务端规则拦截`
       expect(response, message).toBeTruthy()
-      hardExpect(response, message).toBeTruthy()
     } else {
-      if (!response.ok()) throw new Error(`“${label}”规则校验接口返回 HTTP ${response.status()}`)
+      expect(
+        response.ok(),
+        `“${label}”规则校验接口应返回成功 HTTP 状态，实际 ${response.status()}`,
+      ).toBe(true)
       const body = await response.json().catch(() => null)
       const businessCode = assertRuleValidationRejected(body, key, label)
       logger('success', `“${label}”越界值已被服务端规则拦截`, { businessCode })
@@ -1050,13 +1128,11 @@ async function assertRuleValidationBlocked(page, publicOrigin, {
   const currentPageCard = fieldCard(page, pageFieldKeys[currentPage - 1][0])
   const currentPageMessage = `“${label}”校验失败后应停留在第 ${currentPage} 页`
   await expect(currentPageCard, currentPageMessage).toBeVisible({ timeout: CLIENT_VALIDATION_SETTLE_TIMEOUT_MS })
-  await hardExpect(currentPageCard, currentPageMessage).toBeVisible({ timeout: CLIENT_VALIDATION_SETTLE_TIMEOUT_MS })
   const nextPageFirstKey = pageFieldKeys[currentPage]?.[0]
   if (nextPageFirstKey) {
     const nextPageCard = fieldCard(page, nextPageFirstKey)
     const nextPageMessage = `“${label}”校验失败后不应翻页`
     await expect(nextPageCard, nextPageMessage).toBeHidden({ timeout: CLIENT_VALIDATION_SETTLE_TIMEOUT_MS })
-    await hardExpect(nextPageCard, nextPageMessage).toBeHidden({ timeout: CLIENT_VALIDATION_SETTLE_TIMEOUT_MS })
   }
 }
 
@@ -1076,7 +1152,7 @@ async function dismissPublicErrorDialog(page) {
   })
   if (await acknowledgement.isVisible().catch(() => false)) {
     await acknowledgement.click({ timeout: SELECT_VISIBILITY_TIMEOUT_MS })
-    await hardExpect(page.locator('[role="dialog"]:visible')).toHaveCount(0, {
+    await flowExpect(page.locator('[role="dialog"]:visible')).toHaveCount(0, {
       timeout: SELECT_COMMIT_TIMEOUT_MS,
     })
   }
@@ -1084,18 +1160,27 @@ async function dismissPublicErrorDialog(page) {
 
 async function assertVisibleSubmissionResult(
   page,
-  expectedFormCodeOrOptions = FORM_CODE,
+  expectedFormIdOrOptions = FORM_ID,
   options = {},
 ) {
-  const expectedFormCode = typeof expectedFormCodeOrOptions === 'string'
-    ? expectedFormCodeOrOptions
-    : FORM_CODE
-  const { timeout = NAVIGATION_TIMEOUT_MS } = typeof expectedFormCodeOrOptions === 'string'
+  const expectedFormId = typeof expectedFormIdOrOptions === 'string'
+    ? expectedFormIdOrOptions
+    : FORM_ID
+  const { timeout = NAVIGATION_TIMEOUT_MS } = typeof expectedFormIdOrOptions === 'string'
     ? options
-    : expectedFormCodeOrOptions
+    : expectedFormIdOrOptions
   const result = page.locator(SUBMISSION_RESULT_SELECTOR)
   await expect(result, '提交后应挂载唯一的普通表单结果页组件').toHaveCount(1, { timeout })
-  await expect(result, '结果页组件应属于当前表单').toHaveAttribute('form-code', expectedFormCode, { timeout })
+  const resultCount = await result.count()
+  if (resultCount !== 1) {
+    expect(null, '结果页组件应属于当前表单').toBe(expectedFormId)
+    expect(null, '结果页组件应包含有效提交 ID').toMatch(/\S+/)
+    await expect(page.getByRole('heading', { level: 1 }).first(), '提交后应显示结果页主标题').toBeVisible({
+      timeout,
+    })
+    return null
+  }
+  await expect(result, '结果页组件应属于当前表单').toHaveAttribute('form-id', expectedFormId, { timeout })
   await expect(result, '结果页组件应包含有效提交 ID').toHaveAttribute('submission-id', /\S+/, { timeout })
   await expect(page.getByRole('heading', { level: 1 }).first(), '提交后应显示结果页主标题').toBeVisible({
     timeout,
@@ -1103,7 +1188,7 @@ async function assertVisibleSubmissionResult(
   return result.getAttribute('submission-id')
 }
 
-async function goToNextPage(page, publicOrigin, currentPage, logger, formCode = FORM_CODE, pageFieldKeys = PAGE_FIELD_KEYS) {
+async function goToNextPage(page, publicOrigin, currentPage, logger, formId = FORM_ID, pageFieldKeys = PAGE_FIELD_KEYS) {
   logger('info', `第 ${currentPage} 页填写完成，点击“下一页”并等待服务端分页校验`)
   const paginationButtons = page.locator('.fb-runtime-pagination-buttons > button.fb-runtime-submit-button')
   await expect(paginationButtons, `第 ${currentPage} 页应显示分页操作按钮`).not.toHaveCount(0)
@@ -1113,10 +1198,26 @@ async function goToNextPage(page, publicOrigin, currentPage, logger, formCode = 
       validation = await waitForPublicMutation(
         page,
         publicOrigin,
-        `/f/form/${formCode}/submission/validate-page`,
+        `/f/form/${formId}/submission/validate-page`,
         () => paginationButtons.last().click(),
         `第 ${currentPage} 页校验`,
       )
+      if (
+        !validation.httpSucceeded
+        && isRetryablePageValidationStatus(validation.response.status())
+        && attempt < PAGE_VALIDATION_MAX_ATTEMPTS
+      ) {
+        logger('warning', `第 ${currentPage} 页校验遇到临时服务错误，准备第 ${attempt + 1} 次尝试`, {
+          attempt,
+          status: validation.response.status(),
+          method: validation.response.request().method(),
+          url: validation.response.url(),
+          response: validation.body,
+        })
+        await dismissPublicErrorDialog(page)
+        await page.waitForTimeout(PAGE_VALIDATION_RETRY_DELAY_MS * attempt)
+        continue
+      }
       break
     } catch (error) {
       if (!isRetryablePageValidationError(error) || attempt === PAGE_VALIDATION_MAX_ATTEMPTS) throw error
@@ -1134,7 +1235,14 @@ async function goToNextPage(page, publicOrigin, currentPage, logger, formCode = 
   if (!validation) throw new Error(`第 ${currentPage} 页校验未返回成功响应`)
   const nextPageFirstKey = pageFieldKeys[currentPage]?.[0]
   if (!nextPageFirstKey) throw new Error(`脚本未配置第 ${currentPage + 1} 页首个题目`)
-  await expect(fieldCard(page, nextPageFirstKey), `应进入第 ${currentPage + 1} 页`).toBeVisible()
+  const nextPageFirstField = fieldCard(page, nextPageFirstKey)
+  const pageTransitionMessage = `应进入第 ${currentPage + 1} 页`
+  await expect(nextPageFirstField, pageTransitionMessage).toBeVisible({
+    timeout: CLIENT_VALIDATION_SETTLE_TIMEOUT_MS,
+  })
+  await flowExpect(nextPageFirstField, pageTransitionMessage).toBeVisible({
+    timeout: ACTION_TIMEOUT_MS,
+  })
   logger('success', `第 ${currentPage} 页服务端校验通过，已进入第 ${currentPage + 1} 页`, {
     status: validation.response.status(),
     method: validation.response.request().method(),
@@ -1155,13 +1263,22 @@ async function goToPreviousPage(page, currentPage, logger, pageFieldKeys = PAGE_
 function parseSubmissionRequestPayload(request) {
   try {
     return request.postDataJSON()
-  } catch (error) {
-    const raw = request.postData()
-    if (!raw) throw new Error('提交请求没有 JSON 请求体', { cause: error })
+  } catch {
+    let raw
+    try {
+      raw = request.postData()
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      expect(false, `提交请求体读取失败：${reason}`).toBe(true)
+      return {}
+    }
+    expect(Boolean(raw), '提交请求应包含 JSON 请求体').toBe(true)
+    if (!raw) return {}
     try {
       return JSON.parse(raw)
-    } catch (parseError) {
-      throw new Error('提交请求体不是有效 JSON', { cause: parseError })
+    } catch {
+      expect(false, '提交请求体应为有效 JSON').toBe(true)
+      return {}
     }
   }
 }
@@ -1182,17 +1299,25 @@ async function rankOptions(ranking, expectedOrder) {
   }
 }
 
-async function createUploadFixtures(runId) {
-  await mkdir(FIXTURE_DIR, { recursive: true })
-  const imagePath = resolve(FIXTURE_DIR, `form-answer-${runId}.png`)
-  const filePath = resolve(FIXTURE_DIR, `form-answer-${runId}.txt`)
+async function createUploadFixtures(runId, artifactWriter) {
   const onePixelPng = Buffer.from(
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
     'base64',
   )
-  await writeFile(imagePath, onePixelPng)
-  await writeFile(filePath, `自动化测试表单附件\n运行时间戳：${runId}\n`, 'utf8')
-  return { imagePath, filePath }
+  const imageArtifact = await artifactWriter.writeFile(
+    `fixtures/form-answer-${runId}.png`,
+    onePixelPng,
+    { type: 'fixture', mimeType: 'image/png' },
+  )
+  const fileArtifact = await artifactWriter.writeFile(
+    `fixtures/form-answer-${runId}.txt`,
+    `自动化测试表单附件\n运行时间戳：${runId}\n`,
+    { type: 'fixture', mimeType: 'text/plain' },
+  )
+  return {
+    imagePath: imageArtifact.absolutePath,
+    filePath: fileArtifact.absolutePath,
+  }
 }
 
 async function uploadAndAssert(card, filePath, label) {
@@ -1221,8 +1346,17 @@ async function drawSignature(page, card, logger) {
   await expect(dialog, '点击签名题后应打开手写签名弹窗').toBeVisible()
   const canvas = dialog.locator('canvas')
   await expect(canvas, '签名弹窗应包含画布').toBeVisible()
-  const box = await canvas.boundingBox()
+  let box = await canvas.boundingBox()
   expect(box, '签名画布应有可绘制尺寸').toBeTruthy()
+  if (!box) {
+    await flowExpect.poll(async () => {
+      box = await canvas.boundingBox()
+      return box
+    }, {
+      message: '签名画布应在等待后获得可绘制尺寸',
+      timeout: ACTION_TIMEOUT_MS,
+    }).toBeTruthy()
+  }
   const points = [
     [0.18, 0.62], [0.28, 0.35], [0.38, 0.68], [0.50, 0.28], [0.62, 0.64], [0.76, 0.42], [0.84, 0.58],
   ]
@@ -1240,14 +1374,18 @@ async function drawSignature(page, card, logger) {
   logger('success', '手写签名已通过画布完成并上传')
 }
 
-async function screenshotFailure(page, runId) {
-  await mkdir(OUTPUT_DIR, { recursive: true })
-  const screenshotPath = resolve(OUTPUT_DIR, `填写失败-${runId}.png`)
-  await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => undefined)
-  return screenshotPath
+async function screenshotFailure(page, runId, artifactWriter) {
+  return artifactWriter.captureScreenshot(
+    page,
+    `填写失败-${runId}.png`,
+    { fullPage: true },
+  )
 }
 
 export async function run({
+  scriptId = SCRIPT_ID,
+  scriptName = scriptId,
+  artifactWriter,
   siteBaseUrl,
   requestPath = FORM_PATH,
   variables = {},
@@ -1256,27 +1394,39 @@ export async function run({
   signal,
   logger,
   recordApiResponse,
+  recordResourceResponse,
 }) {
   if (!siteBaseUrl) throw new Error('运行环境必须提供 Web 基址')
+  if (!artifactWriter
+    || typeof artifactWriter.writeFile !== 'function'
+    || typeof artifactWriter.captureScreenshot !== 'function') {
+    throw new Error('Runner 必须提供 artifactWriter')
+  }
   const authorization = extraHTTPHeaders?.Authorization
   if (!authorization) throw new Error('平台运行上下文必须包含环境登录 Token')
   const formPath = normalizeFormPath(requestPath)
   const formUrl = buildFormUrl(siteBaseUrl, formPath)
   const publicOrigin = new URL(formUrl).origin
-  const configuredFormCode = new URL(formUrl).searchParams.get('id') || FORM_CODE
+  const configuredFormId = new URL(formUrl).searchParams.get('id')?.trim()
+  if (!configuredFormId) throw new Error('公开表单路径必须包含非空 form ID')
   const linkedFormContract = parseFormLinkContract(variables.FORM_CONTRACT)
   const data = createTestData()
   let browser
   let context
   let page
   let stopAbortClose = () => undefined
-  let stopApiResponseRecorder = async () => undefined
+  let networkObserver = {
+    setPhase: () => undefined,
+    stop: async () => undefined,
+  }
 
   try {
     throwIfRunAborted(signal)
-    const fixtures = await createUploadFixtures(data.runId)
+    const fixtures = await createUploadFixtures(data.runId, artifactWriter)
     throwIfRunAborted(signal)
     logger('info', '已根据所选环境域名拼接公开表单地址', {
+      scriptId,
+      scriptName,
       selectedSiteBaseUrl: siteBaseUrl,
       publicOrigin,
       formPath,
@@ -1285,7 +1435,7 @@ export async function run({
     logger('info', '启动 Google Chrome 无头浏览器，后台模拟用户填写公开表单', {
       browser: 'Google Chrome',
       headless: true,
-      formCode: configuredFormCode,
+      formId: configuredFormId,
       formUrl,
     })
     logger('info', '公开填写页无需登录；环境 Token 仅用于平台鉴权，不会注入或发送到公开表单域名')
@@ -1299,11 +1449,13 @@ export async function run({
       locale: 'zh-CN',
     })
     throwIfRunAborted(signal)
-    page = await context.newPage()
-    stopApiResponseRecorder = attachApiResponseRecorder(page, {
+    networkObserver = attachNetworkObserver(context, {
+      initialPhase: '浏览器初始化',
       onApiResponse: recordApiResponse,
-      shouldRecord: ({ url }) => url.origin === publicOrigin,
+      onResourceResponse: recordResourceResponse,
     })
+    await networkObserver.ready
+    page = await context.newPage()
     page.setDefaultTimeout(ACTION_TIMEOUT_MS)
     page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS)
 
@@ -1315,10 +1467,10 @@ export async function run({
       const url = new URL(request.url())
       if (url.origin !== publicOrigin) return
       publicRequestCount += 1
-      if (request.method() === 'POST' && url.pathname.endsWith(`/f/form/${configuredFormCode}/submission/validate-page`)) {
+      if (request.method() === 'POST' && url.pathname.endsWith(`/f/form/${configuredFormId}/submission/validate-page`)) {
         pageValidationRequestCount += 1
       }
-      if (request.method() === 'POST' && url.pathname.endsWith(`/f/form/${configuredFormCode}/submission`)) {
+      if (request.method() === 'POST' && url.pathname.endsWith(`/f/form/${configuredFormId}/submission`)) {
         submissionRequestCount += 1
       }
       if (request.headers().authorization) {
@@ -1326,29 +1478,31 @@ export async function run({
       }
     })
 
+    networkObserver.setPhase('公开表单加载')
     const publishedConfigResponsePromise = page.waitForResponse((response) => {
       const url = new URL(response.url())
       return url.origin === publicOrigin
-        && url.pathname.endsWith(`/f/form/${configuredFormCode}`)
+        && url.pathname.endsWith(`/f/form/${configuredFormId}`)
         && response.request().method() === 'GET'
     }, { timeout: NAVIGATION_TIMEOUT_MS })
     await page.goto(formUrl, { waitUntil: 'domcontentloaded' })
     const publishedConfigResponse = await publishedConfigResponsePromise
-    if (!publishedConfigResponse.ok()) {
-      throw new Error(`公开表单配置接口返回 HTTP ${publishedConfigResponse.status()}`)
-    }
+    expect(
+      publishedConfigResponse.ok(),
+      `公开表单配置接口应返回成功 HTTP 状态，实际 ${publishedConfigResponse.status()}`,
+    ).toBe(true)
     const publishedConfigBody = await publishedConfigResponse.json().catch(() => null)
     const publishedContract = assertPublishedFormContract(
       publishedConfigBody,
-      configuredFormCode,
+      configuredFormId,
       linkedFormContract,
     )
     const FIELD_KEYS = publishedContract.fieldKeys
     const PAGE_FIELD_KEYS = publishedContract.pageFieldKeys
     const EXPECTED_FORM_TITLE = publishedContract.title
     await expect(page, '公开表单应保持在所选环境对应域名').toHaveURL(new RegExp(`^${publicOrigin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/`))
-    expect(new URL(page.url()).searchParams.get('id'), '公开表单地址应保持为目标 form code')
-      .toBe(configuredFormCode)
+    expect(new URL(page.url()).searchParams.get('id'), '公开表单地址应保持为目标 form ID')
+      .toBe(configuredFormId)
     await expect(page, '页面标题应与目标表单名称完全匹配').toHaveTitle(EXPECTED_FORM_TITLE)
     await expect(page.getByText(EXPECTED_FORM_TITLE, { exact: true }), '页面中应显示目标表单名称').toBeVisible()
     await expect(page.getByText(FORM_SUBTITLE, { exact: true }), '页面中应显示发布脚本配置的表单描述').toBeVisible()
@@ -1356,15 +1510,16 @@ export async function run({
       await expect(page.getByText(text, { exact: true }), `页面中应显示填写须知“${text}”`).toBeVisible()
     }
     const pageLocale = await page.locator('html').getAttribute('lang')
-    logger('success', '目标公开表单加载成功，发布脚本契约断言全部通过', {
+    logger('info', '目标公开表单加载完成，发布脚本契约断言执行完成', {
       title: EXPECTED_FORM_TITLE,
-      formCode: configuredFormCode,
+      formId: configuredFormId,
       locale: pageLocale || 'unknown',
       revisionNo: publishedContract.revisionNo,
       requiredRootQuestionCount: publishedContract.requiredRootKeys.length,
       dateRange: publishedContract.dateRange,
     })
 
+    networkObserver.setPhase('第 1 页空表校验')
     await assertCurrentPage(page, 1, PAGE_FIELD_KEYS[0], PAGE_FIELD_LABELS[0], PAGE_CARD_COUNTS[0], logger)
     await assertClientValidationBlocked(page, {
       currentPage: 1,
@@ -1373,9 +1528,11 @@ export async function run({
       pageFieldKeys: PAGE_FIELD_KEYS,
       logger,
     })
+    networkObserver.setPhase('第 1 页重新加载')
     await page.reload({ waitUntil: 'domcontentloaded' })
     await assertCurrentPage(page, 1, PAGE_FIELD_KEYS[0], PAGE_FIELD_LABELS[0], PAGE_CARD_COUNTS[0], logger)
 
+    networkObserver.setPhase('第 1 页填写')
     const username = await assertField(page, FIELD_KEYS.username, '姓名')
     await selectOption(page, username.locator('[role="combobox"]'), data.nameTitle, '姓名-称谓', logger)
     await fillAndAssert(username.locator('input').first(), data.username, '姓名')
@@ -1401,18 +1558,19 @@ export async function run({
     await selectOption(page, birthdaySelects.nth(1), data.birthday.month, '生日-月份', logger)
     await selectOption(page, birthdaySelects.nth(2), data.birthday.day, '生日-日期', logger)
 
+    networkObserver.setPhase('第 1 页服务端校验')
     await assertRuleValidationBlocked(page, publicOrigin, {
       currentPage: 1,
       key: FIELD_KEYS.mobile,
       label: '手机号',
-      formCode: configuredFormCode,
+      formId: configuredFormId,
       pageFieldKeys: PAGE_FIELD_KEYS,
       logger,
     })
     await replaceWithUserInputAndBlur(mobile.locator('input').first(), data.mobile, '手机号合法恢复值')
     await assertEmailFormatBoundary(email.locator('input').first(), data.invalidEmail, data.email)
     logger('success', '邮箱格式边界已通过原生 email 控件验证，并已恢复合法值')
-    logger('success', '第 1 页联系人题目全部填写并逐项断言通过', {
+    logger('info', '第 1 页联系人题目填写及逐项断言执行完成', {
       nameTitle: data.nameTitle,
       username: data.username,
       mobile: data.mobile,
@@ -1420,8 +1578,10 @@ export async function run({
       address: `${data.province}/${data.city}/${data.district}/${data.street}`,
       birthday: `${data.birthday.year}-${data.birthday.month}-${data.birthday.day}`,
     })
-    await goToNextPage(page, publicOrigin, 1, logger, configuredFormCode, PAGE_FIELD_KEYS)
+    networkObserver.setPhase('第 1 页翻页')
+    await goToNextPage(page, publicOrigin, 1, logger, configuredFormId, PAGE_FIELD_KEYS)
 
+    networkObserver.setPhase('第 2 页填写')
     await assertCurrentPage(page, 2, PAGE_FIELD_KEYS[1], PAGE_FIELD_LABELS[1], PAGE_CARD_COUNTS[1], logger)
     const input = await assertField(page, FIELD_KEYS.input, '单行文本')
     const singleLineInput = input.locator('input').first()
@@ -1495,12 +1655,13 @@ export async function run({
     const fileUpload = await assertField(page, FIELD_KEYS.fileUpload, '文件上传')
     await uploadAndAssert(fileUpload, fixtures.filePath, '文件上传')
 
+    networkObserver.setPhase('第 2 页规则校验')
     if (overLimitSingleLineValue.length > 20) {
       await assertRuleValidationBlocked(page, publicOrigin, {
         currentPage: 2,
         key: FIELD_KEYS.input,
         label: '单行文本 21 字边界',
-        formCode: configuredFormCode,
+        formId: configuredFormId,
         pageFieldKeys: PAGE_FIELD_KEYS,
         logger,
       })
@@ -1510,7 +1671,7 @@ export async function run({
       currentPage: 2,
       key: FIELD_KEYS.checkbox,
       label: '多项选择仅 1 项',
-      formCode: configuredFormCode,
+      formId: configuredFormId,
       pageFieldKeys: PAGE_FIELD_KEYS,
       logger,
     })
@@ -1523,12 +1684,12 @@ export async function run({
       currentPage: 2,
       key: FIELD_KEYS.number,
       label: '数字 100.01 越过上边界',
-      formCode: configuredFormCode,
+      formId: configuredFormId,
       pageFieldKeys: PAGE_FIELD_KEYS,
       logger,
     })
     await replaceWithUserInputAndBlur(numberInput, data.number, '数字 100.00 合法上边界')
-    logger('success', '第 2 页通用题目全部填写并逐项断言通过', {
+    logger('info', '第 2 页通用题目填写及逐项断言执行完成', {
       radio: data.radio,
       checkbox: data.checkbox,
       select: data.select,
@@ -1538,8 +1699,10 @@ export async function run({
       imageFixture: fixtures.imagePath,
       fileFixture: fixtures.filePath,
     })
-    await goToNextPage(page, publicOrigin, 2, logger, configuredFormCode, PAGE_FIELD_KEYS)
+    networkObserver.setPhase('第 2 页翻页')
+    await goToNextPage(page, publicOrigin, 2, logger, configuredFormId, PAGE_FIELD_KEYS)
 
+    networkObserver.setPhase('跨页答案保持')
     await assertCurrentPage(page, 3, PAGE_FIELD_KEYS[2], PAGE_FIELD_LABELS[2], PAGE_CARD_COUNTS[2], logger)
     await goToPreviousPage(page, 3, logger, PAGE_FIELD_KEYS)
     await assertCurrentPage(page, 2, PAGE_FIELD_KEYS[1], PAGE_FIELD_LABELS[1], PAGE_CARD_COUNTS[1], logger)
@@ -1556,8 +1719,9 @@ export async function run({
     await expect(fieldCard(page, FIELD_KEYS.fileUpload), '跨页返回后文件上传结果不应丢失')
       .toContainText(fixtures.filePath.split(/[\\/]/).pop())
     logger('success', '上一页/下一页往返后，文本、选择、数字和上传答案均保持')
-    await goToNextPage(page, publicOrigin, 2, logger, configuredFormCode, PAGE_FIELD_KEYS)
+    await goToNextPage(page, publicOrigin, 2, logger, configuredFormId, PAGE_FIELD_KEYS)
     await assertCurrentPage(page, 3, PAGE_FIELD_KEYS[2], PAGE_FIELD_LABELS[2], PAGE_CARD_COUNTS[2], logger)
+    networkObserver.setPhase('第 3 页空表校验')
     await assertClientValidationBlocked(page, {
       currentPage: 3,
       expectedFields: [
@@ -1577,6 +1741,7 @@ export async function run({
     })
     await expect(fieldCard(page, FIELD_KEYS.fieldGroup).locator('.fb-runtime-field-error'), '空题组实例应只拦截必填的姓名和手机号，邮箱保持可选')
       .toHaveCount(2)
+    networkObserver.setPhase('第 3 页填写')
     const cascader = await assertField(page, FIELD_KEYS.cascader, '级联选择')
     const cascaderTrigger = cascader.locator('.fb-runtime-cascader-trigger')
     await selectCascaderPath(page, cascaderTrigger, data.cascader, logger)
@@ -1634,7 +1799,7 @@ export async function run({
     await npsButton.click()
     await expect(npsButton, 'NPS 应支持选择 10 分上边界').toHaveClass(/fb-text-white/)
     await expect(npsMinimumButton, '选择 NPS 10 分后，1 分应取消选中').not.toHaveClass(/fb-text-white/)
-    logger('success', '第 3 页高级题目和题组全部填写并逐项断言通过', {
+    logger('info', '第 3 页高级题目和题组填写及逐项断言执行完成', {
       cascader: data.cascader,
       groupUsername: data.groupUsername,
       groupMobile: data.groupMobile,
@@ -1646,11 +1811,12 @@ export async function run({
       nps: data.nps,
     })
 
+    networkObserver.setPhase('最终提交')
     logger('info', '所有题目填写完成，点击“提交”并等待提交接口响应')
     const submission = await waitForPublicMutation(
       page,
       publicOrigin,
-      `/f/form/${configuredFormCode}/submission`,
+      `/f/form/${configuredFormId}/submission`,
       () => page.locator('.fb-runtime-submit-button-wrap button.fb-runtime-submit-button').click(),
       '提交表单',
       { expectBusinessSuccess: false },
@@ -1663,10 +1829,11 @@ export async function run({
       ?? submission.body?.submission_id
       ?? '',
     )
+    networkObserver.setPhase('提交结果验证')
     await expect(page, '提交后应进入普通表单结果页').toHaveURL(SUBMISSION_RESULT_URL_PATTERN, {
       timeout: NAVIGATION_TIMEOUT_MS,
     })
-    const renderedSubmissionId = await assertVisibleSubmissionResult(page, configuredFormCode)
+    const renderedSubmissionId = await assertVisibleSubmissionResult(page, configuredFormId)
     if (responseSubmissionId) {
       expect(renderedSubmissionId, '结果页组件的提交 ID 应与提交接口响应一致').toBe(responseSubmissionId)
     }
@@ -1674,8 +1841,8 @@ export async function run({
     expect(authorizationLeaks, '公开表单域名的所有请求都不应携带后台环境 Token').toEqual([])
     expect(publicRequestCount, '应观察到公开表单域名的业务请求').toBeGreaterThan(0)
     expect(submissionRequestCount, '必填失败不应误提交，整个脚本只应产生一次最终提交请求').toBe(1)
-    logger('success', '新表单提交成功，题目、答案和提交请求断言全部通过', {
-      formCode: configuredFormCode,
+    logger('success', '新表单提交成功，题目、答案和提交请求业务断言执行完成', {
+      formId: configuredFormId,
       submissionId: submissionId || '响应未返回可识别 ID',
       publicRequestCount,
       pageValidationRequestCount,
@@ -1686,8 +1853,11 @@ export async function run({
       token: '[REDACTED]',
     })
 
+    networkObserver.setPhase('运行结果汇总')
     return {
-      formCode: configuredFormCode,
+      scriptId,
+      scriptName,
+      formId: configuredFormId,
       formUrl,
       title: EXPECTED_FORM_TITLE,
       submissionId,
@@ -1708,12 +1878,26 @@ export async function run({
     if (signal?.aborted) {
       logger('info', '已响应强制停止，正在清理 Chrome 无头浏览器')
     } else if (page) {
-      const screenshotPath = await screenshotFailure(page, data.runId)
-      logger('error', 'lpXAVN 表单填写自动化执行失败，已保存当前页面全页截图', { screenshotPath })
+      try {
+        const screenshot = await screenshotFailure(page, data.runId, artifactWriter)
+        logger('error', `脚本“${scriptName}”执行失败，已保存当前页面全页截图`, {
+          scriptId,
+          scriptName,
+          screenshotPath: screenshot.absolutePath,
+          artifact: screenshot,
+        })
+      } catch (screenshotError) {
+        logger('error', `脚本“${scriptName}”执行失败，当前页面截图保存失败`, {
+          scriptId,
+          scriptName,
+          reason: screenshotError instanceof Error ? screenshotError.message : String(screenshotError),
+        })
+      }
     }
     throw error
   } finally {
-    await stopApiResponseRecorder()
+    networkObserver.setPhase('结束清理')
+    await networkObserver.stop()
     const abortCloseStarted = await stopAbortClose()
     if (!abortCloseStarted) await closePlaywrightHandles({ context, browser }, { logger })
   }
@@ -1722,7 +1906,7 @@ export async function run({
 export {
   EXPECTED_FORM_TITLE,
   FIELD_KEYS,
-  FORM_CODE,
+  FORM_ID,
   FORM_PATH,
   PAGE_CARD_COUNTS,
   PAGE_FIELD_KEYS,
@@ -1733,6 +1917,7 @@ export {
   SUBMISSION_RESULT_URL_PATTERN,
   assertEmailFormatBoundary,
   assertPublishedFormContract,
+  assertRuleValidationRejected,
   assertRuleValidationBlocked,
   assertSubmissionPayload,
   assertVisibleSubmissionResult,
@@ -1742,6 +1927,7 @@ export {
   indexSubmissionEntries,
   isRetryablePageValidationStatus,
   normalizeFormPath,
+  parseSubmissionRequestPayload,
   selectOption,
   waitForPublicMutation,
 }

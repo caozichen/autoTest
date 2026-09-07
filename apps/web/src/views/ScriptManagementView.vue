@@ -257,7 +257,14 @@ async function forceStop(script: AutomationScript): Promise<void> {
     ))
     const interruptedRecords = await services.runRecords.interruptByScriptId(script.id)
     await Promise.allSettled([refreshLiveScripts(), refreshRunningScripts()])
-    if (stopResults.some((result) => result.runnerFound)) {
+    const cleanupTimedOutRunIds = new Set(
+      stopResults.flatMap((result) => result.cleanupTimedOutRunIds ?? []),
+    )
+    if (cleanupTimedOutRunIds.size > 0) {
+      ElMessage.warning(
+        `运行批次已中断，但 ${cleanupTimedOutRunIds.size} 个任务的浏览器清理超时，请检查 Runner 日志`,
+      )
+    } else if (stopResults.some((result) => result.runnerFound)) {
       ElMessage.success(stopScriptIds.length > 1
         ? `批次内 ${stopScriptIds.length} 个脚本已强制停止，运行批次已标记为中断`
         : '脚本已强制停止，运行批次已标记为中断')
@@ -377,9 +384,13 @@ async function runScripts(targets: AutomationScript[]): Promise<void> {
     })
 
     const recordId = runRecord.id
+    const runContext = {
+      ...buildScriptRunContext(environment, services.runtimeVariables),
+      executionId: recordId,
+    }
     const runTask = services.scripts.run(
       runnable.map((script) => script.id),
-      buildScriptRunContext(environment, services.runtimeVariables),
+      runContext,
       async (script) => {
         const progress = createRunScriptProgressDraft(script, runSecretValues)
         if (progress) await services.runRecords.updateScriptProgress(recordId, progress)
@@ -413,6 +424,13 @@ async function runScripts(targets: AutomationScript[]): Promise<void> {
           logs: script.lastRunResult?.logs ?? [],
           ...(script.lastRunResult?.assertions ? { assertions: script.lastRunResult.assertions } : {}),
           ...(script.lastRunResult?.apiResponses ? { apiResponses: script.lastRunResult.apiResponses } : {}),
+          ...(script.lastRunResult?.resourceResponses
+            ? { resourceResponses: script.lastRunResult.resourceResponses }
+            : {}),
+          ...(script.lastRunResult?.networkSummary
+            ? { networkSummary: script.lastRunResult.networkSummary }
+            : {}),
+          ...(script.lastRunResult?.artifacts ? { artifacts: script.lastRunResult.artifacts } : {}),
           ...(script.lastRunResult?.output ? { output: script.lastRunResult.output } : {}),
           ...(script.lastRunResult?.error ? { error: script.lastRunResult.error } : {}),
         })),

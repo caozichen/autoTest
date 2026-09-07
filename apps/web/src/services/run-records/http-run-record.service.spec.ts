@@ -181,6 +181,41 @@ function createService(
   })
 }
 
+function createServiceWithRequestTimeout(
+  fetcher: typeof fetch,
+  requestTimeoutMs = 10,
+): HttpRunRecordService {
+  const options: ConstructorParameters<typeof HttpRunRecordService>[0] & {
+    requestTimeoutMs: number
+  } = {
+    fetcher,
+    runnerBaseUrl: 'http://127.0.0.1:4310',
+    legacyStorage: new MemoryStorage(),
+    now: () => NOW,
+    idFactory: sequence(['run-http-0001', 'start-log-0001']),
+    requestTimeoutMs,
+  }
+  return new HttpRunRecordService(options)
+}
+
+function settleWithin<T>(promise: Promise<T>, timeoutMs = 250): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timeout = globalThis.setTimeout(() => {
+      reject(new Error(`operation did not settle within ${timeoutMs}ms`))
+    }, timeoutMs)
+    void promise.then(
+      (value) => {
+        globalThis.clearTimeout(timeout)
+        resolve(value)
+      },
+      (error) => {
+        globalThis.clearTimeout(timeout)
+        reject(error)
+      },
+    )
+  })
+}
+
 async function createLegacyRecord(): Promise<RunRecord> {
   return new LocalRunRecordService(
     new MemoryStorage(),
@@ -202,6 +237,115 @@ describe('HttpRunRecordService', () => {
     expect(runner.state.records.get(started.id)).toEqual(started)
     expect((await service.get(started.id))?.id).toBe(started.id)
     expect((await service.list()).map((record) => record.id)).toEqual([started.id])
+  })
+
+  it('rejects when the Runner fetch never settles', async () => {
+    const fetcher = vi.fn(() => new Promise<Response>(() => undefined)) as unknown as typeof fetch
+    const service = createServiceWithRequestTimeout(fetcher)
+
+    await expect(settleWithin(service.list())).rejects.toThrow(/超时/)
+  })
+
+  it('rejects when parsing the Runner response never settles', async () => {
+    const response = jsonResponse({ records: [] })
+    vi.spyOn(response, 'json').mockImplementation(() => new Promise<never>(() => undefined))
+    const fetcher = vi.fn(async () => response) as unknown as typeof fetch
+    const service = createServiceWithRequestTimeout(fetcher)
+
+    await expect(settleWithin(service.list())).rejects.toThrow(/超时/)
+  })
+
+  it('reconciles a created record when its response body times out after commit', async () => {
+    const runner = createFakeRunner()
+    let hangCreateResponse = true
+    const fetcher = vi.fn(async (input: string | URL | Request, init: RequestInit = {}) => {
+      const response = await runner.fetcher(input, init)
+      const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url)
+      if (hangCreateResponse && url.pathname === '/run-records' && init.method === 'POST') {
+        hangCreateResponse = false
+        vi.spyOn(response, 'json').mockImplementation(() => new Promise<never>(() => undefined))
+      }
+      return response
+    }) as unknown as typeof fetch
+    const service = createServiceWithRequestTimeout(fetcher)
+
+    const started = await settleWithin(service.start(startDraft()))
+
+    expect(started).toMatchObject({ id: 'run-http-0001', status: 'running', revision: 0 })
+    expect(runner.state.records.get(started.id)).toEqual(started)
+  })
+
+  it('reconciles a committed progress PATCH before running the queued completion', async () => {
+    const runner = createFakeRunner()
+    let hangProgressResponse = false
+    const fetcher = vi.fn(async (input: string | URL | Request, init: RequestInit = {}) => {
+      const response = await runner.fetcher(input, init)
+      const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url)
+      if (hangProgressResponse && init.method === 'PATCH' && /^\/run-records\/[^/]+$/.test(url.pathname)) {
+        hangProgressResponse = false
+        vi.spyOn(response, 'json').mockImplementation(() => new Promise<never>(() => undefined))
+      }
+      return response
+    }) as unknown as typeof fetch
+    const service = createServiceWithRequestTimeout(fetcher)
+    const started = await service.start(startDraft())
+    hangProgressResponse = true
+
+    const progressPromise = service.updateScriptProgress(started.id, {
+      scriptId: 'login-regression',
+      status: 'running',
+      durationMs: 100,
+      logs: [{ timestamp: NOW.toISOString(), level: 'info', message: '实时步骤' }],
+    })
+    const completePromise = service.complete(started.id, {
+      scripts: [{
+        scriptId: 'login-regression',
+        ok: true,
+        durationMs: 200,
+        logs: [{ timestamp: NOW.toISOString(), level: 'success', message: '执行完成' }],
+      }],
+    })
+
+    await expect(settleWithin(progressPromise)).resolves.toMatchObject({ revision: 1, status: 'running' })
+    await expect(settleWithin(completePromise)).resolves.toMatchObject({ revision: 2, status: 'passed' })
+    expect(runner.state.patchExpectedRevisions).toEqual([0, 1])
+  })
+
+  it('releases a record mutation tail after a request timeout', async () => {
+    const runner = createFakeRunner()
+    let hangNextDetailRead = false
+    const fetcher = vi.fn((input: string | URL | Request, init: RequestInit = {}) => {
+      const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url)
+      const method = init.method ?? 'GET'
+      if (hangNextDetailRead && method === 'GET' && /^\/run-records\/[^/]+$/.test(url.pathname)) {
+        hangNextDetailRead = false
+        return new Promise<Response>(() => undefined)
+      }
+      return runner.fetcher(input, init)
+    }) as unknown as typeof fetch
+    const service = createServiceWithRequestTimeout(fetcher)
+    const started = await service.start(startDraft())
+    hangNextDetailRead = true
+
+    const timedOutMutation = service.appendLog(started.id, {
+      level: 'info',
+      scope: 'runner',
+      message: '该写入应超时',
+    })
+    const followingMutation = service.appendLog(started.id, {
+      level: 'success',
+      scope: 'runner',
+      message: '超时后继续写入',
+    })
+
+    await expect(settleWithin(timedOutMutation)).rejects.toThrow(/超时/)
+    await expect(settleWithin(followingMutation)).resolves.toMatchObject({
+      revision: 1,
+      status: 'running',
+    })
+    const persistedMessages = (await service.get(started.id))?.logs.map((log) => log.message)
+    expect(persistedMessages).toContain('超时后继续写入')
+    expect(persistedMessages).not.toContain('该写入应超时')
   })
 
   it('serializes live progress and completion so the final update cannot overwrite a newer revision', async () => {

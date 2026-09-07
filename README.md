@@ -6,7 +6,7 @@ AutoTest 是一个本地优先的自动化测试管理平台。V0 提供 Vue 3 +
 
 - **环境管理**：配置 Web/API 地址、登录接口、手机号验证码或账号密码、业务成功规则、Token 提取路径和自定义变量。
 - **脚本管理**：展示本地脚本元数据，支持单脚本和批量手动运行。
-- **执行控制**：实时刷新运行日志；运行中的脚本可从操作栏强制停止，并将当前任务及同批次后续任务标记为已中断。
+- **执行控制**：实时刷新运行日志；可从脚本操作栏或运行记录直接强制停止，并将当前任务及同批次后续任务标记为已中断。
 - **自动化配置**：按顺序组合多个已注册脚本，可将前序脚本输出映射为后续脚本的运行时变量。
 - **运行记录**：按批次保存脚本状态、耗时、日志、输出和数据分析；运行概览只统计真实记录。
 - **安全边界**：Runner 只执行持久配置中已启用的脚本 ID，校验入口真实路径及 API 与授权来源同源，持久化日志和结果前对敏感数据脱敏。
@@ -78,7 +78,7 @@ npm run install:supervisor
 
 - 脚本运行时，操作栏会显示“强制停止”。确认后 Runner 会发送 `AbortSignal`，内置脚本随即关闭 Playwright context 和 Chrome，结果记为 `interrupted`。
 - 批量运行或流水线中强制停止当前脚本时，同批次正在运行的脚本会停止，尚未执行的步骤会跳过。
-- 刷新或关闭管理页面不会停止 Runner 中的任务；页面日志会停止刷新，但后台脚本可能继续执行。重新打开页面后应通过脚本操作栏强制停止。
+- 刷新或关闭管理页面不会停止 Runner 中的任务；页面日志会停止刷新，但后台脚本可能继续执行。重新打开“运行记录”后仍可从列表或详情强制停止整个批次。
 - 如果 Runner 已无活动任务但本地仍显示“执行中”，强制停止会解除本地运行锁并标记为已中断。停止失败时先检查 `/health`，恢复 Runner 后重试。
 
 预设测试环境保留以下可编辑规则：
@@ -98,12 +98,19 @@ npm run install:supervisor
 | 脚本 ID | 入口 | 主要行为 | 前置条件与副作用 |
 | --- | --- | --- | --- |
 | `form-all-fields-publish` | `scripts/form-all-fields-publish.ui.spec.mjs` | 创建三页全题型表单，配置表单描述与富文本内容、题型限制、三级级联、题组联系人、描述说明和分割线；上传头图、应用推荐配色，并校验草稿保存、发布接口及已发布列表。 | 首次运行会在 `outputs/form-all-fields-publish/fixtures/` 生成跨平台默认头图；也可通过环境变量 `HEADER_IMAGE_PATH` 指定本机图片。会留下真实已发布表单和上传文件。 |
-| `form-all-fields-submit` | `scripts/form-all-fields-submit.ui.spec.mjs` | 访问公开表单 `qBM33p`，填写三页题目、上传附件、完成签名、校验分页接口并提交；同时断言后台 Token 未发送到公开表单域名。 | 依赖固定 `FORM_CODE`、标题和 field key 与线上表单一致；会留下真实提交记录。长下拉使用精确 listbox、键盘选择和最多 3 次重试。 |
-| `form-lpxavn-submit` | `scripts/form-lpxavn-submit.ui.spec.mjs` | 通过可配置公开表单路径校验发布契约、填写三页全题型字段并提交，支持接收前序发布脚本输出的表单短码与结构契约。 | 会留下真实提交记录；目标表单结构必须符合发布脚本契约。后台 Token 不会注入公开表单域名。 |
+| `form-all-fields-submit` | `scripts/form-all-fields-submit.ui.spec.mjs` | 使用运行时 `FORM_ID` 定位前序发布的公开表单，并以 `FORM_CONTRACT` 校验动态标题、field key 和题型契约；填写三页题目、上传附件、完成签名、校验分页接口并提交。 | 不包含固定表单兜底，必须先解析出 `FORM_ID`；建议同时映射 `FORM_CONTRACT`。会留下真实提交记录，后台 Token 不会发送到公开表单域名。 |
+| `form-lpxavn-submit` | `scripts/form-lpxavn-submit.ui.spec.mjs` | 通过可配置公开表单路径校验发布契约、填写三页全题型字段并提交，支持接收前序发布脚本输出的表单 ID 与结构契约。 | 会留下真实提交记录；目标表单结构必须符合发布脚本契约。后台 Token 不会注入公开表单域名。 |
 | `form-submission-reply-edit` | `scripts/form-submission-reply-edit.ui.spec.mjs` | 从显示“编辑”按钮的提报详情初始态开始，校验详情内容，进入编辑态校验控件，提交后检查精确更新接口、业务结果、详情态恢复和修改值回显。 | 会对目标提报执行真实 `PUT` 保存。默认 ID 为 `lpXAWZ` / `lg2bkk`，URL、断言及简单文本修改值均可在脚本编辑器或流水线中覆盖。 |
 | `form-contact-publish` | `scripts/form-contact-publish.ui.spec.mjs` | 创建表单，加入姓名、手机号和邮箱联系人题，设置“忽略，不替换”，保存草稿、发布并校验已发布列表。 | 会留下真实已发布表单，不自动清理。 |
 
-`form-all-fields-publish` 与 `form-all-fields-submit` 当前不会自动串联：填写脚本不会填写刚刚发布的表单。更换目标公开表单时，需要同步更新 `FORM_CODE`、`EXPECTED_FORM_TITLE` 和 `FIELD_KEYS`。失败截图写入 `outputs/<script-id>/`，填写脚本生成的临时上传文件位于对应的 `fixtures/` 目录。
+`form-all-fields-submit` 的生产入口复用动态契约填写实现，不再保留固定 `qBM33p`、固定标题或固定 field key 的旧执行路径。要填写刚刚发布的表单，请在自动化配置中将 `form-all-fields-publish` 放在前一步，并显式建立以下参数映射：
+
+| 来源输出路径 | 目标运行变量 | 用途 |
+| --- | --- | --- |
+| `formId` | `FORM_ID` | 解析配置中的 `/form/?id={{FORM_ID}}`，确定本次公开表单地址。 |
+| `formContract` | `FORM_CONTRACT` | 校验前序发布结果，并按动态 field key 填写同一份表单。 |
+
+这两个脚本不会在独立运行时自行配对；串联关系由自动化配置显式定义。对于两个全题型填写入口，Runner 统一将失败截图和上传 fixture 写入 `outputs/artifacts/<executionId>/<stepId>/<attemptId>/`，其中 `stepId` 使用实际注册脚本 ID；fixture 位于该 attempt 目录下的 `fixtures/`。委托共享实现不会改变制品目录或日志中的脚本名称。若 `executionId` 对应已有运行记录，Runner 会在返回最终执行结果前将制品描述合并到对应脚本记录，页面刷新或断开不会丢失已经落盘的制品索引。
 
 ### 提报详情编辑参数
 

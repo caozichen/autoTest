@@ -42,10 +42,19 @@ const SYSTEM_ITEM_KEYS = new Set([
   'ip',
   'lingxi_openid',
   'team_openid',
+  'channel',
+  'params',
 ])
 
 function itemKey(item) {
   return typeof item?.item_key === 'string' ? item.item_key.trim() : ''
+}
+
+function isSystemItem(item) {
+  const itemKind = typeof item?.item_kind === 'string'
+    ? item.item_kind.trim().toLowerCase()
+    : ''
+  return itemKind === 'system' || SYSTEM_ITEM_KEYS.has(itemKey(item))
 }
 
 function rootItem(items, typeCode) {
@@ -53,12 +62,14 @@ function rootItem(items, typeCode) {
     item?.type_code === typeCode
     && !item?.group_code
     && itemKey(item)
-    && !SYSTEM_ITEM_KEYS.has(itemKey(item))
+    && !isSystemItem(item)
   ))
 }
 
 export function resolveFormFieldKeys(items, fallback = {}) {
-  const sourceItems = Array.isArray(items) ? items : []
+  const sourceItems = Array.isArray(items)
+    ? items.filter((item) => !isSystemItem(item))
+    : []
   const fieldKeys = {}
   for (const [name, typeCode] of Object.entries(FIELD_TYPE_CODES)) {
     fieldKeys[name] = itemKey(rootItem(sourceItems, typeCode)) || fallback[name] || ''
@@ -99,13 +110,17 @@ export function createFormLinkContract({
         item
         && typeof item === 'object'
         && Number(item.hidden) !== 1
-        && !SYSTEM_ITEM_KEYS.has(itemKey(item))
+        && !isSystemItem(item)
       ))
     : []
+  const normalizedFormId = String(formId ?? '').trim()
+  if (!normalizedFormId) {
+    throw new Error('FORM_CONTRACT 必须包含 formId；formCode 不再作为公开表单路由标识')
+  }
   const fieldKeys = resolveFormFieldKeys(contractItems)
   return {
     version: 1,
-    formId: String(formId ?? '').trim(),
+    formId: normalizedFormId,
     formCode: String(formCode ?? '').trim(),
     title: String(title ?? '').trim(),
     revisionNo: Number(revisionNo) || 0,
@@ -142,8 +157,10 @@ export function firstFormCode(...sources) {
       source?.form?.form_code,
       source?.form?.code,
     ]
-    const value = candidates.find((candidate) => String(candidate ?? '').trim())
-    if (value !== undefined) return String(value).trim()
+    const value = candidates
+      .map((candidate) => String(candidate ?? '').trim())
+      .find((candidate) => candidate && !/^\d+$/.test(candidate))
+    if (value !== undefined) return value
   }
   return ''
 }

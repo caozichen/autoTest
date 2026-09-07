@@ -190,7 +190,13 @@ async function forceStopPipeline(pipeline: AutomationPipeline): Promise<void> {
   try {
     const result = await services.automationPipelineExecution.stop(pipeline.id)
     if (result.stopped) {
-      ElMessage.success(`“${pipeline.name}”已提交强制停止请求`)
+      if (result.cleanupTimedOutRunIds?.length) {
+        ElMessage.warning(
+          `“${pipeline.name}”已中断，但 ${result.cleanupTimedOutRunIds.length} 个任务的浏览器清理超时，请检查 Runner 日志`,
+        )
+      } else {
+        ElMessage.success(`“${pipeline.name}”已提交强制停止请求`)
+      }
     } else {
       ElMessage.warning(`“${pipeline.name}”当前没有正在运行的任务`)
       const nextRunning = new Set(runningPipelineIds.value)

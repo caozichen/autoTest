@@ -1,11 +1,21 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { CircleCheck, Clock, DataAnalysis, RefreshRight, Search, View, Warning } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
+import {
+  CircleCheck,
+  Clock,
+  DataAnalysis,
+  RefreshRight,
+  Search,
+  VideoPause,
+  View,
+  Warning,
+} from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 
 import RunRecordDetailDrawer from '@/components/RunRecordDetailDrawer.vue'
 import type { RunRecord, RunRecordStatus } from '@/domain/run-record'
 import { services } from '@/services/container'
+import { pendingRunScriptCount } from '@/services/run-records/run-record-progress'
 
 const records = ref<RunRecord[]>([])
 const loading = ref(true)
@@ -17,6 +27,7 @@ const pageSize = 8
 const detailVisible = ref(false)
 const detailRecord = ref<RunRecord | null>(null)
 const detailLoadingId = ref('')
+const stoppingRecordIds = ref<Set<string>>(new Set())
 const recordsRefreshing = ref(false)
 const pollIntervalMs = 1_000
 let detailRequestSequence = 0
@@ -79,6 +90,32 @@ watch([keyword, statusFilter, environmentFilter], () => {
   currentPage.value = 1
 })
 
+function shouldReplaceRecord(current: RunRecord, incoming: RunRecord): boolean {
+  if (incoming.revision !== current.revision) return incoming.revision > current.revision
+  return Date.parse(incoming.updatedAt) >= Date.parse(current.updatedAt)
+}
+
+function applyRecord(incoming: RunRecord): void {
+  const index = records.value.findIndex((record) => record.id === incoming.id)
+  if (index >= 0 && shouldReplaceRecord(records.value[index]!, incoming)) {
+    records.value[index] = incoming
+  }
+  if (
+    detailRecord.value?.id === incoming.id
+    && shouldReplaceRecord(detailRecord.value, incoming)
+  ) {
+    detailRecord.value = incoming
+  }
+}
+
+function applyRecordList(incoming: RunRecord[]): void {
+  const currentById = new Map(records.value.map((record) => [record.id, record]))
+  records.value = incoming.map((record) => {
+    const current = currentById.get(record.id)
+    return current && !shouldReplaceRecord(current, record) ? current : record
+  })
+}
+
 async function loadRecords(showSuccess = false, silent = false): Promise<void> {
   if (recordsRefreshing.value) return
   recordsRefreshing.value = true
@@ -92,9 +129,9 @@ async function loadRecords(showSuccess = false, silent = false): Promise<void> {
       services.runRecords.list(),
       openDetailId ? services.runRecords.get(openDetailId) : Promise.resolve(null),
     ])
-    records.value = nextRecords
+    applyRecordList(nextRecords)
     if (openDetailId && detailVisible.value && detailRecord.value?.id === openDetailId && nextDetail) {
-      detailRecord.value = nextDetail
+      applyRecord(nextDetail)
     }
     if (showSuccess) ElMessage.success('运行记录已刷新')
   } catch {
@@ -117,12 +154,76 @@ async function openDetail(record: RunRecord): Promise<void> {
       await loadRecords()
       return
     }
-    detailRecord.value = detail
+    applyRecord(detail)
+    detailRecord.value = records.value.find((item) => item.id === detail.id) ?? detail
     detailVisible.value = true
   } catch {
     if (requestSequence === detailRequestSequence) ElMessage.error('运行记录详情加载失败')
   } finally {
     if (requestSequence === detailRequestSequence) detailLoadingId.value = ''
+  }
+}
+
+async function forceStopRecord(record: RunRecord): Promise<void> {
+  if (record.status !== 'running') return
+  try {
+    const result = await services.automationPipelineExecution.stopByRecordId(record.id)
+    const latest = await services.runRecords.get(record.id).catch(() => null)
+    if (latest) applyRecord(latest)
+
+    if (result.stopped) {
+      if (result.cleanupTimedOutRunIds?.length) {
+        ElMessage.warning(
+          `批次 ${record.displayId} 已中断，但 ${result.cleanupTimedOutRunIds.length} 个任务的浏览器清理超时，请检查 Runner 日志`,
+        )
+      } else {
+        ElMessage.success(result.runnerFound
+          ? `批次 ${record.displayId} 已强制停止`
+          : `批次 ${record.displayId} 已解除运行锁定`)
+      }
+    } else {
+      ElMessage.warning(`批次 ${record.displayId} 已经结束或不存在`)
+    }
+    void loadRecords(false, true)
+  } catch (error) {
+    const latest = await services.runRecords.get(record.id).catch(() => null)
+    if (latest) applyRecord(latest)
+    if (latest?.status === 'interrupted') {
+      ElMessage.success(`批次 ${record.displayId} 已强制停止`)
+    } else if (latest && latest.status !== 'running') {
+      ElMessage.warning(
+        `批次 ${record.displayId} 在停止请求处理期间已结束，当前状态：${statusMap[latest.status].label}`,
+      )
+    } else {
+      const message = error instanceof Error ? error.message : '未知错误'
+      const stateHint = latest ? '批次仍保持运行状态' : '未能确认批次当前状态'
+      ElMessage.error(`强制停止失败：${message}；${stateHint}`)
+    }
+    void loadRecords(false, true)
+  }
+}
+
+async function confirmForceStop(record: RunRecord): Promise<void> {
+  if (record.status !== 'running' || stoppingRecordIds.value.has(record.id)) return
+  stoppingRecordIds.value = new Set([...stoppingRecordIds.value, record.id])
+  try {
+    await ElMessageBox.confirm(
+      `批次 ${record.displayId} 将立即中断，未执行步骤不会继续运行。确定强制停止吗？`,
+      '强制停止运行批次',
+      {
+        confirmButtonText: '强制停止',
+        cancelButtonText: '取消',
+        confirmButtonClass: 'el-button--danger',
+        type: 'warning',
+      },
+    )
+    await forceStopRecord(record)
+  } catch {
+    // 用户取消确认时不发送停止请求。
+  } finally {
+    const next = new Set(stoppingRecordIds.value)
+    next.delete(record.id)
+    stoppingRecordIds.value = next
   }
 }
 
@@ -218,11 +319,12 @@ onBeforeUnmount(() => {
               <div
                 class="mini-distribution"
                 role="img"
-                :aria-label="`通过 ${scope.row.counts.passed}，失败 ${scope.row.counts.failed}，未执行 ${scope.row.counts.skipped}`"
+                :aria-label="`通过 ${scope.row.counts.passed}，失败 ${scope.row.counts.failed}，未执行 ${scope.row.counts.skipped}，待完成 ${pendingRunScriptCount(scope.row.counts)}`"
               >
                 <span v-if="scope.row.counts.passed" aria-hidden="true" class="is-passed" :style="{ flex: scope.row.counts.passed }" />
                 <span v-if="scope.row.counts.failed" aria-hidden="true" class="is-failed" :style="{ flex: scope.row.counts.failed }" />
                 <span v-if="scope.row.counts.skipped" aria-hidden="true" class="is-skipped" :style="{ flex: scope.row.counts.skipped }" />
+                <span v-if="pendingRunScriptCount(scope.row.counts)" aria-hidden="true" class="is-pending" :style="{ flex: pendingRunScriptCount(scope.row.counts) }" />
               </div>
               <span>失败 {{ scope.row.counts.failed }} · 未执行 {{ scope.row.counts.skipped }} · 通过率 {{ scope.row.analysis.passRate }}%</span>
             </div>
@@ -237,16 +339,29 @@ onBeforeUnmount(() => {
         <el-table-column label="开始时间" width="205">
           <template #default="scope"><time class="date-cell">{{ formatDateTime(scope.row.startedAt) }}</time></template>
         </el-table-column>
-        <el-table-column label="操作" width="116" fixed="right">
+        <el-table-column label="操作" width="152" fixed="right">
           <template #default="scope">
-            <el-button
-              text
-              type="primary"
-              :icon="View"
-              :loading="detailLoadingId === scope.row.id"
-              :disabled="Boolean(detailLoadingId) && detailLoadingId !== scope.row.id"
-              @click="openDetail(scope.row)"
-            >详情</el-button>
+            <div class="row-actions">
+              <el-tooltip v-if="scope.row.status === 'running'" content="强制停止" placement="top">
+                <el-button
+                  text
+                  type="danger"
+                  :icon="VideoPause"
+                  :loading="stoppingRecordIds.has(scope.row.id)"
+                  :disabled="stoppingRecordIds.has(scope.row.id)"
+                  aria-label="强制停止运行批次"
+                  @click="confirmForceStop(scope.row)"
+                />
+              </el-tooltip>
+              <el-button
+                text
+                type="primary"
+                :icon="View"
+                :loading="detailLoadingId === scope.row.id"
+                :disabled="Boolean(detailLoadingId) && detailLoadingId !== scope.row.id"
+                @click="openDetail(scope.row)"
+              >详情</el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -257,7 +372,12 @@ onBeforeUnmount(() => {
       </footer>
     </section>
 
-    <RunRecordDetailDrawer v-model="detailVisible" :record="detailRecord" />
+    <RunRecordDetailDrawer
+      v-model="detailVisible"
+      :record="detailRecord"
+      :stopping="Boolean(detailRecord && stoppingRecordIds.has(detailRecord.id))"
+      @force-stop="confirmForceStop"
+    />
   </div>
 </template>
 
@@ -483,6 +603,12 @@ onBeforeUnmount(() => {
   width: 100%;
 }
 
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
 .record-identity {
   display: block;
   width: 100%;
@@ -593,6 +719,10 @@ onBeforeUnmount(() => {
   background: var(--color-text-muted, #94a3b8);
 }
 
+.mini-distribution .is-pending {
+  background: var(--color-border, #e5ebf3);
+}
+
 .duration-cell,
 .date-cell {
   color: var(--color-text-secondary, #64748b);
@@ -655,6 +785,15 @@ onBeforeUnmount(() => {
 :deep(.el-table .el-button--text:hover) {
   color: var(--color-primary-hover, #1d4ed8);
   background: var(--color-primary-soft, #eff6ff);
+}
+
+:deep(.el-table .el-button--text.el-button--danger) {
+  color: var(--color-danger, #dc2626);
+}
+
+:deep(.el-table .el-button--text.el-button--danger:hover) {
+  color: #b91c1c;
+  background: #fef2f2;
 }
 
 :deep(.el-tag) {

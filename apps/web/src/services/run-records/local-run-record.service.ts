@@ -14,7 +14,13 @@ import type {
   UpdateRunScriptProgressDraft,
 } from '@/domain/run-record'
 import type { ScriptAssertionResult, ScriptAssertionStatus } from '@/domain/assertion'
-import type { ScriptApiResponse } from '@/domain/script'
+import type {
+  ScriptApiResponse,
+  ScriptArtifact,
+  ScriptNetworkCategorySummary,
+  ScriptNetworkSummary,
+  ScriptResourceResponse,
+} from '@/domain/script'
 import type { RunRecordService } from './run-record-service'
 
 const STORAGE_KEY = 'autotest.run-records.v1'
@@ -28,11 +34,53 @@ const SCRIPT_STATUS_VALUES: RunScriptRecord['status'][] = ['queued', 'running', 
 const LOG_LEVEL_VALUES: RunRecordLogLevel[] = ['info', 'success', 'warning', 'error']
 const LOG_SCOPE_VALUES: RunRecordLog['scope'][] = ['batch', 'login', 'runner', 'script']
 const ASSERTION_STATUS_VALUES: ScriptAssertionStatus[] = ['passed', 'failed']
+const ARTIFACT_SCOPE_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$/
+const ARTIFACT_TYPE_PATTERN = /^[a-zA-Z][a-zA-Z0-9_-]{0,99}$/
+const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f-\u009f]/
 
 type IdFactory = () => string
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object'
+}
+
+function isAbsoluteArtifactPath(value: string): boolean {
+  return value.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(value) || value.startsWith('\\\\')
+}
+
+function isSafeArtifactRelativePath(value: string): boolean {
+  if (!value || value.length > 4_096 || CONTROL_CHARACTER_PATTERN.test(value)) return false
+  if (value.includes('\\') || value.startsWith('/') || /^[a-zA-Z]:/.test(value)) return false
+  return value.split('/').every((segment) => segment && segment !== '.' && segment !== '..')
+}
+
+function normalizeStoredArtifact(value: unknown): ScriptArtifact | null {
+  if (!isRecord(value)) return null
+  if (
+    typeof value.executionId !== 'string' || !ARTIFACT_SCOPE_ID_PATTERN.test(value.executionId) ||
+    typeof value.stepId !== 'string' || !ARTIFACT_SCOPE_ID_PATTERN.test(value.stepId) ||
+    typeof value.attemptId !== 'string' || !ARTIFACT_SCOPE_ID_PATTERN.test(value.attemptId) ||
+    typeof value.absolutePath !== 'string' || !value.absolutePath || value.absolutePath.length > 4_096 ||
+    CONTROL_CHARACTER_PATTERN.test(value.absolutePath) || !isAbsoluteArtifactPath(value.absolutePath) ||
+    typeof value.relativePath !== 'string' || !isSafeArtifactRelativePath(value.relativePath) ||
+    typeof value.type !== 'string' || !ARTIFACT_TYPE_PATTERN.test(value.type) ||
+    typeof value.mimeType !== 'string' || !value.mimeType.trim() || value.mimeType.length > 200 ||
+    CONTROL_CHARACTER_PATTERN.test(value.mimeType) ||
+    typeof value.sizeBytes !== 'number' || !Number.isSafeInteger(value.sizeBytes) || value.sizeBytes < 0 ||
+    typeof value.createdAt !== 'string' || !Number.isFinite(Date.parse(value.createdAt))
+  ) return null
+
+  return {
+    executionId: value.executionId,
+    stepId: value.stepId,
+    attemptId: value.attemptId,
+    absolutePath: value.absolutePath,
+    relativePath: value.relativePath,
+    type: value.type,
+    mimeType: value.mimeType.trim(),
+    sizeBytes: value.sizeBytes,
+    createdAt: new Date(value.createdAt).toISOString(),
+  }
 }
 
 function normalizeStoredLog(value: unknown): RunRecordLog | null {
@@ -124,6 +172,109 @@ function normalizeStoredApiResponse(value: unknown): ScriptApiResponse | null {
       ? { responseBody: structuredClone(value.responseBody) }
       : {}),
     ...(typeof value.error === 'string' ? { error: value.error } : {}),
+    ...(typeof value.bodyReadError === 'string' ? { bodyReadError: value.bodyReadError } : {}),
+    ...(typeof value.phase === 'string' ? { phase: value.phase } : {}),
+    ...(typeof value.pageUrl === 'string' ? { pageUrl: value.pageUrl } : {}),
+    ...(typeof value.frameUrl === 'string' ? { frameUrl: value.frameUrl } : {}),
+    ...(typeof value.mimeType === 'string' ? { mimeType: value.mimeType } : {}),
+    ...(typeof value.failureKind === 'string' && value.failureKind
+      ? { failureKind: value.failureKind }
+      : {}),
+    ...(typeof value.isFirstParty === 'boolean' ? { isFirstParty: value.isFirstParty } : {}),
+    ...(typeof value.ignored === 'boolean' ? { ignored: value.ignored } : {}),
+    ...(Array.isArray(value.diagnostics) && value.diagnostics.every((item) => typeof item === 'string')
+      ? { diagnostics: [...value.diagnostics] as string[] }
+      : {}),
+    ...(typeof value.streaming === 'boolean' ? { streaming: value.streaming } : {}),
+    ...(value.warning === true ? { warning: true } : {}),
+    ...(value.incomplete === true ? { incomplete: true } : {}),
+  }
+}
+
+function normalizeStoredResourceResponse(value: unknown): ScriptResourceResponse | null {
+  if (!isRecord(value)) return null
+  if (
+    typeof value.sequence !== 'number' ||
+    !Number.isInteger(value.sequence) ||
+    value.sequence < 1 ||
+    typeof value.timestamp !== 'string' ||
+    !Number.isFinite(new Date(value.timestamp).getTime()) ||
+    typeof value.name !== 'string' ||
+    typeof value.url !== 'string' ||
+    typeof value.resourceType !== 'string' ||
+    !value.resourceType ||
+    typeof value.status !== 'number' ||
+    !Number.isInteger(value.status) ||
+    value.status < 0 ||
+    value.status > 599 ||
+    typeof value.ok !== 'boolean' ||
+    typeof value.durationMs !== 'number' ||
+    !Number.isFinite(value.durationMs) ||
+    value.durationMs < 0
+  ) return null
+
+  return {
+    sequence: value.sequence,
+    timestamp: value.timestamp,
+    name: value.name,
+    method: typeof value.method === 'string' && value.method ? value.method : 'GET',
+    url: value.url,
+    resourceType: value.resourceType,
+    status: value.status,
+    ok: value.ok,
+    durationMs: value.durationMs,
+    ...(typeof value.phase === 'string' ? { phase: value.phase } : {}),
+    ...(typeof value.pageUrl === 'string' ? { pageUrl: value.pageUrl } : {}),
+    ...(typeof value.frameUrl === 'string' ? { frameUrl: value.frameUrl } : {}),
+    ...(typeof value.mimeType === 'string' ? { mimeType: value.mimeType } : {}),
+    ...(typeof value.error === 'string' ? { error: value.error } : {}),
+    ...(typeof value.failureKind === 'string' && value.failureKind
+      ? { failureKind: value.failureKind }
+      : {}),
+    ...(typeof value.fromCache === 'boolean' ? { fromCache: value.fromCache } : {}),
+    ...(typeof value.fromServiceWorker === 'boolean'
+      ? { fromServiceWorker: value.fromServiceWorker }
+      : {}),
+    ...(typeof value.isFirstParty === 'boolean' ? { isFirstParty: value.isFirstParty } : {}),
+    ...(typeof value.ignored === 'boolean' ? { ignored: value.ignored } : {}),
+    ...(Array.isArray(value.diagnostics) && value.diagnostics.every((item) => typeof item === 'string')
+      ? { diagnostics: [...value.diagnostics] as string[] }
+      : {}),
+    ...(typeof value.streaming === 'boolean' ? { streaming: value.streaming } : {}),
+    ...(value.warning === true ? { warning: true } : {}),
+    ...(value.incomplete === true ? { incomplete: true } : {}),
+  }
+}
+
+function emptyNetworkCategorySummary(): ScriptNetworkCategorySummary {
+  return { observed: 0, recorded: 0, dropped: 0, passed: 0, failed: 0, warnings: 0 }
+}
+
+function emptyNetworkSummary(): ScriptNetworkSummary {
+  return { api: emptyNetworkCategorySummary(), resources: emptyNetworkCategorySummary() }
+}
+
+function normalizeStoredNetworkCategorySummary(value: unknown): ScriptNetworkCategorySummary {
+  if (!isRecord(value)) return emptyNetworkCategorySummary()
+  const readCount = (key: keyof ScriptNetworkCategorySummary): number => {
+    const count = value[key]
+    return typeof count === 'number' && Number.isSafeInteger(count) && count >= 0 ? count : 0
+  }
+  return {
+    observed: readCount('observed'),
+    recorded: readCount('recorded'),
+    dropped: readCount('dropped'),
+    passed: readCount('passed'),
+    failed: readCount('failed'),
+    warnings: readCount('warnings'),
+  }
+}
+
+function normalizeStoredNetworkSummary(value: unknown): ScriptNetworkSummary {
+  if (!isRecord(value)) return emptyNetworkSummary()
+  return {
+    api: normalizeStoredNetworkCategorySummary(value.api),
+    resources: normalizeStoredNetworkCategorySummary(value.resources),
   }
 }
 
@@ -155,6 +306,16 @@ function normalizeStoredScript(value: unknown): RunScriptRecord | null {
         .map(normalizeStoredApiResponse)
         .filter((response): response is ScriptApiResponse => Boolean(response))
     : []
+  const resourceResponses = Array.isArray(value.resourceResponses)
+    ? value.resourceResponses
+        .map(normalizeStoredResourceResponse)
+        .filter((response): response is ScriptResourceResponse => Boolean(response))
+    : []
+  const artifacts = Array.isArray(value.artifacts)
+    ? value.artifacts
+        .map(normalizeStoredArtifact)
+        .filter((artifact): artifact is ScriptArtifact => Boolean(artifact))
+    : []
   return {
     recordId: value.recordId,
     id: value.id,
@@ -167,6 +328,9 @@ function normalizeStoredScript(value: unknown): RunScriptRecord | null {
     logs,
     assertions,
     apiResponses,
+    resourceResponses,
+    networkSummary: normalizeStoredNetworkSummary(value.networkSummary),
+    artifacts,
     ...(isRecord(value.output) ? { output: structuredClone(value.output) } : {}),
     ...(typeof value.error === 'string' ? { error: value.error } : {}),
   }
@@ -385,6 +549,9 @@ export class LocalRunRecordService implements RunRecordService {
       logs: [],
       assertions: [],
       apiResponses: [],
+      resourceResponses: [],
+      networkSummary: emptyNetworkSummary(),
+      artifacts: [],
     }))
     const logs: RunRecordLog[] = [{
       id: this.idFactory(),
@@ -628,18 +795,47 @@ export class LocalRunRecordService implements RunRecordService {
       module: replaceSecrets(assertion.module, secretValues),
       ...(assertion.error ? { error: replaceSecrets(assertion.error, secretValues) } : {}),
     }))
-    const apiResponses = (completion.apiResponses ?? []).map((response) => ({
-      ...response,
-      name: replaceSecrets(response.name, secretValues),
-      url: replaceSecrets(response.url, secretValues),
-      ...(Object.prototype.hasOwnProperty.call(response, 'requestBody')
-        ? { requestBody: redactValue(response.requestBody, secretValues) }
-        : {}),
-      ...(Object.prototype.hasOwnProperty.call(response, 'responseBody')
-        ? { responseBody: redactValue(response.responseBody, secretValues) }
-        : {}),
-      ...(response.error ? { error: replaceSecrets(response.error, secretValues) } : {}),
-    }))
+    const apiResponses = completion.apiResponses === undefined
+      ? script.apiResponses
+      : completion.apiResponses.map((response) => ({
+          ...response,
+          name: replaceSecrets(response.name, secretValues),
+          url: replaceSecrets(response.url, secretValues),
+          ...(response.pageUrl ? { pageUrl: replaceSecrets(response.pageUrl, secretValues) } : {}),
+          ...(response.frameUrl ? { frameUrl: replaceSecrets(response.frameUrl, secretValues) } : {}),
+          ...(Object.prototype.hasOwnProperty.call(response, 'requestBody')
+            ? { requestBody: redactValue(response.requestBody, secretValues) }
+            : {}),
+          ...(Object.prototype.hasOwnProperty.call(response, 'responseBody')
+            ? { responseBody: redactValue(response.responseBody, secretValues) }
+            : {}),
+          ...(response.error ? { error: replaceSecrets(response.error, secretValues) } : {}),
+          ...(response.bodyReadError
+            ? { bodyReadError: replaceSecrets(response.bodyReadError, secretValues) }
+            : {}),
+          ...(response.diagnostics
+            ? { diagnostics: response.diagnostics.map((item) => replaceSecrets(item, secretValues)) }
+            : {}),
+        }))
+    const resourceResponses = completion.resourceResponses === undefined
+      ? script.resourceResponses
+      : completion.resourceResponses.map((response) => ({
+          ...response,
+          name: replaceSecrets(response.name, secretValues),
+          url: replaceSecrets(response.url, secretValues),
+          ...(response.pageUrl ? { pageUrl: replaceSecrets(response.pageUrl, secretValues) } : {}),
+          ...(response.frameUrl ? { frameUrl: replaceSecrets(response.frameUrl, secretValues) } : {}),
+          ...(response.error ? { error: replaceSecrets(response.error, secretValues) } : {}),
+          ...(response.diagnostics
+            ? { diagnostics: response.diagnostics.map((item) => replaceSecrets(item, secretValues)) }
+            : {}),
+        }))
+    const networkSummary = completion.networkSummary === undefined
+      ? script.networkSummary
+      : structuredClone(completion.networkSummary)
+    const artifacts = completion.artifacts === undefined
+      ? script.artifacts
+      : structuredClone(completion.artifacts)
     return {
       ...script,
       status,
@@ -647,6 +843,9 @@ export class LocalRunRecordService implements RunRecordService {
       logs,
       assertions,
       apiResponses,
+      resourceResponses,
+      networkSummary,
+      artifacts,
       ...(output ? { output } : {}),
       ...(error ? { error } : {}),
     }

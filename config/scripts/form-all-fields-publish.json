@@ -16,12 +16,6 @@
       "secret": false
     },
     {
-      "id": "published-form-code",
-      "variableName": "FORM_CODE",
-      "responsePath": "formCode",
-      "secret": false
-    },
-    {
       "id": "published-form-contract",
       "variableName": "FORM_CONTRACT",
       "responsePath": "formContract",

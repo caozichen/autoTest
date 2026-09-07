@@ -3,6 +3,7 @@ import type { AutomationScript, ScriptDraft, ScriptRunContext } from '@/domain/s
 export interface ScriptStopResult {
   runnerFound: boolean
   cancelledRunIds: string[]
+  cleanupTimedOutRunIds?: string[]
 }
 
 export type ScriptRunProgressHandler = (script: AutomationScript) => void | Promise<void>
@@ -18,4 +19,5 @@ export interface ScriptService {
     onProgress?: ScriptRunProgressHandler,
   ): Promise<AutomationScript[]>
   stop(id: string): Promise<ScriptStopResult>
+  stopExecution(executionId: string): Promise<ScriptStopResult>
 }

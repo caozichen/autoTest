@@ -114,6 +114,18 @@ function success(output?: Record<string, unknown>): ScriptRunResult {
   }
 }
 
+const formArtifact = {
+  executionId: 'run-record-0001',
+  stepId: 'create',
+  attemptId: 'runner-run-0001',
+  absolutePath: '/workspace/outputs/artifacts/run-record-0001/create/runner-run-0001/form.json',
+  relativePath: 'form.json',
+  type: 'fixture',
+  mimeType: 'application/json',
+  sizeBytes: 256,
+  createdAt: '2026-08-12T10:00:01.000Z',
+}
+
 function failed(message: string): ScriptRunResult {
   return {
     ok: false,
@@ -122,6 +134,8 @@ function failed(message: string): ScriptRunResult {
     error: message,
   }
 }
+
+type ScriptExecutionOutcome = ScriptRunResult | Error
 
 function cancelled(): ScriptRunResult {
   return {
@@ -182,7 +196,7 @@ function loginService(result = loginResult()): EnvironmentLoginService {
 }
 
 function fakeScriptService(
-  results: Record<string, ScriptRunResult>,
+  results: Record<string, ScriptExecutionOutcome>,
   contexts: Array<{ id: string; context: ScriptRunContext }>,
   responseBindings: Record<string, ScriptResponseVariableBinding[]> = {},
 ): ScriptService {
@@ -193,19 +207,21 @@ function fakeScriptService(
     update: vi.fn(async () => { throw new Error('not implemented') }),
     remove: vi.fn(async () => undefined),
     stop: vi.fn(async () => ({ runnerFound: false, cancelledRunIds: [] })),
+    stopExecution: vi.fn(async () => ({ runnerFound: false, cancelledRunIds: [] })),
     run: vi.fn(async (ids, context) => {
       const id = ids[0]
       if (!id) throw new Error('missing script id')
       contexts.push({ id, context: structuredClone(context) })
       const result = results[id]
       if (!result) throw new Error(`missing result for ${id}`)
+      if (result instanceof Error) throw result
       return [script(id, result, responseBindings[id])]
     }),
   }
 }
 
 function executionFixture(
-  results: Record<string, ScriptRunResult>,
+  results: Record<string, ScriptExecutionOutcome>,
   login = loginResult(),
   responseBindings: Record<string, ScriptResponseVariableBinding[]> = {},
 ) {
@@ -239,10 +255,50 @@ function seedRuntimeVariable(runtimeVariables: SessionRuntimeVariableService): v
   })
 }
 
+async function startStoredPipelineRecord(fixture: ReturnType<typeof executionFixture>) {
+  const target = pipeline()
+  const value = environment()
+  const record = await fixture.runRecords.start({
+    name: `自动化配置 · ${target.name}`,
+    environment: {
+      id: value.id,
+      name: value.name,
+      code: value.code,
+      apiBaseUrl: value.apiBaseUrl,
+    },
+    scripts: target.steps.map(({ scriptId }) => {
+      const snapshot = script(scriptId)
+      return {
+        id: snapshot.id,
+        name: snapshot.name,
+        directory: snapshot.directory,
+        entryFile: snapshot.entryFile,
+        tags: snapshot.tags,
+      }
+    }),
+  })
+  await fixture.runRecords.updateScriptProgress(record.id, {
+    scriptId: 'create',
+    status: 'passed',
+    durationMs: 100,
+    logs: [],
+    output: { data: { form: { id: '123', code: 'FORM-001', contract: {} } } },
+  })
+  await fixture.runRecords.updateScriptProgress(record.id, {
+    scriptId: 'publish',
+    status: 'running',
+    durationMs: 50,
+    logs: [],
+  })
+  return (await fixture.runRecords.get(record.id))!
+}
+
 describe('LocalAutomationPipelineExecutionService', () => {
   it('logs in once, runs steps in order and injects mapped output variables', async () => {
+    const createResult = success({ data: { form: { id: 123, code: 'FORM-001', contract: { fieldKeys: { username: 'username_dynamic' } } } } })
+    createResult.artifacts = [formArtifact]
     const fixture = executionFixture({
-      create: success({ data: { form: { id: 123, code: 'FORM-001', contract: { fieldKeys: { username: 'username_dynamic' } } } } }),
+      create: createResult,
       publish: success({ status: 'published' }),
       verify: success({ visible: true }),
     })
@@ -255,6 +311,7 @@ describe('LocalAutomationPipelineExecutionService', () => {
       counts: { total: 3, passed: 3, failed: 0, skipped: 0 },
     })
     expect(fixture.contexts.map((item) => item.id)).toEqual(['create', 'publish', 'verify'])
+    expect(fixture.contexts.every((item) => item.context.executionId === record.id)).toBe(true)
     expect(fixture.contexts[1]?.context.variables).toMatchObject({
       AUTH_TOKEN: 'runtime-token',
       TEAM_ID: '10000',
@@ -265,6 +322,7 @@ describe('LocalAutomationPipelineExecutionService', () => {
       FORM_CODE: 'FORM-001',
       FORM_CONTRACT: '{"fieldKeys":{"username":"username_dynamic"}}',
     })
+    expect(record.scripts[0]?.artifacts).toEqual([formArtifact])
     expect(fixture.runtimeVariables.list()).toEqual([])
   })
 
@@ -339,10 +397,10 @@ describe('LocalAutomationPipelineExecutionService', () => {
     expect(fixture.runtimeVariables.list()).toEqual([])
   })
 
-  it('stops after a failed step and marks remaining scripts as skipped', async () => {
+  it('stops after an unmarked failed result and marks remaining scripts as skipped', async () => {
     const fixture = executionFixture({
       create: success({ data: { form: { id: '123', code: 'FORM-001' } } }),
-      publish: failed('publish assertion failed'),
+      publish: failed('publish execution failed'),
       verify: success(),
     })
 
@@ -354,11 +412,243 @@ describe('LocalAutomationPipelineExecutionService', () => {
       counts: { total: 3, passed: 1, failed: 1, skipped: 1 },
       scripts: [
         { id: 'create', status: 'passed' },
-        { id: 'publish', status: 'failed', error: 'publish assertion failed' },
+        { id: 'publish', status: 'failed', error: 'publish execution failed' },
         { id: 'verify', status: 'skipped', error: '前序步骤失败，未执行' },
       ],
     })
     expect(fixture.runtimeVariables.list()).toEqual([])
+  })
+
+  it('records a network assertion failure and continues when Runner explicitly allows it', async () => {
+    const fixture = executionFixture({
+      create: {
+        ...failed('资源加载健康检查失败'),
+        continuePipeline: true,
+        output: { data: { form: { id: '123', code: 'FORM-001', contract: { version: 1 } } } },
+      },
+      publish: success({ status: 'published' }),
+      verify: success({ visible: true }),
+    })
+
+    const record = await fixture.service.run(pipeline())
+
+    expect(fixture.contexts.map((item) => item.id)).toEqual(['create', 'publish', 'verify'])
+    expect(fixture.contexts[1]?.context.variables).toMatchObject({ FORM_ID: '123' })
+    expect(fixture.contexts[2]?.context.variables).toMatchObject({
+      FORM_CODE: 'FORM-001',
+      FORM_CONTRACT: '{"version":1}',
+    })
+    expect(record).toMatchObject({
+      status: 'partial',
+      counts: { total: 3, passed: 2, failed: 1, skipped: 0 },
+      scripts: [
+        { id: 'create', status: 'failed', error: '资源加载健康检查失败' },
+        { id: 'publish', status: 'passed' },
+        { id: 'verify', status: 'passed' },
+      ],
+    })
+  })
+
+  it('records a business assertion failure and continues when Runner explicitly allows it', async () => {
+    const fixture = executionFixture({
+      create: success({
+        data: { form: { id: '123', code: 'FORM-001', contract: { version: 1 } } },
+      }),
+      publish: {
+        ...failed('表单提交业务断言失败'),
+        continuePipeline: true,
+      },
+      verify: success({ visible: true }),
+    })
+
+    const record = await fixture.service.run(pipeline())
+
+    expect(fixture.contexts.map((item) => item.id)).toEqual(['create', 'publish', 'verify'])
+    expect(record).toMatchObject({
+      status: 'partial',
+      counts: { total: 3, passed: 2, failed: 1, skipped: 0 },
+      scripts: [
+        { id: 'create', status: 'passed' },
+        { id: 'publish', status: 'failed', error: '表单提交业务断言失败' },
+        { id: 'verify', status: 'passed' },
+      ],
+    })
+  })
+
+  it('continues through consecutive assertion failures without skipping the final step', async () => {
+    const fixture = executionFixture({
+      create: {
+        ...failed('创建步骤业务断言失败'),
+        continuePipeline: true,
+        output: {
+          data: { form: { id: '123', code: 'FORM-001', contract: { version: 1 } } },
+        },
+      },
+      publish: {
+        ...failed('发布步骤接口断言失败'),
+        continuePipeline: true,
+      },
+      verify: success({ visible: true }),
+    })
+
+    const record = await fixture.service.run(pipeline())
+
+    expect(fixture.contexts.map((item) => item.id)).toEqual(['create', 'publish', 'verify'])
+    expect(fixture.contexts[1]?.context.variables).toMatchObject({ FORM_ID: '123' })
+    expect(fixture.contexts[2]?.context.variables).toMatchObject({ FORM_CODE: 'FORM-001' })
+    expect(record).toMatchObject({
+      status: 'partial',
+      counts: { total: 3, passed: 1, failed: 2, skipped: 0 },
+      scripts: [
+        { id: 'create', status: 'failed', error: '创建步骤业务断言失败' },
+        { id: 'publish', status: 'failed', error: '发布步骤接口断言失败' },
+        { id: 'verify', status: 'passed' },
+      ],
+    })
+  })
+
+  it('stops after a timed-out step even when the Runner also marks it as continuable', async () => {
+    const fixture = executionFixture({
+      create: {
+        ...failed('脚本执行超过 300000 ms，已自动终止'),
+        timedOut: true,
+        continuePipeline: true,
+        output: {
+          data: { form: { id: '123', code: 'FORM-001', contract: { version: 1 } } },
+        },
+      },
+      publish: success({ status: 'published' }),
+      verify: success({ visible: true }),
+    })
+
+    const record = await fixture.service.run(pipeline())
+
+    expect(fixture.contexts.map((item) => item.id)).toEqual(['create'])
+    expect(record).toMatchObject({
+      status: 'failed',
+      counts: { total: 3, passed: 0, failed: 1, skipped: 2 },
+      scripts: [
+        { id: 'create', status: 'failed', error: '脚本执行超过 300000 ms，已自动终止' },
+        { id: 'publish', status: 'skipped' },
+        { id: 'verify', status: 'skipped' },
+      ],
+    })
+  })
+
+  it('stops at the next mapped step when a continuable assertion failure omits its required output', async () => {
+    const fixture = executionFixture({
+      create: {
+        ...failed('创建步骤业务断言失败'),
+        continuePipeline: true,
+        output: { data: { form: {} } },
+      },
+      publish: success({ status: 'published' }),
+      verify: success({ visible: true }),
+    })
+
+    const record = await fixture.service.run(pipeline())
+
+    expect(fixture.contexts.map((item) => item.id)).toEqual(['create'])
+    expect(record).toMatchObject({
+      status: 'failed',
+      counts: { total: 3, passed: 0, failed: 2, skipped: 1 },
+      scripts: [
+        { id: 'create', status: 'failed', error: '创建步骤业务断言失败' },
+        { id: 'publish', status: 'failed', error: expect.stringContaining('data.form.id') },
+        { id: 'verify', status: 'skipped' },
+      ],
+    })
+  })
+
+  it('clears assertion continuation when applying a response variable throws', async () => {
+    const fixture = executionFixture({
+      create: {
+        ...failed('创建步骤业务断言失败'),
+        continuePipeline: true,
+        output: { data: { form: { id: '123', code: 'FORM-001', contract: {} } } },
+      },
+      publish: success({ status: 'published' }),
+      verify: success({ visible: true }),
+    }, loginResult(), {
+      create: [{
+        id: 'required-form-id',
+        variableName: 'AUTO_FORM_ID',
+        responsePath: 'data.form.id',
+        secret: false,
+      }],
+    })
+    const upsert = fixture.runtimeVariables.upsert.bind(fixture.runtimeVariables)
+    vi.spyOn(fixture.runtimeVariables, 'upsert').mockImplementation((draft) => {
+      if (draft.key === 'AUTO_FORM_ID') throw new Error('响应变量配置写入失败')
+      return upsert(draft)
+    })
+
+    const record = await fixture.service.run(pipeline())
+
+    expect(fixture.contexts.map((item) => item.id)).toEqual(['create'])
+    expect(record).toMatchObject({
+      status: 'failed',
+      counts: { total: 3, passed: 0, failed: 1, skipped: 2 },
+      scripts: [
+        { id: 'create', status: 'failed', error: '响应变量配置写入失败' },
+        { id: 'publish', status: 'skipped' },
+        { id: 'verify', status: 'skipped' },
+      ],
+    })
+  })
+
+  it('stops before later steps when a configured response variable path is missing', async () => {
+    const fixture = executionFixture({
+      create: success({ data: { form: { code: 'FORM-001' } } }),
+      publish: success({ status: 'published' }),
+      verify: success({ visible: true }),
+    }, loginResult(), {
+      create: [{
+        id: 'required-form-id',
+        variableName: 'AUTO_FORM_ID',
+        responsePath: 'data.form.id',
+        secret: false,
+      }],
+    })
+
+    const record = await fixture.service.run(pipeline())
+
+    expect(fixture.contexts.map((item) => item.id)).toEqual(['create'])
+    expect(record).toMatchObject({
+      status: 'failed',
+      counts: { total: 3, passed: 0, failed: 1, skipped: 2 },
+      scripts: [
+        {
+          id: 'create',
+          status: 'failed',
+          error: expect.stringContaining('AUTO_FORM_ID (data.form.id)'),
+        },
+        { id: 'publish', status: 'skipped' },
+        { id: 'verify', status: 'skipped' },
+      ],
+    })
+    expect(fixture.runtimeVariables.get('AUTO_FORM_ID')).toBeNull()
+  })
+
+  it('stops after a script execution exception and marks remaining scripts as skipped', async () => {
+    const fixture = executionFixture({
+      create: success({ data: { form: { id: '123', code: 'FORM-001' } } }),
+      publish: new Error('Runner connection closed unexpectedly'),
+      verify: success(),
+    })
+
+    const record = await fixture.service.run(pipeline())
+
+    expect(fixture.contexts.map((item) => item.id)).toEqual(['create', 'publish'])
+    expect(record).toMatchObject({
+      status: 'partial',
+      counts: { total: 3, passed: 1, failed: 1, skipped: 1 },
+      scripts: [
+        { id: 'create', status: 'passed' },
+        { id: 'publish', status: 'failed', error: 'Runner connection closed unexpectedly' },
+        { id: 'verify', status: 'skipped', error: '前序步骤失败，未执行' },
+      ],
+    })
   })
 
   it('records a login failure and does not start scripts', async () => {
@@ -434,6 +724,9 @@ describe('LocalAutomationPipelineExecutionService', () => {
     const fixture = executionFixture({})
     const pendingLogin = deferred<EnvironmentLoginResult>()
     vi.mocked(fixture.environmentLogin.login).mockImplementation(() => pendingLogin.promise)
+    vi.mocked(fixture.scripts.stopExecution).mockRejectedValue(
+      new Error('Runner should not be needed before a script starts'),
+    )
     const target = pipeline()
 
     const task = fixture.service.run(target)
@@ -443,7 +736,10 @@ describe('LocalAutomationPipelineExecutionService', () => {
     pendingLogin.resolve(loginResult())
     const record = await task
 
-    expect(stopResult.stopped).toBe(true)
+    expect(stopResult).toEqual({ stopped: true, runnerFound: false, cancelledRunIds: [] })
+    expect(fixture.scripts.stopExecution).not.toHaveBeenCalled()
+    expect(fixture.scripts.stop).not.toHaveBeenCalled()
+    expect(fixture.scripts.run).not.toHaveBeenCalled()
     expect(fixture.contexts).toEqual([])
     expect(record.status).toBe('interrupted')
   })
@@ -461,23 +757,28 @@ describe('LocalAutomationPipelineExecutionService', () => {
       fixture.contexts.push({ id, context: structuredClone(context) })
       return [script(id, await scriptResult.promise)]
     })
-    vi.mocked(fixture.scripts.stop).mockResolvedValue({
+    vi.mocked(fixture.scripts.stopExecution).mockResolvedValue({
       runnerFound: true,
       cancelledRunIds: ['runner-run-1'],
+      cleanupTimedOutRunIds: ['runner-run-1'],
     })
     const target = pipeline()
 
     const task = fixture.service.run(target)
     await vi.waitFor(() => expect(fixture.contexts.map((item) => item.id)).toEqual(['create']))
+    const activeRecord = (await fixture.runRecords.list())[0]!
     const stopResult = await fixture.service.stop(target.id)
     scriptResult.resolve(cancelled())
     const record = await task
 
-    expect(fixture.scripts.stop).toHaveBeenCalledWith('create')
+    expect(fixture.scripts.stopExecution).toHaveBeenCalledOnce()
+    expect(fixture.scripts.stopExecution).toHaveBeenCalledWith(activeRecord.id)
+    expect(fixture.scripts.stop).not.toHaveBeenCalled()
     expect(stopResult).toEqual({
       stopped: true,
       runnerFound: true,
       cancelledRunIds: ['runner-run-1'],
+      cleanupTimedOutRunIds: ['runner-run-1'],
     })
     expect(fixture.contexts.map((item) => item.id)).toEqual(['create'])
     expect(record).toMatchObject({
@@ -489,6 +790,134 @@ describe('LocalAutomationPipelineExecutionService', () => {
       ],
     })
     expect(fixture.runtimeVariables.list()).toEqual([])
+  })
+
+  it('stops an active pipeline by record id and interrupts only its current script', async () => {
+    const fixture = executionFixture({
+      create: success(),
+      publish: success(),
+      verify: success(),
+    })
+    const pendingScript = deferred<AutomationScript[]>()
+    vi.mocked(fixture.scripts.run).mockImplementation(async (ids, context) => {
+      const id = ids[0]
+      if (!id) throw new Error('missing script id')
+      fixture.contexts.push({ id, context: structuredClone(context) })
+      return pendingScript.promise
+    })
+    vi.mocked(fixture.scripts.stopExecution).mockResolvedValue({
+      runnerFound: true,
+      cancelledRunIds: ['runner-run-active'],
+    })
+    const interrupt = vi.spyOn(fixture.runRecords, 'interrupt')
+
+    const runTask = fixture.service.run(pipeline())
+    await vi.waitFor(() => expect(fixture.contexts.map(({ id }) => id)).toEqual(['create']))
+    const activeRecord = (await fixture.runRecords.list())[0]!
+
+    await expect(fixture.service.stopByRecordId(activeRecord.id)).resolves.toEqual({
+      stopped: true,
+      runnerFound: true,
+      cancelledRunIds: ['runner-run-active'],
+    })
+    pendingScript.resolve([script('create', cancelled())])
+    const completed = await runTask
+
+    expect(fixture.scripts.stopExecution).toHaveBeenCalledOnce()
+    expect(fixture.scripts.stopExecution).toHaveBeenCalledWith(activeRecord.id)
+    expect(fixture.scripts.stop).not.toHaveBeenCalled()
+    expect(interrupt).toHaveBeenCalledOnce()
+    expect(completed.status).toBe('interrupted')
+    expect((await fixture.runRecords.get(activeRecord.id))?.status).toBe('interrupted')
+  })
+
+  it('stops a stored execution by record id after an application restart', async () => {
+    const fixture = executionFixture({})
+    const storedRecord = await startStoredPipelineRecord(fixture)
+    vi.mocked(fixture.scripts.stopExecution).mockResolvedValue({
+      runnerFound: true,
+      cancelledRunIds: ['runner-run-restored'],
+      cleanupTimedOutRunIds: ['runner-run-restored'],
+    })
+    const interrupt = vi.spyOn(fixture.runRecords, 'interrupt')
+
+    await expect(fixture.service.stopByRecordId(storedRecord.id)).resolves.toEqual({
+      stopped: true,
+      runnerFound: true,
+      cancelledRunIds: ['runner-run-restored'],
+      cleanupTimedOutRunIds: ['runner-run-restored'],
+    })
+
+    expect(fixture.scripts.stopExecution).toHaveBeenCalledOnce()
+    expect(fixture.scripts.stopExecution).toHaveBeenCalledWith(storedRecord.id)
+    expect(fixture.scripts.stop).not.toHaveBeenCalled()
+    expect(interrupt).toHaveBeenCalledOnce()
+    expect(interrupt).toHaveBeenCalledWith(
+      storedRecord.id,
+      `用户已从运行记录强制停止批次 ${storedRecord.displayId}`,
+    )
+    expect((await fixture.runRecords.get(storedRecord.id))?.status).toBe('interrupted')
+  })
+
+  it('keeps a stored record running when its Runner stop request fails', async () => {
+    const fixture = executionFixture({})
+    const storedRecord = await startStoredPipelineRecord(fixture)
+    vi.mocked(fixture.scripts.stopExecution).mockRejectedValue(new Error('fixture stop failure'))
+    const interrupt = vi.spyOn(fixture.runRecords, 'interrupt')
+
+    await expect(fixture.service.stopByRecordId(storedRecord.id)).rejects.toThrow(
+      'fixture stop failure',
+    )
+
+    expect(fixture.scripts.stopExecution).toHaveBeenCalledOnce()
+    expect(fixture.scripts.stopExecution).toHaveBeenCalledWith(storedRecord.id)
+    expect(fixture.scripts.stop).not.toHaveBeenCalled()
+    expect(interrupt).not.toHaveBeenCalled()
+    expect((await fixture.runRecords.get(storedRecord.id))?.status).toBe('running')
+  })
+
+  it('does not stop scripts for a terminal or missing record', async () => {
+    const fixture = executionFixture({})
+    const storedRecord = await startStoredPipelineRecord(fixture)
+    await fixture.runRecords.interrupt(storedRecord.id, 'fixture completed elsewhere')
+    const interrupt = vi.spyOn(fixture.runRecords, 'interrupt')
+
+    const expected = { stopped: false, runnerFound: false, cancelledRunIds: [] }
+    await expect(fixture.service.stopByRecordId(storedRecord.id)).resolves.toEqual(expected)
+    await expect(fixture.service.stopByRecordId('missing-record')).resolves.toEqual(expected)
+
+    expect(fixture.scripts.stopExecution).not.toHaveBeenCalled()
+    expect(fixture.scripts.stop).not.toHaveBeenCalled()
+    expect(interrupt).not.toHaveBeenCalled()
+  })
+
+  it('deduplicates concurrent stop requests for the same record id', async () => {
+    const fixture = executionFixture({})
+    const storedRecord = await startStoredPipelineRecord(fixture)
+    await fixture.runRecords.updateScriptProgress(storedRecord.id, {
+      scriptId: 'verify',
+      status: 'passed',
+      durationMs: 25,
+      logs: [],
+    })
+    const pendingStop = deferred<{ runnerFound: boolean; cancelledRunIds: string[] }>()
+    vi.mocked(fixture.scripts.stopExecution).mockImplementation(() => pendingStop.promise)
+    const interrupt = vi.spyOn(fixture.runRecords, 'interrupt')
+
+    const first = fixture.service.stopByRecordId(storedRecord.id)
+    const second = fixture.service.stopByRecordId(storedRecord.id)
+    expect(second).toBe(first)
+    await vi.waitFor(() => expect(fixture.scripts.stopExecution).toHaveBeenCalledOnce())
+    pendingStop.resolve({ runnerFound: true, cancelledRunIds: ['runner-run-shared'] })
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      { stopped: true, runnerFound: true, cancelledRunIds: ['runner-run-shared'] },
+      { stopped: true, runnerFound: true, cancelledRunIds: ['runner-run-shared'] },
+    ])
+    expect(fixture.scripts.stopExecution).toHaveBeenCalledOnce()
+    expect(fixture.scripts.stopExecution).toHaveBeenCalledWith(storedRecord.id)
+    expect(fixture.scripts.stop).not.toHaveBeenCalled()
+    expect(interrupt).toHaveBeenCalledOnce()
   })
 
   it('reports that an inactive pipeline cannot be stopped', async () => {

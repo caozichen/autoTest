@@ -12,6 +12,8 @@ import {
   Document,
   Files,
   Monitor,
+  Picture,
+  VideoPause,
   Warning,
 } from '@element-plus/icons-vue'
 
@@ -21,24 +23,62 @@ import type {
   RunRecord,
   RunRecordLogLevel,
   RunRecordLogScope,
+  RunScriptRecord,
   RunRecordStatus,
   RunScriptStatus,
 } from '@/domain/run-record'
-import { buildRunAssertionAnalysis } from '@/services/run-records/run-assertion-analysis'
-import type { ScriptApiResponse } from '@/domain/script'
+import {
+  buildRunAssertionAnalysis,
+  inferLegacyAssertionModule,
+  type RunAssertionGroup,
+} from '@/services/run-records/run-assertion-analysis'
+import { pendingRunScriptCount } from '@/services/run-records/run-record-progress'
+import type {
+  ScriptApiResponse,
+  ScriptArtifact,
+  ScriptNetworkCategorySummary,
+  ScriptResourceResponse,
+} from '@/domain/script'
+import { runtimeConfig } from '@/config/runtime'
 
 interface ApiResponseView extends ScriptApiResponse {
   key: string
   scriptName: string
 }
 
-const props = defineProps<{
+interface ResourceResponseView extends ScriptResourceResponse {
+  key: string
+  scriptName: string
+}
+
+type ResponseCategory = 'api' | 'resources'
+type ResourceOutcomeFilter = 'all' | 'failed' | 'passed'
+
+const API_PAGE_SIZE = 50
+const RESOURCE_PAGE_SIZE = 50
+const ASSERTION_PAGE_SIZE = 100
+
+interface ScreenshotView extends ScriptArtifact {
+  key: string
+  url: string
+  scriptRecordId: string
+  scriptName: string
+  scriptEntryFile: string
+  featureName: string
+  assertionName: string
+}
+
+const props = withDefaults(defineProps<{
   modelValue: boolean
   record: RunRecord | null
-}>()
+  stopping?: boolean
+}>(), {
+  stopping: false,
+})
 
 const emit = defineEmits<{
   'update:modelValue': [value: boolean]
+  'force-stop': [record: RunRecord]
 }>()
 
 const activeTab = ref('overview')
@@ -46,6 +86,12 @@ const logLevel = ref<'all' | RunRecordLogLevel>('all')
 const logKeyword = ref('')
 const expandedAssertionGroupIds = ref<Set<string>>(new Set())
 const expandedApiResponseKeys = ref<Set<string>>(new Set())
+const responseCategory = ref<ResponseCategory>('api')
+const apiPage = ref(1)
+const resourceOutcomeFilter = ref<ResourceOutcomeFilter>('failed')
+const resourceTypeFilter = ref('all')
+const resourcePage = ref(1)
+const assertionGroupPages = ref<Map<string, number>>(new Map())
 
 const statusMap: Record<RunRecordStatus, { label: string; type: 'success' | 'warning' | 'danger' | 'info' }> = {
   running: { label: '执行中', type: 'warning' },
@@ -95,8 +141,107 @@ const apiResponses = computed<ApiResponseView[]>(() => (props.record?.scripts ??
     scriptName: script.name,
   })))
   .sort((left, right) => new Date(left.timestamp).getTime() - new Date(right.timestamp).getTime()))
-const successfulApiResponseCount = computed(() => apiResponses.value.filter((response) => response.ok).length)
-const failedApiResponseCount = computed(() => apiResponses.value.length - successfulApiResponseCount.value)
+const pagedApiResponses = computed(() => {
+  const start = (apiPage.value - 1) * API_PAGE_SIZE
+  return apiResponses.value.slice(start, start + API_PAGE_SIZE)
+})
+const resourceResponses = computed<ResourceResponseView[]>(() => (props.record?.scripts ?? [])
+  .flatMap((script) => (script.resourceResponses ?? []).map((response) => ({
+    ...response,
+    key: `${script.recordId}:${response.sequence}`,
+    scriptName: script.name,
+  })))
+  .sort((left, right) => {
+    if (left.ok !== right.ok) return left.ok ? 1 : -1
+    return new Date(left.timestamp).getTime() - new Date(right.timestamp).getTime()
+  }))
+const resourceTypes = computed(() => [...new Set(resourceResponses.value.map((response) => response.resourceType))]
+  .sort((left, right) => left.localeCompare(right)))
+const filteredResourceResponses = computed(() => resourceResponses.value.filter((response) => {
+  const matchesType = resourceTypeFilter.value === 'all' || response.resourceType === resourceTypeFilter.value
+  if (!matchesType) return false
+  if (resourceOutcomeFilter.value === 'failed') return !response.ok
+  if (resourceOutcomeFilter.value === 'passed') return response.ok
+  return true
+}))
+const pagedResourceResponses = computed(() => {
+  const start = (resourcePage.value - 1) * RESOURCE_PAGE_SIZE
+  return filteredResourceResponses.value.slice(start, start + RESOURCE_PAGE_SIZE)
+})
+const successfulResourceResponseCount = computed(() => resourceResponses.value.filter((response) => response.ok).length)
+const failedResourceResponseCount = computed(() => resourceResponses.value.filter((response) => !response.ok).length)
+const resourceFilterLabel = computed(() => {
+  if (resourceOutcomeFilter.value === 'failed') return '失败'
+  if (resourceOutcomeFilter.value === 'passed') return '通过'
+  return '全部'
+})
+const resourceEmptyDescription = computed(() => resourceResponses.value.length === 0
+  ? '该运行记录没有资源加载数据，重新运行脚本后即可采集'
+  : `没有符合当前“${resourceFilterLabel.value}”筛选条件的资源`)
+
+function aggregateNetworkCategory(category: 'api' | 'resources'): ScriptNetworkCategorySummary {
+  const total: ScriptNetworkCategorySummary = {
+    observed: 0,
+    recorded: 0,
+    dropped: 0,
+    passed: 0,
+    failed: 0,
+    warnings: 0,
+  }
+  for (const script of props.record?.scripts ?? []) {
+    const summary = script.networkSummary?.[category]
+    if (!summary) continue
+    for (const key of Object.keys(total) as Array<keyof ScriptNetworkCategorySummary>) {
+      total[key] += summary[key]
+    }
+  }
+  const responses = category === 'api' ? apiResponses.value : resourceResponses.value
+  const derivedWarnings = category === 'api'
+    ? responses.filter((response) => (
+        response.warning === true
+        || (!response.ok && response.isFirstParty === false)
+      )).length
+    : responses.filter((response) => response.warning === true).length
+  const derivedFailures = category === 'api'
+    ? responses.filter((response) => (
+        response.warning !== true
+        && !response.ok
+        && response.isFirstParty !== false
+      )).length
+    : responses.filter((response) => response.warning !== true && !response.ok).length
+  const derivedPassed = responses.filter((response) => response.ok && response.warning !== true).length
+  total.observed = Math.max(total.observed, responses.length)
+  total.recorded = Math.max(total.recorded, responses.length)
+  total.passed = Math.max(total.passed, derivedPassed)
+  total.failed = Math.max(total.failed, derivedFailures)
+  total.warnings = Math.max(total.warnings, derivedWarnings)
+  return total
+}
+
+const apiNetworkSummary = computed(() => aggregateNetworkCategory('api'))
+const resourceNetworkSummary = computed(() => aggregateNetworkCategory('resources'))
+const screenshots = computed<ScreenshotView[]>(() => (props.record?.scripts ?? [])
+  .flatMap((script) => script.artifacts
+    .filter((artifact) => (
+      artifact.type === 'screenshot'
+      && (artifact.mimeType === 'image/png' || artifact.mimeType === 'image/jpeg')
+    ))
+    .map((artifact) => {
+      const assertion = screenshotAssertion(script, artifact)
+      const assertionName = assertion?.name ?? script.error?.trim() ?? '脚本执行失败'
+      return {
+        ...artifact,
+        key: `${script.recordId}:${artifact.attemptId}:${artifact.relativePath}`,
+        url: screenshotUrl(artifact),
+        scriptRecordId: script.recordId,
+        scriptName: script.name,
+        scriptEntryFile: script.entryFile,
+        featureName: assertion?.module ?? inferLegacyAssertionModule(script.id, assertionName),
+        assertionName,
+      }
+    }))
+  .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt)))
+const screenshotUrls = computed(() => screenshots.value.map((screenshot) => screenshot.url))
 
 const statusIcon = computed(() => {
   if (props.record?.status === 'passed') return CircleCheck
@@ -109,15 +254,71 @@ const drawerTitle = computed(() => props.record
   ? `运行记录详情：${props.record.name}`
   : '运行记录详情')
 
+function screenshotAssertion(script: RunScriptRecord, artifact: ScriptArtifact) {
+  const failedAssertions = script.assertions.filter((assertion) => assertion.status === 'failed')
+  const screenshotTimestamp = Date.parse(artifact.createdAt)
+  const precedingAssertions = failedAssertions.filter((assertion) => {
+    const assertionTimestamp = Date.parse(assertion.timestamp)
+    return Number.isFinite(assertionTimestamp)
+      && Number.isFinite(screenshotTimestamp)
+      && assertionTimestamp <= screenshotTimestamp
+  })
+  return precedingAssertions[precedingAssertions.length - 1]
+    ?? failedAssertions[failedAssertions.length - 1]
+}
+
+function screenshotUrl(artifact: ScriptArtifact): string {
+  const baseUrl = runtimeConfig.runnerBaseUrl.replace(/\/+$/, '')
+  return `${baseUrl}/run-records/${encodeURIComponent(artifact.executionId)}`
+    + `/screenshots/${encodeURIComponent(artifact.stepId)}/${encodeURIComponent(artifact.attemptId)}`
+    + `?path=${encodeURIComponent(artifact.relativePath)}`
+}
+
 watch(
-  () => [props.modelValue, props.record?.id] as const,
-  ([visible]) => {
-    if (!visible) return
+  () => props.modelValue ? props.record?.id : undefined,
+  (visibleRecordId) => {
+    if (!visibleRecordId) return
     activeTab.value = 'overview'
     logLevel.value = 'all'
     logKeyword.value = ''
-    expandedAssertionGroupIds.value = new Set(assertionAnalysis.value.groups.map((group) => group.id))
+    responseCategory.value = 'api'
+    resourceOutcomeFilter.value = failedResourceResponseCount.value > 0
+      ? 'failed'
+      : 'all'
+    resourceTypeFilter.value = 'all'
+    apiPage.value = 1
+    resourcePage.value = 1
+    assertionGroupPages.value = new Map()
+    expandedAssertionGroupIds.value = new Set()
     expandedApiResponseKeys.value = new Set(apiResponses.value.slice(0, 1).map((response) => response.key))
+  },
+)
+
+watch(
+  () => apiResponses.value.length,
+  (total) => {
+    const lastPage = Math.max(1, Math.ceil(total / API_PAGE_SIZE))
+    if (apiPage.value > lastPage) apiPage.value = lastPage
+  },
+)
+
+watch(
+  [resourceOutcomeFilter, resourceTypeFilter],
+  () => { resourcePage.value = 1 },
+)
+
+watch(
+  () => filteredResourceResponses.value.length,
+  (total) => {
+    const lastPage = Math.max(1, Math.ceil(total / RESOURCE_PAGE_SIZE))
+    if (resourcePage.value > lastPage) resourcePage.value = lastPage
+  },
+)
+
+watch(
+  () => screenshots.value.length,
+  (screenshotCount) => {
+    if (screenshotCount === 0 && activeTab.value === 'screenshots') activeTab.value = 'overview'
   },
 )
 
@@ -149,14 +350,18 @@ function syncAssertionGroupState(groupId: string, event: Event): void {
 }
 
 function allApiResponsesExpanded(): boolean {
-  return apiResponses.value.length > 0
-    && apiResponses.value.every((response) => expandedApiResponseKeys.value.has(response.key))
+  return pagedApiResponses.value.length > 0
+    && pagedApiResponses.value.every((response) => expandedApiResponseKeys.value.has(response.key))
 }
 
 function toggleApiResponses(): void {
-  expandedApiResponseKeys.value = allApiResponsesExpanded()
-    ? new Set()
-    : new Set(apiResponses.value.map((response) => response.key))
+  const next = new Set(expandedApiResponseKeys.value)
+  const expand = !allApiResponsesExpanded()
+  for (const response of pagedApiResponses.value) {
+    if (expand) next.add(response.key)
+    else next.delete(response.key)
+  }
+  expandedApiResponseKeys.value = next
 }
 
 function syncApiResponseState(key: string, event: Event): void {
@@ -166,6 +371,23 @@ function syncApiResponseState(key: string, event: Event): void {
   if (details.open) next.add(key)
   else next.delete(key)
   expandedApiResponseKeys.value = next
+}
+
+function assertionGroupPage(group: RunAssertionGroup): number {
+  const lastPage = Math.max(1, Math.ceil(group.assertions.length / ASSERTION_PAGE_SIZE))
+  return Math.min(assertionGroupPages.value.get(group.id) ?? 1, lastPage)
+}
+
+function pagedAssertions(group: RunAssertionGroup) {
+  const start = (assertionGroupPage(group) - 1) * ASSERTION_PAGE_SIZE
+  return group.assertions.slice(start, start + ASSERTION_PAGE_SIZE)
+}
+
+function setAssertionGroupPage(group: RunAssertionGroup, page: number): void {
+  const lastPage = Math.max(1, Math.ceil(group.assertions.length / ASSERTION_PAGE_SIZE))
+  const next = new Map(assertionGroupPages.value)
+  next.set(group.id, Math.min(Math.max(1, page), lastPage))
+  assertionGroupPages.value = next
 }
 
 function formatDateTime(value: string | null): string {
@@ -200,13 +422,43 @@ function formatJson(value: unknown): string {
   }
 }
 
+function standaloneNetworkDiagnostics(response: { error?: string; diagnostics?: string[] }): string[] {
+  const error = response.error ?? ''
+  const seen = new Set<string>()
+  return (response.diagnostics ?? []).flatMap((diagnostic) => {
+    const message = diagnostic.trim()
+    if (!message || error.includes(message) || seen.has(message)) return []
+    seen.add(message)
+    return [message]
+  })
+}
+
+function formatNetworkError(response: { error?: string; diagnostics?: string[] }): string {
+  return [response.error, ...standaloneNetworkDiagnostics(response)]
+    .filter((item): item is string => Boolean(item))
+    .join('\n')
+}
+
 function hasPayload(response: ApiResponseView, key: 'requestBody' | 'responseBody'): boolean {
   return Object.prototype.hasOwnProperty.call(response, key) && response[key] !== null
 }
 
-function apiStatusType(response: ApiResponseView): 'success' | 'danger' | 'info' {
-  if (response.status === 0) return 'info'
+function apiStatusType(response: ApiResponseView): 'success' | 'warning' | 'danger' | 'info' {
+  if (response.status === 0 && response.ok) return 'info'
+  if (response.warning) return 'warning'
+  if (!response.ok && response.isFirstParty === false) return 'warning'
   return response.ok ? 'success' : 'danger'
+}
+
+function apiStatusLabel(response: ApiResponseView): string {
+  const status = response.status ? String(response.status) : 'NO RESPONSE'
+  return response.warning ? `${status} · 采集警告` : status
+}
+
+function resourceStatusType(response: ResourceResponseView): 'success' | 'warning' | 'danger' | 'info' {
+  if (response.status === 0 && response.ok) return 'info'
+  if (response.ok) return 'success'
+  return 'danger'
 }
 
 function failureStageLabel(stage: RunRecord['failureStage']): string {
@@ -235,6 +487,16 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
           <p>{{ record.environment.name }} · {{ record.browser }} · 手动触发</p>
         </div>
         <div class="detail-header__actions">
+          <el-button
+            v-if="record.status === 'running'"
+            type="danger"
+            plain
+            :icon="VideoPause"
+            :loading="stopping"
+            :disabled="stopping"
+            aria-label="强制停止运行批次"
+            @click="emit('force-stop', record)"
+          >强制停止</el-button>
           <el-tag :type="statusMap[record.status].type" effect="light" size="large">
             {{ statusMap[record.status].label }}
           </el-tag>
@@ -274,15 +536,17 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
               <div><h3>批次进度</h3><p>按脚本结果汇总当前批次。</p></div>
               <span>{{ record.counts.passed + record.counts.failed + record.counts.skipped }} / {{ record.counts.total }}</span>
             </header>
-            <div class="result-distribution" role="img" :aria-label="`通过 ${record.counts.passed}，失败 ${record.counts.failed}，未执行 ${record.counts.skipped}`">
+            <div class="result-distribution" role="img" :aria-label="`通过 ${record.counts.passed}，失败 ${record.counts.failed}，未执行 ${record.counts.skipped}，待完成 ${pendingRunScriptCount(record.counts)}`">
               <span v-if="record.counts.passed" aria-hidden="true" class="result-distribution__passed" :style="{ flex: record.counts.passed }" />
               <span v-if="record.counts.failed" aria-hidden="true" class="result-distribution__failed" :style="{ flex: record.counts.failed }" />
               <span v-if="record.counts.skipped" aria-hidden="true" class="result-distribution__skipped" :style="{ flex: record.counts.skipped }" />
+              <span v-if="pendingRunScriptCount(record.counts)" aria-hidden="true" class="result-distribution__pending" :style="{ flex: pendingRunScriptCount(record.counts) }" />
             </div>
             <div class="distribution-legend">
               <span><i class="is-passed" />通过 {{ record.counts.passed }}</span>
               <span><i class="is-failed" />失败 {{ record.counts.failed }}</span>
               <span><i class="is-skipped" />未执行 {{ record.counts.skipped }}</span>
+              <span v-if="pendingRunScriptCount(record.counts)"><i class="is-pending" />待完成 {{ pendingRunScriptCount(record.counts) }}</span>
             </div>
           </section>
 
@@ -301,77 +565,220 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
           </section>
         </el-tab-pane>
 
-        <el-tab-pane name="responses">
+        <el-tab-pane name="responses" lazy>
           <template #label><span class="tab-label"><el-icon><Connection /></el-icon>响应结果</span></template>
 
-          <section class="api-metrics" aria-label="接口响应统计">
-            <div><span>接口调用</span><strong>{{ apiResponses.length }}</strong></div>
-            <div><span>成功响应</span><strong>{{ successfulApiResponseCount }}</strong></div>
-            <div><span>失败响应</span><strong>{{ failedApiResponseCount }}</strong></div>
+          <section class="network-category-switch" aria-label="网络记录分类">
+            <button
+              type="button"
+              :class="{ 'is-active': responseCategory === 'api' }"
+              :aria-pressed="responseCategory === 'api'"
+              @click="responseCategory = 'api'"
+            >
+              接口
+              <span>{{ apiNetworkSummary.recorded }}</span>
+            </button>
+            <button
+              type="button"
+              :class="{ 'is-active': responseCategory === 'resources' }"
+              :aria-pressed="responseCategory === 'resources'"
+              @click="responseCategory = 'resources'"
+            >
+              资源
+              <span>{{ resourceNetworkSummary.recorded }}</span>
+            </button>
           </section>
 
-          <section class="api-response-section">
-            <header class="api-response-heading">
-              <div>
-                <h3>业务接口调用明细</h3>
-                <p>按实际响应时间排序，共 {{ apiResponses.length }} 条。</p>
-              </div>
-              <el-button
-                v-if="apiResponses.length"
-                text
-                :icon="allApiResponsesExpanded() ? ArrowUpBold : ArrowDownBold"
-                @click="toggleApiResponses"
-              >
-                {{ allApiResponsesExpanded() ? '全部收起' : '全部展开' }}
-              </el-button>
-            </header>
+          <template v-if="responseCategory === 'api'">
+            <section class="network-metrics" aria-label="接口响应统计">
+              <div><span>观察到</span><strong>{{ apiNetworkSummary.observed }}</strong></div>
+              <div><span>已记录</span><strong>{{ apiNetworkSummary.recorded }}</strong></div>
+              <div><span>通过</span><strong>{{ apiNetworkSummary.passed }}</strong></div>
+              <div><span>失败</span><strong class="is-danger">{{ apiNetworkSummary.failed }}</strong></div>
+              <div><span>警告</span><strong class="is-warning">{{ apiNetworkSummary.warnings }}</strong></div>
+              <div><span>已截断</span><strong>{{ apiNetworkSummary.dropped }}</strong></div>
+            </section>
 
-            <div v-if="apiResponses.length" class="api-response-list">
-              <details
-                v-for="response in apiResponses"
-                :key="response.key"
-                class="api-response-item"
-                :open="expandedApiResponseKeys.has(response.key)"
-                @toggle="syncApiResponseState(response.key, $event)"
-              >
-                <summary>
-                  <span class="api-response-item__caret" aria-hidden="true" />
-                  <span class="api-response-item__method" :class="`is-${response.method.toLowerCase()}`">{{ response.method }}</span>
-                  <span class="api-response-item__identity">
-                    <code>{{ response.name }}</code>
-                    <small>{{ response.scriptName }}</small>
-                  </span>
-                  <el-tag :type="apiStatusType(response)" size="small" effect="plain">
-                    {{ response.status || 'NO RESPONSE' }}
-                  </el-tag>
-                  <span class="api-response-item__duration">{{ formatDuration(response.durationMs) }}</span>
-                </summary>
+            <p v-if="apiNetworkSummary.dropped" class="network-drop-warning">
+              有 {{ apiNetworkSummary.dropped }} 条接口记录因容量限制未保存，失败记录已优先保留。
+            </p>
 
-                <div class="api-response-detail">
-                  <section class="api-response-url">
-                    <strong>{{ response.method === 'GET' ? '请求地址（含 GET 参数）' : '请求地址' }}</strong>
-                    <code>{{ response.url }}</code>
-                  </section>
-                  <div class="api-response-payloads">
-                    <section v-if="!['GET', 'HEAD'].includes(response.method)">
-                      <strong>请求参数</strong>
-                      <pre v-if="hasPayload(response, 'requestBody')">{{ formatJson(response.requestBody) }}</pre>
-                      <p v-else>该请求没有请求体</p>
-                    </section>
-                    <section>
-                      <strong>响应结果</strong>
-                      <pre v-if="hasPayload(response, 'responseBody')">{{ formatJson(response.responseBody) }}</pre>
-                      <p v-else>{{ response.error || '接口未返回响应体' }}</p>
-                    </section>
-                  </div>
+            <section class="api-response-section">
+              <header class="api-response-heading">
+                <div>
+                  <h3>业务接口调用明细</h3>
+                  <p>按实际响应时间排序，共 {{ apiResponses.length }} 条，每页最多 {{ API_PAGE_SIZE }} 条。</p>
                 </div>
-              </details>
-            </div>
-            <el-empty v-else description="该运行记录没有接口响应数据，重新运行脚本后即可采集" />
-          </section>
+                <el-button
+                  v-if="pagedApiResponses.length"
+                  text
+                  :icon="allApiResponsesExpanded() ? ArrowUpBold : ArrowDownBold"
+                  @click="toggleApiResponses"
+                >
+                  {{ allApiResponsesExpanded() ? '收起本页' : '展开本页' }}
+                </el-button>
+              </header>
+
+              <div v-if="apiResponses.length" class="api-response-list">
+                <details
+                  v-for="response in pagedApiResponses"
+                  :key="response.key"
+                  class="api-response-item"
+                  :open="expandedApiResponseKeys.has(response.key)"
+                  @toggle="syncApiResponseState(response.key, $event)"
+                >
+                  <summary>
+                    <span class="api-response-item__caret" aria-hidden="true" />
+                    <span class="api-response-item__method" :class="`is-${response.method.toLowerCase()}`">{{ response.method }}</span>
+                    <span class="api-response-item__identity">
+                      <code>{{ response.name }}</code>
+                      <small>{{ response.phase || response.scriptName }}<template v-if="response.phase"> · {{ response.scriptName }}</template></small>
+                    </span>
+                    <el-tag :type="apiStatusType(response)" size="small" effect="plain">
+                      {{ apiStatusLabel(response) }}
+                    </el-tag>
+                    <span class="api-response-item__duration">{{ formatDuration(response.durationMs) }}</span>
+                  </summary>
+
+                  <div v-if="expandedApiResponseKeys.has(response.key)" class="api-response-detail">
+                    <section class="api-response-url">
+                      <strong>{{ response.method === 'GET' ? '请求地址（含 GET 参数）' : '请求地址' }}</strong>
+                      <code>{{ response.url }}</code>
+                      <small v-if="response.pageUrl">页面：{{ response.pageUrl }}</small>
+                      <small v-if="response.frameUrl && response.frameUrl !== response.pageUrl">Frame：{{ response.frameUrl }}</small>
+                    </section>
+                    <div class="api-response-payloads">
+                      <section v-if="!['GET', 'HEAD'].includes(response.method)">
+                        <strong>请求参数</strong>
+                        <pre v-if="hasPayload(response, 'requestBody')">{{ formatJson(response.requestBody) }}</pre>
+                        <p v-else>该请求没有请求体</p>
+                      </section>
+                      <section>
+                        <strong>响应结果</strong>
+                        <pre v-if="hasPayload(response, 'responseBody')">{{ formatJson(response.responseBody) }}</pre>
+                        <pre v-else-if="formatNetworkError(response)">{{ formatNetworkError(response) }}</pre>
+                        <pre v-else-if="response.bodyReadError">响应正文采集失败：{{ response.bodyReadError }}</pre>
+                        <p v-else>接口未返回响应体</p>
+                      </section>
+                    </div>
+                  </div>
+                </details>
+              </div>
+              <el-empty v-else description="该运行记录没有接口响应明细" />
+              <el-pagination
+                v-if="apiResponses.length > API_PAGE_SIZE"
+                v-model:current-page="apiPage"
+                class="resource-pagination"
+                :page-size="API_PAGE_SIZE"
+                :total="apiResponses.length"
+                layout="prev, pager, next"
+                background
+              />
+            </section>
+          </template>
+
+          <template v-else>
+            <section class="network-metrics" aria-label="资源加载统计">
+              <div><span>观察到</span><strong>{{ resourceNetworkSummary.observed }}</strong></div>
+              <div><span>已记录</span><strong>{{ resourceNetworkSummary.recorded }}</strong></div>
+              <div><span>通过</span><strong>{{ resourceNetworkSummary.passed }}</strong></div>
+              <div><span>失败</span><strong class="is-danger">{{ resourceNetworkSummary.failed }}</strong></div>
+              <div><span>警告</span><strong class="is-warning">{{ resourceNetworkSummary.warnings }}</strong></div>
+              <div><span>已截断</span><strong>{{ resourceNetworkSummary.dropped }}</strong></div>
+            </section>
+
+            <p v-if="resourceNetworkSummary.dropped" class="network-drop-warning">
+              有 {{ resourceNetworkSummary.dropped }} 条资源记录因容量限制未保存，失败记录已优先保留。
+            </p>
+
+            <section class="resource-response-section">
+              <header class="resource-response-heading">
+                <div>
+                  <h3>页面资源加载明细</h3>
+                  <p>当前显示 {{ filteredResourceResponses.length }} / {{ resourceResponses.length }} 条，每页最多 {{ RESOURCE_PAGE_SIZE }} 条。</p>
+                </div>
+                <div class="resource-filters">
+                  <label>
+                    <span>结果</span>
+                    <select v-model="resourceOutcomeFilter" aria-label="筛选资源加载结果">
+                      <option value="failed">失败（{{ failedResourceResponseCount }}）</option>
+                      <option value="passed">通过（{{ successfulResourceResponseCount }}）</option>
+                      <option value="all">全部（{{ resourceResponses.length }}）</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>类型</span>
+                    <select v-model="resourceTypeFilter" aria-label="筛选资源类型">
+                      <option value="all">全部类型</option>
+                      <option v-for="resourceType in resourceTypes" :key="resourceType" :value="resourceType">
+                        {{ resourceType }}
+                      </option>
+                    </select>
+                  </label>
+                </div>
+              </header>
+
+              <div v-if="pagedResourceResponses.length" class="resource-response-list" role="table" aria-label="资源加载明细">
+                <div class="resource-response-columns" role="row">
+                  <span role="columnheader">脚本 / 阶段</span>
+                  <span role="columnheader">类型</span>
+                  <span role="columnheader">资源与错误</span>
+                  <span role="columnheader">状态</span>
+                  <span role="columnheader">耗时</span>
+                </div>
+                <article
+                  v-for="response in pagedResourceResponses"
+                  :key="response.key"
+                  class="resource-response-row"
+                  :class="{ 'is-failed': !response.ok }"
+                  role="row"
+                >
+                  <div role="cell">
+                    <strong>{{ response.phase || '未标记阶段' }}</strong>
+                    <small>{{ response.scriptName }}</small>
+                  </div>
+                  <div role="cell">
+                    <code>{{ response.resourceType }}</code>
+                    <small>{{ response.mimeType || '-' }}</small>
+                    <small v-if="response.failureKind">{{ response.failureKind }}</small>
+                    <small v-if="response.fromCache">浏览器缓存</small>
+                    <small v-else-if="response.fromServiceWorker">Service Worker</small>
+                  </div>
+                  <div class="resource-response-row__identity" role="cell">
+                    <code :title="response.url">{{ response.url }}</code>
+                    <small v-if="response.pageUrl" :title="response.pageUrl">页面：{{ response.pageUrl }}</small>
+                    <small v-if="response.frameUrl && response.frameUrl !== response.pageUrl" :title="response.frameUrl">Frame：{{ response.frameUrl }}</small>
+                    <p v-if="response.error">{{ response.error }}</p>
+                    <ul v-if="standaloneNetworkDiagnostics(response).length" class="resource-response-row__diagnostics">
+                      <li v-for="diagnostic in standaloneNetworkDiagnostics(response)" :key="diagnostic">{{ diagnostic }}</li>
+                    </ul>
+                  </div>
+                  <div role="cell">
+                    <el-tag :type="resourceStatusType(response)" size="small" effect="plain">
+                      {{ response.status || 'NO RESPONSE' }}
+                    </el-tag>
+                  </div>
+                  <div class="resource-response-row__duration" role="cell">
+                    {{ formatDuration(response.durationMs) }}
+                  </div>
+                </article>
+              </div>
+              <el-empty v-else :description="resourceEmptyDescription" />
+
+              <el-pagination
+                v-if="filteredResourceResponses.length > RESOURCE_PAGE_SIZE"
+                v-model:current-page="resourcePage"
+                class="resource-pagination"
+                :page-size="RESOURCE_PAGE_SIZE"
+                :total="filteredResourceResponses.length"
+                layout="prev, pager, next"
+                background
+              />
+            </section>
+          </template>
         </el-tab-pane>
 
-        <el-tab-pane name="scripts">
+        <el-tab-pane name="scripts" lazy>
           <template #label><span class="tab-label"><el-icon><Files /></el-icon>脚本结果</span></template>
           <section class="table-section">
             <el-table :data="record.scripts" row-key="recordId" class="detail-table">
@@ -407,7 +814,7 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
           </section>
         </el-tab-pane>
 
-        <el-tab-pane name="logs">
+        <el-tab-pane name="logs" lazy>
           <template #label><span class="tab-label"><el-icon><Document /></el-icon>执行日志</span></template>
           <section class="log-panel">
             <div class="log-toolbar">
@@ -436,7 +843,59 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
           </section>
         </el-tab-pane>
 
-        <el-tab-pane name="analysis">
+        <el-tab-pane v-if="screenshots.length" name="screenshots" lazy>
+          <template #label><span class="tab-label"><el-icon><Picture /></el-icon>截图查看</span></template>
+          <section class="screenshot-section" aria-label="本次执行截图">
+            <header class="section-heading">
+              <div><h3>截图列表</h3></div>
+              <span>{{ screenshots.length }} 张</span>
+            </header>
+            <div class="screenshot-list" role="list">
+              <article
+                v-for="(screenshot, index) in screenshots"
+                :key="screenshot.key"
+                class="screenshot-row"
+                role="listitem"
+              >
+                <el-image
+                  class="screenshot-thumbnail"
+                  :src="screenshot.url"
+                  :alt="`${screenshot.scriptName}执行截图`"
+                  fit="cover"
+                  :preview-src-list="screenshotUrls"
+                  :initial-index="index"
+                  preview-teleported
+                  hide-on-click-modal
+                >
+                  <template #error>
+                    <span class="screenshot-thumbnail__error"><el-icon><Picture /></el-icon></span>
+                  </template>
+                </el-image>
+                <div class="screenshot-cell screenshot-cell--script">
+                  <span>所属脚本</span>
+                  <strong>{{ screenshot.scriptName }}</strong>
+                  <code>{{ screenshot.scriptEntryFile }}</code>
+                </div>
+                <div class="screenshot-cell">
+                  <span>功能</span>
+                  <strong>{{ screenshot.featureName }}</strong>
+                </div>
+                <div class="screenshot-cell screenshot-cell--assertion">
+                  <span>触发断言</span>
+                  <p>{{ screenshot.assertionName }}</p>
+                </div>
+                <div class="screenshot-cell screenshot-cell--path">
+                  <span>本地路径</span>
+                  <el-tooltip :content="screenshot.absolutePath" placement="top" :show-after="300">
+                    <code>{{ screenshot.absolutePath }}</code>
+                  </el-tooltip>
+                </div>
+              </article>
+            </div>
+          </section>
+        </el-tab-pane>
+
+        <el-tab-pane name="analysis" lazy>
           <template #label><span class="tab-label"><el-icon><DataAnalysis /></el-icon>数据分析</span></template>
           <section class="analysis-metrics">
             <div><span>小断言通过率</span><strong>{{ assertionAnalysis.passRate }}%</strong><el-progress :percentage="assertionAnalysis.passRate" :stroke-width="7" :show-text="false" /></div>
@@ -467,7 +926,7 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
 
             <section class="assertion-detail-section">
               <header class="section-heading">
-                <div><h3>断言执行详情</h3><p>大断言默认全部展开，点击模块标题可折叠；子断言保持实际执行顺序。</p></div>
+                <div><h3>断言执行详情</h3><p>按大断言分组展示，子断言保持实际执行顺序。</p></div>
               </header>
               <div class="assertion-columns">
                 <div class="assertion-column assertion-column--passed">
@@ -500,12 +959,22 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
                         <span><strong>{{ group.name }}</strong><small>{{ group.scriptName }}</small></span>
                         <em>{{ group.passed }} / {{ group.assertions.length }}</em>
                       </summary>
-                      <div class="assertion-children">
-                        <div v-for="assertion in group.assertions" :key="assertion.id" class="assertion-child" :class="`is-${assertion.status}`">
+                      <div v-if="isAssertionGroupExpanded(group.id)" class="assertion-children">
+                        <div v-for="assertion in pagedAssertions(group)" :key="assertion.id" class="assertion-child" :class="`is-${assertion.status}`">
                           <span class="assertion-child__sequence">{{ assertion.order + 1 }}</span>
                           <el-icon><component :is="assertion.status === 'passed' ? CircleCheck : CircleClose" /></el-icon>
                           <div><p>{{ assertion.name }}</p><small>{{ assertion.matcher }} · {{ assertion.durationMs }} ms</small><pre v-if="assertion.error">{{ assertion.error }}</pre></div>
                         </div>
+                        <el-pagination
+                          v-if="group.assertions.length > ASSERTION_PAGE_SIZE"
+                          :current-page="assertionGroupPage(group)"
+                          class="resource-pagination"
+                          :page-size="ASSERTION_PAGE_SIZE"
+                          :total="group.assertions.length"
+                          layout="prev, pager, next"
+                          background
+                          @update:current-page="setAssertionGroupPage(group, $event)"
+                        />
                       </div>
                     </details>
                   </div>
@@ -542,12 +1011,22 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
                         <span><strong>{{ group.name }}</strong><small>{{ group.scriptName }}</small></span>
                         <em>{{ group.failed }} 条失败</em>
                       </summary>
-                      <div class="assertion-children">
-                        <div v-for="assertion in group.assertions" :key="assertion.id" class="assertion-child" :class="`is-${assertion.status}`">
+                      <div v-if="isAssertionGroupExpanded(group.id)" class="assertion-children">
+                        <div v-for="assertion in pagedAssertions(group)" :key="assertion.id" class="assertion-child" :class="`is-${assertion.status}`">
                           <span class="assertion-child__sequence">{{ assertion.order + 1 }}</span>
                           <el-icon><component :is="assertion.status === 'passed' ? CircleCheck : CircleClose" /></el-icon>
                           <div><p>{{ assertion.name }}</p><small>{{ assertion.matcher }} · {{ assertion.durationMs }} ms</small><pre v-if="assertion.error">{{ assertion.error }}</pre></div>
                         </div>
+                        <el-pagination
+                          v-if="group.assertions.length > ASSERTION_PAGE_SIZE"
+                          :current-page="assertionGroupPage(group)"
+                          class="resource-pagination"
+                          :page-size="ASSERTION_PAGE_SIZE"
+                          :total="group.assertions.length"
+                          layout="prev, pager, next"
+                          background
+                          @update:current-page="setAssertionGroupPage(group, $event)"
+                        />
                       </div>
                     </details>
                   </div>
@@ -613,12 +1092,14 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
 .result-distribution__passed { background: var(--color-success, #16a34a); }
 .result-distribution__failed { background: var(--color-danger, #dc2626); }
 .result-distribution__skipped { background: var(--color-text-muted, #94a3b8); }
+.result-distribution__pending { background: var(--color-border, #e5ebf3); }
 .distribution-legend { display: flex; flex-wrap: wrap; gap: 18px; margin-top: 9px; color: var(--color-text-secondary, #64748b); font-size: var(--font-sm); }
 .distribution-legend span { display: flex; align-items: center; gap: 7px; }
 .distribution-legend i { width: 8px; height: 8px; border-radius: 2px; }
 .distribution-legend .is-passed { background: var(--color-success, #16a34a); }
 .distribution-legend .is-failed { background: var(--color-danger, #dc2626); }
 .distribution-legend .is-skipped { background: var(--color-text-muted, #94a3b8); }
+.distribution-legend .is-pending { background: var(--color-border, #e5ebf3); }
 
 .event-timeline { border-top: 1px solid var(--color-border, #e5ebf3); }
 .event-row { display: grid; grid-template-columns: 88px 92px 80px 1fr; align-items: start; gap: 9px; min-height: 48px; padding: 9px 4px; border-bottom: 1px solid var(--color-border-light, #eef2f7); }
@@ -633,12 +1114,20 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
 .event-row time { margin-top: 3px; color: var(--color-text-muted, #94a3b8); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: var(--font-xs); }
 .event-row p { margin: 2px 0 0; color: var(--color-text-primary, #1f2a44); font-size: var(--font-sm); line-height: 1.5; overflow-wrap: anywhere; }
 
-.api-metrics { display: grid; border: 1px solid var(--color-border, #e5ebf3); border-radius: min(var(--radius-card, 6px), 8px); grid-template-columns: repeat(3, minmax(0, 1fr)); background: var(--color-surface, #fff); }
-.api-metrics > div { min-width: 0; min-height: 74px; padding: 12px 14px; border-right: 1px solid var(--color-border-light, #eef2f7); }
-.api-metrics > div:last-child { border-right: 0; }
-.api-metrics span, .api-metrics strong { display: block; }
-.api-metrics span { color: var(--color-text-muted, #94a3b8); font-size: var(--font-xs); }
-.api-metrics strong { margin-top: 6px; color: var(--color-text-primary, #1f2a44); font-size: var(--font-lg); }
+.network-category-switch { display: inline-grid; grid-template-columns: repeat(2, minmax(110px, 1fr)); gap: 2px; padding: 3px; border: 1px solid var(--color-border, #e5ebf3); border-radius: 6px; background: var(--color-bg-subtle, #f8fafc); }
+.network-category-switch button { display: inline-flex; min-height: 34px; align-items: center; justify-content: center; gap: 8px; padding: 6px 14px; color: var(--color-text-secondary, #64748b); border: 0; border-radius: 4px; background: transparent; cursor: pointer; font: inherit; font-size: var(--font-sm); }
+.network-category-switch button:hover { color: var(--color-primary, #2563eb); }
+.network-category-switch button.is-active { color: var(--color-primary, #2563eb); background: var(--color-surface, #fff); box-shadow: 0 1px 3px rgb(15 23 42 / 10%); font-weight: 600; }
+.network-category-switch button span { min-width: 22px; padding: 1px 5px; color: inherit; border-radius: 4px; background: var(--color-border-light, #eef2f7); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: var(--font-caption); }
+.network-metrics { display: grid; overflow: hidden; margin-top: 14px; border: 1px solid var(--color-border, #e5ebf3); border-radius: min(var(--radius-card, 6px), 8px); grid-template-columns: repeat(6, minmax(0, 1fr)); background: var(--color-surface, #fff); }
+.network-metrics > div { min-width: 0; min-height: 70px; padding: 11px 13px; border-right: 1px solid var(--color-border-light, #eef2f7); }
+.network-metrics > div:last-child { border-right: 0; }
+.network-metrics span, .network-metrics strong { display: block; }
+.network-metrics span { color: var(--color-text-muted, #94a3b8); font-size: var(--font-xs); }
+.network-metrics strong { margin-top: 5px; color: var(--color-text-primary, #1f2a44); font-size: var(--font-lg); }
+.network-metrics strong.is-danger { color: var(--color-danger, #dc2626); }
+.network-metrics strong.is-warning { color: var(--color-warning, #d97706); }
+.network-drop-warning { margin: 12px 0 0; padding: 9px 11px; color: #92400e; border-left: 3px solid var(--color-warning, #d97706); border-radius: 3px; background: #fffbeb; font-size: var(--font-xs); line-height: 1.5; }
 .api-response-section { margin-top: 18px; }
 .api-response-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
 .api-response-heading h3, .api-response-heading p { margin: 0; }
@@ -664,10 +1153,39 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
 .api-response-detail { padding: 13px 16px 16px 96px; border-top: 1px solid var(--color-border-light, #eef2f7); background: var(--color-bg-subtle, #f8fafc); }
 .api-response-url strong, .api-response-payloads strong { display: block; margin-bottom: 6px; color: var(--color-text-secondary, #64748b); font-size: var(--font-xs); }
 .api-response-url code { display: block; padding: 9px 11px; color: var(--color-primary, #2563eb); border-left: 3px solid var(--color-primary, #2563eb); border-radius: 3px; background: var(--color-primary-soft, #eff6ff); font-size: var(--font-xs); line-height: 1.5; overflow-wrap: anywhere; }
+.api-response-url small { display: block; overflow: hidden; margin-top: 6px; color: var(--color-text-muted, #94a3b8); font-size: var(--font-caption); text-overflow: ellipsis; white-space: nowrap; }
 .api-response-payloads { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 14px; }
 .api-response-payloads > section { min-width: 0; }
 .api-response-payloads pre { max-height: 360px; min-height: 88px; overflow: auto; margin: 0; padding: 11px 12px; color: #dbeafe; border-radius: 4px; background: #172033; font-size: var(--font-xs); line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
 .api-response-payloads p { min-height: 88px; margin: 0; padding: 11px 12px; color: var(--color-text-secondary, #64748b); border-radius: 4px; background: var(--color-bg-page, #f6f8fc); font-size: var(--font-xs); }
+
+.resource-response-section { margin-top: 18px; }
+.resource-response-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
+.resource-response-heading h3, .resource-response-heading p { margin: 0; }
+.resource-response-heading h3 { color: var(--color-text-primary, #1f2a44); font-size: var(--font-lg); }
+.resource-response-heading p { margin-top: 4px; color: var(--color-text-secondary, #64748b); font-size: var(--font-sm); }
+.resource-filters { display: flex; flex: 0 0 auto; align-items: flex-end; gap: 8px; }
+.resource-filters label { display: grid; gap: 4px; }
+.resource-filters label > span { color: var(--color-text-muted, #94a3b8); font-size: var(--font-caption); }
+.resource-filters select { min-width: 128px; height: 34px; padding: 0 28px 0 9px; color: var(--color-text-primary, #1f2a44); border: 1px solid var(--color-border, #e5ebf3); border-radius: 4px; outline: none; background: var(--color-surface, #fff); font-size: var(--font-xs); }
+.resource-filters select:focus { border-color: var(--color-primary, #2563eb); box-shadow: 0 0 0 2px rgb(37 99 235 / 12%); }
+.resource-response-list { overflow: hidden; border: 1px solid var(--color-border, #e5ebf3); border-radius: min(var(--radius-card, 6px), 8px); background: var(--color-surface, #fff); }
+.resource-response-columns, .resource-response-row { display: grid; min-width: 0; grid-template-columns: minmax(130px, 0.8fr) minmax(94px, 0.55fr) minmax(260px, 2.4fr) 108px 84px; align-items: center; gap: 12px; }
+.resource-response-columns { min-height: 38px; padding: 7px 12px; color: var(--color-text-muted, #94a3b8); border-bottom: 1px solid var(--color-border-light, #eef2f7); background: var(--color-bg-subtle, #f8fafc); font-size: var(--font-caption); font-weight: 600; }
+.resource-response-row { min-height: 70px; padding: 10px 12px; border-bottom: 1px solid var(--color-border-light, #eef2f7); }
+.resource-response-row:last-child { border-bottom: 0; }
+.resource-response-row:hover { background: var(--color-bg-subtle, #f8fafc); }
+.resource-response-row.is-failed { box-shadow: inset 3px 0 0 var(--color-danger, #dc2626); }
+.resource-response-row > div { min-width: 0; }
+.resource-response-row strong, .resource-response-row small, .resource-response-row code { display: block; min-width: 0; }
+.resource-response-row strong { overflow-wrap: anywhere; color: var(--color-text-primary, #1f2a44); font-size: var(--font-xs); }
+.resource-response-row small { overflow: hidden; margin-top: 4px; color: var(--color-text-muted, #94a3b8); font-size: var(--font-caption); text-overflow: ellipsis; white-space: nowrap; }
+.resource-response-row code { overflow: hidden; color: var(--color-primary, #2563eb); font-size: var(--font-xs); text-overflow: ellipsis; white-space: nowrap; }
+.resource-response-row__identity > code { color: var(--color-text-primary, #1f2a44); }
+.resource-response-row__identity p { margin: 5px 0 0; color: var(--color-danger, #dc2626); font-size: var(--font-caption); line-height: 1.45; overflow-wrap: anywhere; }
+.resource-response-row__diagnostics { margin: 5px 0 0; padding-left: 16px; color: var(--color-danger, #dc2626); font-size: var(--font-caption); line-height: 1.45; overflow-wrap: anywhere; }
+.resource-response-row__duration { color: var(--color-text-secondary, #64748b); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: var(--font-xs); text-align: right; }
+.resource-pagination { display: flex; justify-content: flex-end; margin-top: 14px; }
 
 .table-section { overflow: hidden; border: 1px solid var(--color-border, #e5ebf3); border-radius: min(var(--radius-card, 6px), 8px); background: var(--color-surface, #fff); }
 .detail-table { width: 100%; }
@@ -699,6 +1217,21 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
 .log-line p { margin: 0; overflow-wrap: anywhere; }
 .log-line p strong { margin-right: 7px; color: #94a3b8; }
 .log-line pre { margin: 7px 0 0; padding: 8px 10px; color: #cbd5e1; border-left: 2px solid #3b82f6; background: rgb(255 255 255 / 4%); white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.screenshot-section { min-width: 0; }
+.screenshot-list { overflow: hidden; border: 1px solid var(--color-border, #e5ebf3); border-radius: min(var(--radius-card, 6px), 8px); background: var(--color-surface, #fff); }
+.screenshot-row { display: grid; min-width: 0; grid-template-columns: 124px minmax(150px, 0.75fr) minmax(120px, 0.55fr) minmax(210px, 1fr) minmax(220px, 1.25fr); align-items: center; gap: 14px; padding: 12px 14px; border-bottom: 1px solid var(--color-border-light, #eef2f7); }
+.screenshot-row:last-child { border-bottom: 0; }
+.screenshot-row:hover { background: var(--color-bg-subtle, #f8fafc); }
+.screenshot-thumbnail { width: 120px; height: 76px; cursor: zoom-in; border: 1px solid var(--color-border, #e5ebf3); border-radius: 4px; background: var(--color-bg-subtle, #f8fafc); }
+.screenshot-thumbnail__error { display: grid; width: 100%; height: 100%; place-items: center; color: var(--color-text-muted, #94a3b8); }
+.screenshot-cell { min-width: 0; }
+.screenshot-cell > span, .screenshot-cell > strong, .screenshot-cell > p, .screenshot-cell > code { display: block; min-width: 0; }
+.screenshot-cell > span { margin-bottom: 5px; color: var(--color-text-muted, #94a3b8); font-size: var(--font-caption); }
+.screenshot-cell > strong, .screenshot-cell > p { margin: 0; color: var(--color-text-primary, #1f2a44); font-size: var(--font-sm); line-height: 1.5; overflow-wrap: anywhere; }
+.screenshot-cell--script > code { overflow: hidden; margin-top: 4px; color: var(--color-text-secondary, #64748b); font-size: var(--font-caption); text-overflow: ellipsis; white-space: nowrap; }
+.screenshot-cell--path .el-tooltip__trigger { display: block; min-width: 0; }
+.screenshot-cell--path code { display: block; overflow: hidden; color: var(--color-primary, #2563eb); font-size: var(--font-xs); text-overflow: ellipsis; white-space: nowrap; }
 
 .analysis-metrics { display: grid; overflow: hidden; border: 1px solid var(--color-border, #e5ebf3); border-radius: min(var(--radius-card, 6px), 8px); grid-template-columns: repeat(4, minmax(0, 1fr)); background: var(--color-surface, #fff); }
 .analysis-metrics > div { min-width: 0; min-height: 108px; padding: 14px 15px; border-right: 1px solid var(--color-border-light, #eef2f7); }
@@ -773,7 +1306,17 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
   .assertion-charts, .assertion-columns { grid-template-columns: 1fr; }
   .assertion-chart-section--outcome { border-left: 0; padding-left: 0; }
   .event-row { grid-template-columns: 82px 82px 72px 1fr; }
+  .network-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .network-metrics > div:nth-child(3n) { border-right: 0; }
+  .network-metrics > div:nth-child(-n + 3) { border-bottom: 1px solid var(--color-border-light, #eef2f7); }
   .api-response-payloads { grid-template-columns: 1fr; }
+  .resource-response-heading { align-items: flex-start; flex-direction: column; }
+  .resource-response-columns, .resource-response-row { grid-template-columns: minmax(120px, 0.75fr) minmax(84px, 0.5fr) minmax(220px, 2fr) 86px; }
+  .resource-response-columns > :last-child { display: none; }
+  .resource-response-row__duration { display: none; }
+  .screenshot-row { grid-template-columns: 120px repeat(2, minmax(0, 1fr)); align-items: start; }
+  .screenshot-thumbnail { grid-row: 1 / span 2; }
+  .screenshot-cell--assertion, .screenshot-cell--path { grid-column: span 1; }
 }
 
 @media (max-width: 620px) {
@@ -787,18 +1330,28 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
   .metadata-grid > div:last-child, .analysis-metrics > div:last-child { border-bottom: 0; }
   .event-row { grid-template-columns: 82px 80px 1fr; }
   .event-row .el-tag { display: none; }
-  .api-metrics { grid-template-columns: 1fr; }
-  .api-metrics > div { min-height: 70px; border-right: 0; border-bottom: 1px solid var(--color-border-light, #eef2f7); }
-  .api-metrics > div:last-child { border-bottom: 0; }
+  .network-category-switch { display: grid; width: 100%; }
+  .network-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .network-metrics > div, .network-metrics > div:nth-child(3n) { min-height: 64px; border-right: 1px solid var(--color-border-light, #eef2f7); border-bottom: 1px solid var(--color-border-light, #eef2f7); }
+  .network-metrics > div:nth-child(2n) { border-right: 0; }
+  .network-metrics > div:nth-last-child(-n + 2) { border-bottom: 0; }
   .api-response-item summary { grid-template-columns: 12px 58px minmax(0, 1fr) 80px; }
   .api-response-item__method { width: 54px; }
   .api-response-item__duration { display: none; }
   .api-response-detail { padding-left: 14px; }
+  .resource-filters { width: 100%; }
+  .resource-filters label { min-width: 0; flex: 1; }
+  .resource-filters select { width: 100%; min-width: 0; }
+  .resource-response-list { overflow-x: auto; }
+  .resource-response-columns, .resource-response-row { width: 680px; }
   .log-toolbar { grid-template-columns: 1fr 130px; }
   .log-toolbar > span { grid-column: 1 / -1; }
   .log-line { grid-template-columns: 76px 76px 1fr; }
   .log-line__scope { display: none; }
   .script-expanded { padding-left: 12px; }
+  .screenshot-row { grid-template-columns: 96px minmax(0, 1fr); gap: 10px; padding: 10px; }
+  .screenshot-thumbnail { width: 92px; height: 68px; grid-row: 1 / span 4; }
+  .screenshot-cell--assertion, .screenshot-cell--path { grid-column: 2; }
   .assertion-group-list { max-height: none; }
   .assertion-column > header { align-items: flex-start; }
   .assertion-column__heading-meta { flex-wrap: wrap; }

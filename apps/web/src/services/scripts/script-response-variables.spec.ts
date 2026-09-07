@@ -68,6 +68,25 @@ describe('script response variables', () => {
     expect(report.failed.map((binding) => binding.variableName)).toEqual(['MISSING'])
   })
 
+  it('uses output from a completed network-only failure but rejects ordinary failed output', () => {
+    const networkFailure = extractScriptResponseVariables(script, {
+      ...result,
+      ok: false,
+      continuePipeline: true,
+    })
+    const ordinaryFailure = extractScriptResponseVariables(script, {
+      ...result,
+      ok: false,
+    })
+
+    expect(networkFailure.extracted.map(({ binding }) => binding.variableName)).toEqual([
+      'FORM_ID',
+      'FORM_ENABLED',
+      'FORM_CONTRACT',
+    ])
+    expect(ordinaryFailure).toEqual({ extracted: [], failed: [] })
+  })
+
   it('stores extracted values globally and keeps old values when a path is missing', () => {
     const runtimeVariables = new SessionRuntimeVariableService(new MemoryStorage())
     runtimeVariables.upsert({

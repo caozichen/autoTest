@@ -1,5 +1,10 @@
 import type { ScriptAssertionResult } from './assertion'
-import type { ScriptApiResponse } from './script'
+import type {
+  ScriptApiResponse,
+  ScriptArtifact,
+  ScriptNetworkSummary,
+  ScriptResourceResponse,
+} from './script'
 
 export type RunRecordStatus = 'running' | 'passed' | 'failed' | 'partial' | 'interrupted'
 export type RunScriptStatus = 'queued' | 'running' | 'passed' | 'failed' | 'skipped'
@@ -40,6 +45,9 @@ export interface RunScriptRecord extends RunScriptSnapshot {
   logs: RunRecordLog[]
   assertions: ScriptAssertionResult[]
   apiResponses: ScriptApiResponse[]
+  resourceResponses: ScriptResourceResponse[]
+  networkSummary: ScriptNetworkSummary
+  artifacts: ScriptArtifact[]
   output?: Record<string, unknown>
   error?: string
 }
@@ -106,6 +114,9 @@ export interface CompleteRunScriptDraft {
   }>
   assertions?: ScriptAssertionResult[]
   apiResponses?: ScriptApiResponse[]
+  resourceResponses?: ScriptResourceResponse[]
+  networkSummary?: ScriptNetworkSummary
+  artifacts?: ScriptArtifact[]
   output?: Record<string, unknown>
   error?: string
 }
@@ -117,6 +128,9 @@ export interface UpdateRunScriptProgressDraft {
   logs: CompleteRunScriptDraft['logs']
   assertions?: ScriptAssertionResult[]
   apiResponses?: ScriptApiResponse[]
+  resourceResponses?: ScriptResourceResponse[]
+  networkSummary?: ScriptNetworkSummary
+  artifacts?: ScriptArtifact[]
   output?: Record<string, unknown>
   error?: string
   secretValues?: string[]

@@ -21,11 +21,13 @@ export interface AutomationPipelineStopResult {
   stopped: boolean
   runnerFound: boolean
   cancelledRunIds: string[]
+  cleanupTimedOutRunIds?: string[]
 }
 
 export interface AutomationPipelineExecutionService {
   run(pipeline: AutomationPipeline): Promise<RunRecord>
   stop(pipelineId: string): Promise<AutomationPipelineStopResult>
+  stopByRecordId(recordId: string): Promise<AutomationPipelineStopResult>
   isRunning(pipelineId: string): boolean
 }
 
@@ -71,6 +73,9 @@ function resultCompletion(scriptId: string, result: ScriptRunResult): CompleteRu
     logs: result.logs,
     ...(result.assertions ? { assertions: result.assertions } : {}),
     ...(result.apiResponses ? { apiResponses: result.apiResponses } : {}),
+    ...(result.resourceResponses ? { resourceResponses: result.resourceResponses } : {}),
+    ...(result.networkSummary ? { networkSummary: result.networkSummary } : {}),
+    ...(result.artifacts ? { artifacts: result.artifacts } : {}),
     ...(result.output ? { output: result.output } : {}),
     ...(result.error ? { error: result.error } : {}),
   }
@@ -107,6 +112,7 @@ interface ActivePipelineExecution {
   recordId: string | null
   currentScriptId: string | null
   cancelRequested: boolean
+  stopPromise: Promise<AutomationPipelineStopResult> | null
   interruptionPromise: Promise<RunRecord> | null
 }
 
@@ -157,6 +163,7 @@ function validatePipelineScripts(
 
 export class LocalAutomationPipelineExecutionService implements AutomationPipelineExecutionService {
   private readonly activeExecutions = new Map<string, ActivePipelineExecution>()
+  private readonly recordStopRequests = new Map<string, Promise<AutomationPipelineStopResult>>()
 
   constructor(private readonly dependencies: AutomationPipelineExecutionDependencies) {}
 
@@ -171,6 +178,7 @@ export class LocalAutomationPipelineExecutionService implements AutomationPipeli
       recordId: null,
       currentScriptId: null,
       cancelRequested: false,
+      stopPromise: null,
       interruptionPromise: null,
     }
     this.activeExecutions.set(pipeline.id, execution)
@@ -192,21 +200,77 @@ export class LocalAutomationPipelineExecutionService implements AutomationPipeli
       return { stopped: false, runnerFound: false, cancelledRunIds: [] }
     }
 
-    execution.cancelRequested = true
-    let runnerFound = false
-    let cancelledRunIds: string[] = []
-    try {
-      if (execution.currentScriptId) {
-        const result = await this.dependencies.scripts.stop(execution.currentScriptId)
-        runnerFound = result.runnerFound
-        cancelledRunIds = result.cancelledRunIds
+    return this.stopExecution(execution)
+  }
+
+  stopByRecordId(recordId: string): Promise<AutomationPipelineStopResult> {
+    const pending = this.recordStopRequests.get(recordId)
+    if (pending) return pending
+
+    const request = this.stopRecord(recordId).finally(() => {
+      if (this.recordStopRequests.get(recordId) === request) {
+        this.recordStopRequests.delete(recordId)
       }
-      if (execution.recordId) await this.interruptExecution(execution)
-      return { stopped: true, runnerFound, cancelledRunIds }
-    } catch (error) {
-      if (this.activeExecutions.get(pipelineId) === execution) {
+    })
+    this.recordStopRequests.set(recordId, request)
+    return request
+  }
+
+  private stopExecution(
+    execution: ActivePipelineExecution,
+  ): Promise<AutomationPipelineStopResult> {
+    if (execution.stopPromise) return execution.stopPromise
+
+    execution.stopPromise = this.performStopExecution(execution).catch((error) => {
+      if (this.activeExecutions.get(execution.pipelineId) === execution) {
         execution.cancelRequested = false
+        execution.stopPromise = null
         execution.interruptionPromise = null
+      }
+      throw error
+    })
+    return execution.stopPromise
+  }
+
+  private async performStopExecution(
+    execution: ActivePipelineExecution,
+  ): Promise<AutomationPipelineStopResult> {
+    execution.cancelRequested = true
+    const result = execution.currentScriptId && execution.recordId
+      ? await this.dependencies.scripts.stopExecution(execution.recordId)
+      : { runnerFound: false, cancelledRunIds: [] }
+    if (execution.recordId) await this.interruptExecution(execution)
+    return { stopped: true, ...result }
+  }
+
+  private async stopRecord(recordId: string): Promise<AutomationPipelineStopResult> {
+    const activeExecution = [...this.activeExecutions.values()]
+      .find((execution) => execution.recordId === recordId)
+    if (activeExecution) return this.stopExecution(activeExecution)
+
+    const record = await this.dependencies.runRecords.get(recordId)
+    if (!record || record.status !== 'running') {
+      return { stopped: false, runnerFound: false, cancelledRunIds: [] }
+    }
+
+    const runnerStop = await this.dependencies.scripts.stopExecution(recordId)
+
+    try {
+      await this.dependencies.runRecords.interrupt(
+        recordId,
+        `用户已从运行记录强制停止批次 ${record.displayId}`,
+      )
+      return { stopped: true, ...runnerStop }
+    } catch (error) {
+      const current = await this.dependencies.runRecords.get(recordId).catch(() => undefined)
+      if (current === null) {
+        return { stopped: false, ...runnerStop }
+      }
+      if (current && current.status !== 'running') {
+        return {
+          stopped: current.status === 'interrupted',
+          ...runnerStop,
+        }
       }
       throw error
     }
@@ -260,7 +324,10 @@ export class LocalAutomationPipelineExecutionService implements AutomationPipeli
       })
 
       failureStage = 'runner'
-      const baseContext = buildScriptRunContext(environment, this.dependencies.runtimeVariables)
+      const baseContext = {
+        ...buildScriptRunContext(environment, this.dependencies.runtimeVariables),
+        executionId: record.id,
+      }
       return await this.runSteps(record.id, pipeline, baseContext, secretValues, execution)
     } catch (error) {
       if (execution.cancelRequested) return await this.interruptExecution(execution)
@@ -288,6 +355,7 @@ export class LocalAutomationPipelineExecutionService implements AutomationPipeli
     for (const [index, step] of pipeline.steps.entries()) {
       if (execution.cancelRequested) return this.interruptExecution(execution)
       let completion: CompleteRunScriptDraft
+      let continueAfterStepFailure = false
       try {
         Object.assign(pipelineVariables, resolveStepVariables(step, outputs))
         const context: ScriptRunContext = {
@@ -317,6 +385,8 @@ export class LocalAutomationPipelineExecutionService implements AutomationPipeli
           throw new Error(`Runner 未返回脚本 ${step.scriptId} 的执行结果`)
         }
         completion = resultCompletion(step.scriptId, completedScript.lastRunResult)
+        continueAfterStepFailure = completedScript.lastRunResult.continuePipeline === true
+          && completedScript.lastRunResult.timedOut !== true
         if (completedScript.lastRunResult.output) {
           outputs.set(step.scriptId, completedScript.lastRunResult.output)
         }
@@ -326,18 +396,25 @@ export class LocalAutomationPipelineExecutionService implements AutomationPipeli
           baseContext.environmentId,
           this.dependencies.runtimeVariables,
         )
+        if (variableReport.failed.length > 0) {
+          const missingVariables = variableReport.failed
+            .map(({ variableName, responsePath }) => `${variableName} (${responsePath})`)
+            .join('、')
+          throw new Error(`脚本 ${step.scriptId} 未能提取必需响应变量：${missingVariables}`)
+        }
         Object.assign(pipelineVariables, Object.fromEntries(
           variableReport.applied.map((variable) => [variable.key, variable.value]),
         ))
       } catch (error) {
         if (execution.cancelRequested) return this.interruptExecution(execution)
+        continueAfterStepFailure = false
         completion = failedCompletion(step.scriptId, errorMessage(error, '脚本执行失败'))
       } finally {
         if (execution.currentScriptId === step.scriptId) execution.currentScriptId = null
       }
 
       completions.push(completion)
-      if (completion.status !== 'failed') continue
+      if (completion.status !== 'failed' || continueAfterStepFailure) continue
       for (const remaining of pipeline.steps.slice(index + 1)) {
         completions.push(skippedCompletion(remaining.scriptId))
       }

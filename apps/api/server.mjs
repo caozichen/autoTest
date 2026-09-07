@@ -1,8 +1,12 @@
 import { createServer } from 'node:http'
 import { randomUUID } from 'node:crypto'
-import { resolve } from 'node:path'
+import { constants as fileSystemConstants } from 'node:fs'
+import * as fileSystem from 'node:fs/promises'
+import { isAbsolute, relative, resolve, sep } from 'node:path'
+import { pipeline } from 'node:stream/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
+import { DEFAULT_ARTIFACT_ROOT_DIRECTORY } from './artifact-writer.mjs'
 import { RunRecordFileStore, RunRecordStoreError } from './run-record-store.mjs'
 import {
   DEFAULT_SCRIPT_CONFIG_DIRECTORY,
@@ -23,9 +27,15 @@ const allowedOrigins = new Set([
 const RUN_SNAPSHOT_TTL_MS = 5 * 60 * 1000
 const DEFAULT_CANCELLATION_REASON = '用户强制停止运行'
 const DEFAULT_CANCELLATION_WAIT_TIMEOUT_MS = 3_500
+const DEFAULT_ARTIFACT_PERSISTENCE_TIMEOUT_MS = 10_000
 const DEFAULT_RUN_RECORD_DIRECTORY = fileURLToPath(new URL('../../data/run-records/', import.meta.url))
 const DEFAULT_REQUEST_LIMIT_BYTES = 1024 * 1024
 export const RUN_RECORD_REQUEST_LIMIT_BYTES = 64 * 1024 * 1024
+const RUN_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{7,99}$/
+const EXECUTION_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$/
+const ARTIFACT_SCOPE_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$/
+const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f-\u009f]/
+const SCREENSHOT_MIME_TYPES = new Set(['image/png', 'image/jpeg'])
 
 class RequestBodyTooLargeError extends Error {
   constructor(limitBytes) {
@@ -59,12 +69,17 @@ function liveRunSnapshot(run) {
     logs: run.result?.logs ?? run.logs,
     ...(run.result?.assertions ? { assertions: run.result.assertions } : {}),
     ...(run.result?.apiResponses ? { apiResponses: run.result.apiResponses } : {}),
+    ...(run.result?.resourceResponses ? { resourceResponses: run.result.resourceResponses } : {}),
+    ...(run.result?.networkSummary ? { networkSummary: run.result.networkSummary } : {}),
+    ...(run.result?.artifacts ? { artifacts: run.result.artifacts } : {}),
     ...(run.result?.result ? { result: run.result.result } : {}),
     ...(run.result?.error || run.cancellationReason
       ? { error: run.result?.error ?? run.cancellationReason }
       : {}),
     ...(run.result ? { ok: run.result.ok } : interrupted ? { ok: false } : {}),
     ...(run.result?.cancelled || interrupted ? { cancelled: true } : {}),
+    ...(run.result?.timedOut === true ? { timedOut: true } : {}),
+    ...(run.result?.continuePipeline === true ? { continuePipeline: true } : {}),
   }
 }
 
@@ -75,6 +90,52 @@ function sendJson(response, statusCode, body, origin = '') {
     ...(allowedOrigins.has(origin) ? { 'Access-Control-Allow-Origin': origin, Vary: 'Origin' } : {}),
   })
   response.end(JSON.stringify(body))
+}
+
+function screenshotNotFound() {
+  return new RunRecordStoreError('截图不存在', {
+    statusCode: 404,
+    code: 'SCREENSHOT_NOT_FOUND',
+  })
+}
+
+function assertSafeArtifactScopeId(value, label) {
+  if (typeof value !== 'string' || !ARTIFACT_SCOPE_ID_PATTERN.test(value)) {
+    throw new RunRecordStoreError(`${label}格式无效`)
+  }
+  return value
+}
+
+function normalizeArtifactRelativePath(value) {
+  if (
+    typeof value !== 'string'
+    || !value
+    || value.length > 4_096
+    || CONTROL_CHARACTER_PATTERN.test(value)
+    || value.includes('\\')
+    || isAbsolute(value)
+    || value.startsWith('//')
+    || /^[a-zA-Z]:/.test(value)
+  ) {
+    throw new RunRecordStoreError('截图相对路径格式无效')
+  }
+  const segments = value.split('/')
+  if (segments.some((segment) => !segment || segment === '.' || segment === '..')) {
+    throw new RunRecordStoreError('截图相对路径格式无效')
+  }
+  return segments.join('/')
+}
+
+function isPathInside(rootPath, targetPath) {
+  const relativePath = relative(rootPath, targetPath)
+  return Boolean(relativePath)
+    && relativePath !== '..'
+    && !relativePath.startsWith(`..${sep}`)
+    && !isAbsolute(relativePath)
+}
+
+function isMissingFileError(error) {
+  return ['ENOENT', 'ENOTDIR', 'ELOOP'].includes(error?.code)
 }
 
 async function readJson(request, limitBytes = DEFAULT_REQUEST_LIMIT_BYTES) {
@@ -94,11 +155,11 @@ async function readJson(request, limitBytes = DEFAULT_REQUEST_LIMIT_BYTES) {
   }
 }
 
-function decodePathSegment(value) {
+function decodePathSegment(value, label = '运行记录 ID') {
   try {
     return decodeURIComponent(value)
   } catch {
-    throw new RunRecordStoreError('URL 中的运行记录 ID 编码无效')
+    throw new RunRecordStoreError(`URL 中的${label}编码无效`)
   }
 }
 
@@ -151,6 +212,8 @@ export function createRunnerServer({
   validateRequest,
   runSnapshotTtlMs = RUN_SNAPSHOT_TTL_MS,
   cancellationWaitTimeoutMs = DEFAULT_CANCELLATION_WAIT_TIMEOUT_MS,
+  artifactPersistenceTimeoutMs = DEFAULT_ARTIFACT_PERSISTENCE_TIMEOUT_MS,
+  artifactRootDirectory = DEFAULT_ARTIFACT_ROOT_DIRECTORY,
   runRecordDirectory = DEFAULT_RUN_RECORD_DIRECTORY,
   runRecordStore,
   scriptConfigDirectory = DEFAULT_SCRIPT_CONFIG_DIRECTORY,
@@ -158,6 +221,16 @@ export function createRunnerServer({
   scriptConfigRepository,
 } = {}) {
   const activeRuns = new Map()
+  const pendingRunCancellations = new Map()
+  const pendingExecutionCancellations = new Map()
+  const artifactPersistenceDeadlineMs = Number.isFinite(artifactPersistenceTimeoutMs)
+    && artifactPersistenceTimeoutMs > 0
+    ? Math.max(1, Math.floor(artifactPersistenceTimeoutMs))
+    : DEFAULT_ARTIFACT_PERSISTENCE_TIMEOUT_MS
+  if (typeof artifactRootDirectory !== 'string' || !artifactRootDirectory.trim()) {
+    throw new Error('截图制品根目录必须是非空字符串')
+  }
+  const trustedArtifactRoot = resolve(artifactRootDirectory)
   const storedRunRecords = runRecordStore ?? new RunRecordFileStore({ directory: runRecordDirectory })
   const storedScriptConfigs = scriptConfigRepository ?? new FileScriptConfigRepository({
     directory: scriptConfigDirectory,
@@ -169,16 +242,159 @@ export function createRunnerServer({
   }))
   const scriptExecutor = executeScript ?? ((payload, options) => executeRegisteredScript(payload, {
     ...options,
+    artifactRootDirectory: trustedArtifactRoot,
     scriptConfigRepository: storedScriptConfigs,
     scriptsDirectory,
   }))
 
   function appendRunLog(run, level, message) {
-    run.logs.push({
+    const log = {
       timestamp: new Date().toISOString(),
       level,
       message,
+    }
+    run.logs.push(log)
+    return log
+  }
+
+  function pendingCancellationSnapshot(runId, cancellation) {
+    return {
+      runId,
+      status: 'interrupted',
+      ok: false,
+      cancelled: true,
+      pendingRegistration: true,
+      durationMs: 0,
+      logs: [{
+        timestamp: cancellation.createdAt,
+        level: 'warning',
+        message: `运行在启动前已请求停止：${cancellation.reason}`,
+      }],
+      error: cancellation.reason,
+    }
+  }
+
+  function reserveRunCancellation(runId, reason) {
+    const previous = pendingRunCancellations.get(runId)
+    if (previous?.cleanupTimer) clearTimeout(previous.cleanupTimer)
+    const cancellation = {
+      reason,
+      createdAt: new Date().toISOString(),
+      cleanupTimer: null,
+    }
+    cancellation.cleanupTimer = setTimeout(() => {
+      if (pendingRunCancellations.get(runId) === cancellation) {
+        pendingRunCancellations.delete(runId)
+      }
+    }, runSnapshotTtlMs)
+    cancellation.cleanupTimer.unref?.()
+    pendingRunCancellations.set(runId, cancellation)
+    return cancellation
+  }
+
+  function reserveExecutionCancellation(executionId, reason) {
+    const previous = pendingExecutionCancellations.get(executionId)
+    if (previous?.cleanupTimer) clearTimeout(previous.cleanupTimer)
+    const cancellation = {
+      reason,
+      createdAt: new Date().toISOString(),
+      cleanupTimer: null,
+    }
+    cancellation.cleanupTimer = setTimeout(() => {
+      if (pendingExecutionCancellations.get(executionId) === cancellation) {
+        pendingExecutionCancellations.delete(executionId)
+      }
+    }, runSnapshotTtlMs)
+    cancellation.cleanupTimer.unref?.()
+    pendingExecutionCancellations.set(executionId, cancellation)
+    return cancellation
+  }
+
+  function takeRunCancellation(runId) {
+    const cancellation = pendingRunCancellations.get(runId)
+    if (!cancellation) return null
+    pendingRunCancellations.delete(runId)
+    if (cancellation.cleanupTimer) clearTimeout(cancellation.cleanupTimer)
+    return cancellation
+  }
+
+  async function persistRunArtifacts(run, result) {
+    if (!Array.isArray(result?.artifacts) || result.artifacts.length === 0) return null
+    let timeoutId
+    const persistence = Promise.resolve().then(() => storedRunRecords.mergeScriptArtifacts(
+        run.executionId,
+        run.scriptId,
+        result.artifacts,
+      )).then(
+        () => null,
+        (error) => error ?? new Error('未知错误'),
+      )
+    const timeout = new Promise((resolveTimeout) => {
+      timeoutId = setTimeout(() => {
+        resolveTimeout(new Error(`超过 ${artifactPersistenceDeadlineMs} ms`))
+      }, artifactPersistenceDeadlineMs)
+      timeoutId.unref?.()
     })
+    const error = await Promise.race([persistence, timeout])
+    clearTimeout(timeoutId)
+    if (!error) return null
+    const message = error instanceof Error ? error.message : String(error)
+    return appendRunLog(run, 'warning', `运行制品写入历史记录失败：${message}`)
+  }
+
+  async function openRegisteredScreenshot(recordId, stepId, attemptId, requestedPath) {
+    const record = await storedRunRecords.get(recordId)
+    if (!record) throw screenshotNotFound()
+
+    const script = record.scripts.find((item) => item.id === stepId)
+    const artifact = script?.artifacts.find((item) => (
+      item.executionId === recordId
+      && item.stepId === stepId
+      && item.attemptId === attemptId
+      && item.relativePath === requestedPath
+    ))
+    if (
+      !artifact
+      || artifact.type !== 'screenshot'
+      || !SCREENSHOT_MIME_TYPES.has(artifact.mimeType)
+    ) {
+      throw screenshotNotFound()
+    }
+
+    const scopeDirectory = resolve(trustedArtifactRoot, recordId, stepId, attemptId)
+    const candidatePath = resolve(scopeDirectory, ...requestedPath.split('/'))
+    if (!isPathInside(scopeDirectory, candidatePath)) {
+      throw new RunRecordStoreError('截图相对路径超出本次执行范围')
+    }
+    if (typeof artifact.absolutePath !== 'string' || resolve(artifact.absolutePath) !== candidatePath) {
+      throw screenshotNotFound()
+    }
+
+    let handle
+    try {
+      const [realArtifactRoot, candidateInfo] = await Promise.all([
+        fileSystem.realpath(trustedArtifactRoot),
+        fileSystem.lstat(candidatePath),
+      ])
+      if (!candidateInfo.isFile() || candidateInfo.isSymbolicLink()) throw screenshotNotFound()
+
+      const realCandidatePath = await fileSystem.realpath(candidatePath)
+      if (!isPathInside(realArtifactRoot, realCandidatePath)) throw screenshotNotFound()
+
+      handle = await fileSystem.open(
+        realCandidatePath,
+        fileSystemConstants.O_RDONLY | (fileSystemConstants.O_NOFOLLOW ?? 0),
+      )
+      const openedInfo = await handle.stat()
+      if (!openedInfo.isFile() || openedInfo.size !== artifact.sizeBytes) throw screenshotNotFound()
+
+      return { artifact, handle, sizeBytes: openedInfo.size }
+    } catch (error) {
+      await handle?.close().catch(() => undefined)
+      if (error instanceof RunRecordStoreError) throw error
+      if (isMissingFileError(error)) throw screenshotNotFound()
+      throw error
+    }
   }
 
   function scheduleRunCleanup(run) {
@@ -243,7 +459,11 @@ export function createRunnerServer({
         : rawResult
       run.result = result
       run.status = cancelled ? 'interrupted' : result?.ok ? 'passed' : 'failed'
-      return { statusCode: 200, responseBody: result }
+      const artifactWarning = await persistRunArtifacts(run, result)
+      if (artifactWarning && Array.isArray(run.result?.logs) && run.result.logs !== run.logs) {
+        run.result = { ...run.result, logs: [...run.result.logs, artifactWarning] }
+      }
+      return { statusCode: 200, responseBody: run.result }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Runner 请求处理失败'
       const cancelled = run.abortController.signal.aborted
@@ -399,6 +619,56 @@ export function createRunnerServer({
     return
   }
 
+  const screenshotMatch = pathname.match(
+    /^\/run-records\/([^/]+)\/screenshots\/([^/]+)\/([^/]+)$/,
+  )
+  if (screenshotMatch && request.method === 'GET') {
+    let openedScreenshot
+    try {
+      const recordId = decodePathSegment(screenshotMatch[1])
+      const stepId = assertSafeArtifactScopeId(
+        decodePathSegment(screenshotMatch[2], '脚本 ID'),
+        '脚本 ID',
+      )
+      const attemptId = assertSafeArtifactScopeId(
+        decodePathSegment(screenshotMatch[3], '运行尝试 ID'),
+        '运行尝试 ID',
+      )
+      const screenshotPaths = new URL(request.url || '/', 'http://runner.local')
+        .searchParams
+        .getAll('path')
+      if (screenshotPaths.length !== 1) {
+        throw new RunRecordStoreError('截图请求必须包含唯一的 path 参数')
+      }
+      const relativePath = normalizeArtifactRelativePath(screenshotPaths[0])
+      openedScreenshot = await openRegisteredScreenshot(
+        recordId,
+        stepId,
+        attemptId,
+        relativePath,
+      )
+
+      response.writeHead(200, {
+        'Content-Type': openedScreenshot.artifact.mimeType,
+        'Content-Length': openedScreenshot.sizeBytes,
+        'Content-Disposition': 'inline',
+        'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff',
+        ...(allowedOrigins.has(origin) ? { 'Access-Control-Allow-Origin': origin, Vary: 'Origin' } : {}),
+      })
+      await pipeline(
+        openedScreenshot.handle.createReadStream({ autoClose: false }),
+        response,
+      )
+    } catch (error) {
+      if (response.headersSent) response.destroy()
+      else sendRunRecordError(response, error, origin)
+    } finally {
+      await openedScreenshot?.handle.close().catch(() => undefined)
+    }
+    return
+  }
+
   const storedRunRecordMatch = pathname.match(/^\/run-records\/([^/]+)$/)
   if (storedRunRecordMatch && request.method === 'GET') {
     try {
@@ -434,12 +704,27 @@ export function createRunnerServer({
   if (request.method === 'POST' && runCancellationMatch) {
     try {
       const runId = decodeURIComponent(runCancellationMatch[1])
+      if (!RUN_ID_PATTERN.test(runId)) throw new Error('运行任务 ID 格式无效')
+      const cancellationPayload = await readJson(request)
+      const reason = parseCancellationReason(cancellationPayload)
       const run = activeRuns.get(runId)
       if (!run) {
+        if (cancellationPayload?.reserveIfMissing === true) {
+          const cancellation = reserveRunCancellation(runId, reason)
+          const snapshot = pendingCancellationSnapshot(runId, cancellation)
+          sendJson(response, 200, {
+            ok: true,
+            status: 'interrupted',
+            pendingRegistration: true,
+            cancelledRunIds: [runId],
+            cleanupTimedOutRunIds: [],
+            runs: [snapshot],
+          }, origin)
+          return
+        }
         sendJson(response, 404, { ok: false, error: '运行任务不存在或已过期' }, origin)
         return
       }
-      const reason = parseCancellationReason(await readJson(request))
       if (run.status !== 'running') {
         sendJson(response, 409, {
           ok: false,
@@ -461,6 +746,36 @@ export function createRunnerServer({
       }, origin)
     } catch (error) {
       const message = error instanceof Error ? error.message : '停止运行任务失败'
+      sendJson(response, 400, { ok: false, error: message }, origin)
+    }
+    return
+  }
+
+  const executionCancellationMatch = pathname.match(/^\/executions\/([^/]+)\/cancel$/)
+  if (request.method === 'POST' && executionCancellationMatch) {
+    try {
+      const executionId = decodeURIComponent(executionCancellationMatch[1])
+      if (!EXECUTION_ID_PATTERN.test(executionId)) throw new Error('批次执行 ID 格式无效')
+      const reason = parseCancellationReason(await readJson(request))
+      reserveExecutionCancellation(executionId, reason)
+      const runs = [...activeRuns.values()].filter((run) => (
+        run.executionId === executionId && run.status === 'running'
+      ))
+      const interruptedRuns = interruptRuns(runs, reason)
+      const completionStates = await Promise.all(interruptedRuns.map(waitForRunCompletion))
+      sendJson(response, 200, {
+        ok: true,
+        status: 'interrupted',
+        executionId,
+        pendingRegistration: true,
+        cancelledRunIds: interruptedRuns.map((item) => item.runId),
+        cleanupTimedOutRunIds: interruptedRuns
+          .filter((_, index) => !completionStates[index])
+          .map((item) => item.runId),
+        runs: interruptedRuns.map(liveRunSnapshot),
+      }, origin)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '停止运行批次失败'
       sendJson(response, 400, { ok: false, error: message }, origin)
     }
     return
@@ -504,6 +819,11 @@ export function createRunnerServer({
     const runId = decodeURIComponent(pathname.slice('/runs/'.length))
     const run = activeRuns.get(runId)
     if (!run) {
+      const cancellation = pendingRunCancellations.get(runId)
+      if (cancellation) {
+        sendJson(response, 200, pendingCancellationSnapshot(runId, cancellation), origin)
+        return
+      }
       sendJson(response, 404, { ok: false, error: '运行任务不存在或已过期' }, origin)
       return
     }
@@ -514,32 +834,56 @@ export function createRunnerServer({
   if (request.method === 'POST' && request.url === '/runs') {
     let liveRun = null
     try {
-      const payload = await readJson(request)
-      const runId = typeof payload?.runId === 'string' && payload.runId.trim()
-        ? payload.runId.trim()
+      const submittedPayload = await readJson(request)
+      const runId = typeof submittedPayload?.runId === 'string' && submittedPayload.runId.trim()
+        ? submittedPayload.runId.trim()
         : randomUUID()
-      if (!/^[a-zA-Z0-9_-]{8,100}$/.test(runId)) {
+      if (!RUN_ID_PATTERN.test(runId)) {
         throw new Error('运行任务 ID 格式无效')
       }
       if (activeRuns.has(runId)) {
         throw new Error('运行任务 ID 已存在')
       }
+      const payload = { ...submittedPayload, runId }
       const context = await runValidator(payload)
+      const executionId = context.executionId ?? runId
+      const pendingCancellation = takeRunCancellation(runId)
+        ?? pendingExecutionCancellations.get(executionId)
       const abortController = new AbortController()
       liveRun = {
         runId,
         scriptId: context.scriptId,
-        status: 'running',
+        executionId,
+        status: pendingCancellation ? 'interrupted' : 'running',
         startedAt: performance.now(),
         logs: [],
         result: null,
         abortController,
-        cancellationReason: null,
+        cancellationReason: pendingCancellation?.reason ?? null,
         completion: null,
         cleanupTimer: null,
         cleanupWaitWarningLogged: false,
       }
       activeRuns.set(runId, liveRun)
+      if (pendingCancellation) {
+        appendRunLog(
+          liveRun,
+          'warning',
+          `运行在启动前已停止：${pendingCancellation.reason}`,
+        )
+        abortController.abort(pendingCancellation.reason)
+        liveRun.result = {
+          ok: false,
+          cancelled: true,
+          status: 'interrupted',
+          durationMs: 0,
+          logs: liveRun.logs,
+          error: pendingCancellation.reason,
+        }
+        scheduleRunCleanup(liveRun)
+        sendJson(response, 200, liveRun.result, origin)
+        return
+      }
       liveRun.completion = executeLiveRun(liveRun, payload)
       const outcome = await liveRun.completion
       sendJson(response, outcome.statusCode, outcome.responseBody, origin)

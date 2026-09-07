@@ -57,7 +57,9 @@ function formatDetails(details?: Record<string, unknown>): string {
       <section v-if="result.output" class="result-output">
         <div><span>表单名称</span><strong>{{ result.output.title ?? '-' }}</strong></div>
         <div><span>表单 ID</span><code>{{ result.output.formId ?? '-' }}</code></div>
-        <div><span>Form Code</span><code>{{ result.output.formCode ?? '-' }}</code></div>
+        <div v-if="result.output.formCode && result.output.formCode !== result.output.formId">
+          <span>旧版 Form Code（仅记录）</span><code>{{ result.output.formCode }}</code>
+        </div>
         <div><span>最终状态</span><el-tag type="success" size="small">{{ result.output.status ?? '-' }}</el-tag></div>
       </section>
 

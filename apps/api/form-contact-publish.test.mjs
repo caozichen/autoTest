@@ -2,7 +2,31 @@ import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import test from 'node:test'
 
-import { run } from '../../scripts/form-contact-publish.ui.spec.mjs'
+import {
+  inspectBusinessResponse,
+  run,
+} from '../../scripts/form-contact-publish.ui.spec.mjs'
+import { runWithAssertionRecorder } from '../../scripts/support/recorded-expect.mjs'
+
+function createScreenshotArtifactWriter(captures) {
+  return {
+    async captureScreenshot(page, relativePath, options) {
+      const artifact = {
+        executionId: 'run-record-001',
+        stepId: 'form-contact-publish',
+        attemptId: 'attempt-001',
+        absolutePath: `/tmp/autotest-artifacts/run-record-001/form-contact-publish/attempt-001/${relativePath}`,
+        relativePath,
+        type: 'screenshot',
+        mimeType: 'image/png',
+        sizeBytes: 128,
+        createdAt: '2026-09-04T08:00:00.000Z',
+      }
+      captures.push({ page, relativePath, options, artifact })
+      return artifact
+    },
+  }
+}
 
 function sendJson(response, body) {
   response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' })
@@ -13,6 +37,60 @@ function sendHtml(response, html) {
   response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
   response.end(html)
 }
+
+test('records unreadable and invalid business response bodies without stopping later work', async () => {
+  const cases = [
+    {
+      label: '读取失败',
+      response: {
+        ok: () => true,
+        status: () => 200,
+        text: async () => { throw new Error('body released after navigation') },
+      },
+      expectedFailure: '',
+      expectedSucceeded: true,
+    },
+    {
+      label: '无效 JSON',
+      response: {
+        ok: () => true,
+        status: () => 200,
+        text: async () => '{not-json}',
+      },
+      expectedFailure: '接口应返回有效 JSON',
+      expectedSucceeded: false,
+    },
+  ]
+
+  for (const fixture of cases) {
+    const assertions = []
+    let reachedLaterWork = false
+    const outcome = await runWithAssertionRecorder(
+      'form-contact-publish',
+      (assertion) => assertions.push(assertion),
+      async () => {
+        const inspected = await inspectBusinessResponse(fixture.response, fixture.label)
+        reachedLaterWork = true
+        return inspected
+      },
+    )
+
+    assert.equal(reachedLaterWork, true)
+    assert.equal(outcome.succeeded, fixture.expectedSucceeded)
+    assert.deepEqual(outcome.body, {})
+    assert.equal(outcome.bodyValid, false)
+    if (fixture.expectedFailure) {
+      assert.ok(assertions.some(({ status, name }) => (
+        status === 'failed' && name.includes(fixture.expectedFailure)
+      )))
+    } else {
+      assert.equal(outcome.warning, true)
+      assert.equal(outcome.incomplete, true)
+      assert.equal(outcome.bodyReadError, 'body released after navigation')
+      assert.equal(assertions.some(({ status }) => status === 'failed'), false)
+    }
+  }
+})
 
 function mockApplicationHtml() {
   return `<!doctype html>
@@ -144,6 +222,7 @@ test('executes the form flow through headless Google Chrome UI with the environm
   let title = ''
   let published = false
   let strategy = ''
+  let forcePublishFailure = false
 
   const server = createServer(async (request, response) => {
     const url = new URL(request.url, 'http://127.0.0.1')
@@ -158,7 +237,7 @@ test('executes the form flow through headless Google Chrome UI with the environm
     requests.push({ method: request.method, path: url.pathname, authorization: request.headers.authorization, body })
 
     if (request.method === 'POST' && url.pathname === '/api/be/form') {
-      sendJson(response, { code: 0, data: { id: 101 } })
+      sendJson(response, { code: 0, data: { id: 101, form_id: 101, form_code: '951000000000000101' } })
       return
     }
     if (request.method === 'PUT' && url.pathname === '/api/be/form/101/items') {
@@ -175,13 +254,26 @@ test('executes the form flow through headless Google Chrome UI with the environm
     if (request.method === 'GET' && url.pathname === '/api/be/form/101') {
       sendJson(response, {
         code: 0,
-        data: { form: { id: 101, form_code: 'contact-dynamic' } },
+        data: { form: { id: 101, form_id: 101, form_code: '951000000000000101' } },
       })
       return
     }
     if (request.method === 'POST' && url.pathname === '/api/be/form/101/publish') {
+      if (forcePublishFailure) {
+        response.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' })
+        response.end(JSON.stringify({ code: 403001, message: 'mock publish business failure' }))
+        return
+      }
       published = true
-      sendJson(response, { code: 0, data: {} })
+      sendJson(response, {
+        code: 0,
+        data: {
+          form_id: 101,
+          form_code: '951000000000000101',
+          revision_no: 1,
+          status: 'published',
+        },
+      })
       return
     }
     response.writeHead(404)
@@ -194,17 +286,24 @@ test('executes the form flow through headless Google Chrome UI with the environm
     assert.ok(address && typeof address === 'object')
     const origin = `http://127.0.0.1:${address.port}`
     const logs = []
-    const result = await run({
+    const screenshotCaptures = []
+    const artifactWriter = createScreenshotArtifactWriter(screenshotCaptures)
+    const runScenario = () => run({
       siteBaseUrl: `${origin}/`,
       apiBaseUrl: `${origin}/api`,
       ignoreHTTPSErrors: false,
       extraHTTPHeaders: { Authorization: 'Bearer integration-token' },
+      artifactWriter,
       logger: (level, message, details) => logs.push({ level, message, details }),
     })
+    const result = await runScenario()
 
+    assert.equal(screenshotCaptures.length, 0)
     assert.equal(result.formId, '101')
-    assert.equal(result.formCode, 'contact-dynamic')
-    assert.equal(result.formContract.formCode, 'contact-dynamic')
+    assert.equal(result.formCode, '')
+    assert.equal(result.formContract.formId, '101')
+    assert.equal(result.formContract.formCode, '')
+    assert.notEqual(result.formContract.formId, '951000000000000101')
     assert.equal(result.status, 'published')
     assert.equal(result.browser, 'chrome')
     assert.equal(result.headless, true)
@@ -216,6 +315,24 @@ test('executes the form flow through headless Google Chrome UI with the environm
     assert.ok(requests.length >= 5)
     assert.ok(requests.every((request) => request.authorization === 'Bearer integration-token'))
     assert.ok(logs.some((log) => log.level === 'success' && log.message.includes('Chrome 无头 UI 自动化执行完成')))
+
+    forcePublishFailure = true
+    const failedAssertions = []
+    const continuedResult = await runWithAssertionRecorder(
+      'form-contact-publish',
+      (assertion) => failedAssertions.push(assertion),
+      runScenario,
+    )
+    assert.equal(continuedResult.status, 'published')
+    assert.equal(screenshotCaptures.length, 0)
+    const publishFailureIndex = failedAssertions.findIndex(({ status, name }) => (
+      status === 'failed' && name.includes('发布表单接口应返回成功 HTTP 状态')
+    ))
+    const laterListAssertionIndex = failedAssertions.findIndex(({ status, name }) => (
+      status === 'passed' && name.includes('已发布列表中应找到本次创建的表单')
+    ))
+    assert.ok(publishFailureIndex >= 0)
+    assert.ok(laterListAssertionIndex > publishFailureIndex)
   } finally {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
   }

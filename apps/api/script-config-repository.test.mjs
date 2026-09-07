@@ -31,12 +31,12 @@ function configFixture({
     entryFile,
     timeoutMs: 300_000,
     enabled,
-    requestPath: '/form/?id={{FORM_CODE}}',
+    requestPath: '/form/?id={{FORM_ID}}',
     inputParameters: [{
-      id: 'form-code',
-      key: 'FORM_CODE',
+      id: 'form-id',
+      key: 'FORM_ID',
       value: 'fixture',
-      description: '表单代码',
+      description: '表单 ID',
     }],
     responseVariableBindings: [{
       id: 'response-form-id',

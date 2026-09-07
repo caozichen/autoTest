@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { deflateSync } from 'node:zlib'
 
 import { expect } from './support/recorded-expect.mjs'
-import { attachApiResponseRecorder } from './support/api-response-recorder.mjs'
+import { attachNetworkObserver } from './support/api-response-recorder.mjs'
 import {
   createFormLinkContract,
   firstFormCode,
@@ -21,8 +21,14 @@ const NAVIGATION_TIMEOUT_MS = 45_000
 const ACTION_TIMEOUT_MS = 30_000
 const AUTHENTICATED_API_PATH_PREFIXES = ['/api/be/', '/api/base/', '/be/', '/base/']
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
-const SCREENSHOT_DIR = resolve(SCRIPT_DIR, '..', 'outputs', 'form-all-fields-publish')
-const DEFAULT_HEADER_IMAGE_PATH = resolve(SCREENSHOT_DIR, 'fixtures', 'autotest-form-header.png')
+const DEFAULT_HEADER_IMAGE_PATH = resolve(
+  SCRIPT_DIR,
+  '..',
+  'outputs',
+  'form-all-fields-publish',
+  'fixtures',
+  'autotest-form-header.png',
+)
 
 const FORM_SUBTITLE = '\u672c\u8868\u5355\u7528\u4e8e\u6d3b\u52a8\u62a5\u540d\u4e0e\u4fe1\u606f\u767b\u8bb0\uff0c\u8bf7\u6309\u5b9e\u9645\u60c5\u51b5\u5b8c\u6574\u586b\u5199\u3002'
 const FORM_CONTENT_HEADING = '\u586b\u5199\u987b\u77e5'
@@ -260,17 +266,66 @@ function formatBusinessBody(body) {
   }
 }
 
-async function assertBusinessResponse(response, label) {
-  if (!response.ok()) throw new Error(`${label}接口返回 HTTP ${response.status()}`)
-  const body = await response.json().catch(() => null)
-  if (!body || typeof body !== 'object') throw new Error(`${label}接口未返回有效 JSON 业务信封`)
-  if (!Object.prototype.hasOwnProperty.call(body, 'code')) {
-    throw new Error(`${label}响应缺少业务码，实际 ${formatBusinessBody(body)}`)
+function parseRequestPayload(request, label) {
+  try {
+    return request.postDataJSON()
+  } catch {
+    expect(false, `${label}请求体应为有效 JSON`).toBe(true)
+    return {}
   }
-  if (Number(body.code) !== 0) {
-    throw new Error(`${label}业务码应为 0，实际响应 ${formatBusinessBody(body)}`)
+}
+
+async function inspectBusinessResponse(response, label) {
+  const httpSucceeded = response.ok()
+  expect(
+    httpSucceeded,
+    `${label}接口应返回成功 HTTP 状态，实际 ${response.status()}`,
+  ).toBe(true)
+
+  const responseOutcome = await response.text().then(
+    (text) => ({ text }),
+    (error) => ({ error }),
+  )
+  if ('error' in responseOutcome) {
+    const bodyReadError = responseOutcome.error instanceof Error
+      ? responseOutcome.error.message
+      : String(responseOutcome.error)
+    return {
+      body: {},
+      bodyValid: false,
+      bodyReadError,
+      warning: true,
+      incomplete: true,
+      succeeded: httpSucceeded,
+    }
   }
-  return body
+
+  let parsedBody = null
+  try {
+    parsedBody = responseOutcome.text.trim() ? JSON.parse(responseOutcome.text) : null
+  } catch {
+    expect(false, `${label}接口应返回有效 JSON，实际 ${responseOutcome.text.slice(0, 500)}`).toBe(true)
+  }
+  const bodyValid = Boolean(parsedBody && typeof parsedBody === 'object' && !Array.isArray(parsedBody))
+  expect(bodyValid, `${label}接口应返回有效 JSON 业务信封`).toBe(true)
+  const body = bodyValid ? parsedBody : {}
+  const hasBusinessCode = Object.prototype.hasOwnProperty.call(body, 'code')
+  expect(
+    hasBusinessCode,
+    `${label}响应应包含业务码，实际 ${formatBusinessBody(body)}`,
+  ).toBe(true)
+  const businessSucceeded = hasBusinessCode && Number(body.code) === 0
+  if (hasBusinessCode) {
+    expect(
+      businessSucceeded,
+      `${label}业务码应为 0，实际响应 ${formatBusinessBody(body)}`,
+    ).toBe(true)
+  }
+  return {
+    body,
+    bodyValid,
+    succeeded: httpSucceeded && businessSucceeded,
+  }
 }
 
 function waitForExactResponse(page, method, pathnameSuffix) {
@@ -283,17 +338,31 @@ function waitForExactResponse(page, method, pathnameSuffix) {
 async function fetchFormDetail(page, apiBaseUrl, formId, authorization) {
   const detailUrl = new URL(`be/form/${encodeURIComponent(formId)}`, `${apiBaseUrl.replace(/\/+$/, '')}/`).toString()
   const result = await page.evaluate(async ({ url, token }) => {
-    const response = await fetch(url, { headers: { Authorization: token } })
-    return {
-      ok: response.ok,
-      status: response.status,
-      body: await response.json().catch(() => null),
+    try {
+      const response = await fetch(url, { headers: { Authorization: token } })
+      return {
+        ok: response.ok,
+        status: response.status,
+        body: await response.json().catch(() => null),
+      }
+    } catch (error) {
+      return {
+        ok: false,
+        status: 0,
+        body: null,
+        error: error instanceof Error ? error.message : String(error),
+      }
     }
   }, { url: detailUrl, token: authorization })
-  if (!result.ok) throw new Error(`读取已发布表单详情接口返回 HTTP ${result.status}`)
-  if (!result.body || typeof result.body !== 'object') throw new Error('读取已发布表单详情接口未返回有效 JSON')
-  if (Number(result.body.code) !== 0) throw new Error(`读取已发布表单详情接口业务码异常：${result.body.code}`)
-  return result.body
+  expect(
+    result.ok,
+    `读取已发布表单详情接口应成功，实际 HTTP ${result.status}${result.error ? `：${result.error}` : ''}`,
+  ).toBe(true)
+  const validBody = Boolean(result.body && typeof result.body === 'object' && !Array.isArray(result.body))
+  expect(validBody, '读取已发布表单详情接口应返回有效 JSON').toBe(true)
+  const body = validBody ? result.body : {}
+  expect(Number(body.code), `读取已发布表单详情接口业务码应为 0，实际 ${String(body.code)}`).toBe(0)
+  return body
 }
 
 function shanghaiDateParts(timestamp = Date.now()) {
@@ -371,25 +440,31 @@ async function uploadImageThroughBrowser(page, input, imagePath, { includeTheme 
 
   await input.setInputFiles(imagePath)
   const signatureResponse = await signaturePromise
-  const signatureBody = await assertBusinessResponse(signatureResponse, `${label}上传签名`)
-  const uploadId = String(signatureBody.data?.upload_id ?? '').trim()
-  if (!uploadId) throw new Error(`${label}上传签名接口未返回 upload_id`)
+  const signatureOutcome = await inspectBusinessResponse(signatureResponse, `${label}上传签名`)
+  const uploadId = String(signatureOutcome.body?.data?.upload_id ?? '').trim()
+  if (signatureOutcome.bodyValid) {
+    expect(uploadId, `${label}上传签名接口应返回 upload_id`).toMatch(/\S+/)
+  }
 
   if (themePromise) {
     const themeResponse = await themePromise
-    const themeBody = await assertBusinessResponse(themeResponse, `${label}智能配色`)
-    expect(
-      Array.isArray(themeBody.data?.color_theme?.palette)
-        && themeBody.data.color_theme.palette.length > 0,
-      `${label}智能配色应返回非空 palette`,
-    ).toBeTruthy()
+    const themeOutcome = await inspectBusinessResponse(themeResponse, `${label}智能配色`)
+    if (themeOutcome.bodyValid) {
+      expect(
+        Array.isArray(themeOutcome.body?.data?.color_theme?.palette)
+          && themeOutcome.body.data.color_theme.palette.length > 0,
+        `${label}智能配色应返回非空 palette`,
+      ).toBeTruthy()
+    }
     expect(new URL(themeResponse.url()).searchParams.get('upload_id'), '智能配色应使用签名 upload_id').toBe(uploadId)
   }
 
   const completeResponse = await completePromise
-  const completeBody = await assertBusinessResponse(completeResponse, `${label}上传完成确认`)
-  if (!completeBody.data?.id) throw new Error(`${label}上传完成接口未返回文件 id`)
-  if (!completeBody.data?.full_path) throw new Error(`${label}上传完成接口未返回完整访问地址`)
+  const completeOutcome = await inspectBusinessResponse(completeResponse, `${label}上传完成确认`)
+  if (completeOutcome.bodyValid) {
+    expect(completeOutcome.body?.data?.id, `${label}上传完成接口应返回文件 id`).toBeTruthy()
+    expect(completeOutcome.body?.data?.full_path, `${label}上传完成接口应返回完整访问地址`).toBeTruthy()
+  }
   return uploadId
 }
 
@@ -410,16 +485,20 @@ async function waitForApiResponse(page, urlPattern, action, label) {
   }, { timeout: ACTION_TIMEOUT_MS })
   await action()
   const response = await responsePromise
-  const body = await assertBusinessResponse(response, label)
-  return { response, body }
+  const outcome = await inspectBusinessResponse(response, label)
+  return { response, ...outcome }
 }
 
-async function screenshotFailure(page, title) {
-  await mkdir(SCREENSHOT_DIR, { recursive: true })
+async function screenshotFailure(page, title, artifactWriter) {
+  if (!artifactWriter || typeof artifactWriter.captureScreenshot !== 'function') {
+    throw new Error('Runner 必须提供 artifactWriter')
+  }
   const safeTitle = title.replace(/[^a-zA-Z0-9\u4e00-\u9fa5_-]+/g, '_')
-  const path = resolve(SCREENSHOT_DIR, `${safeTitle}-失败-${Date.now()}.png`)
-  await page.screenshot({ path, fullPage: true }).catch(() => undefined)
-  return path
+  return artifactWriter.captureScreenshot(
+    page,
+    `screenshots/${safeTitle}-失败-${Date.now()}.png`,
+    { fullPage: true },
+  )
 }
 
 async function chooseContactCollectionInDesigner(page, logger) {
@@ -519,7 +598,7 @@ async function addPageBreak(page, expectedPageCount, logger, label) {
   logger('info', `添加分页：${label}`)
   await palette.click()
   await expect(fieldLocator(page, 'page'), `添加后应形成 ${expectedPageCount} 页`).toHaveCount(expectedPageCount)
-  logger('success', `分页断言通过：当前共 ${expectedPageCount} 页`)
+  logger('info', `分页断言执行完成：预期共 ${expectedPageCount} 页`)
 }
 
 async function assertFieldStructure(page, logger) {
@@ -528,7 +607,7 @@ async function assertFieldStructure(page, logger) {
   const actualTypes = await rootFields.evaluateAll((elements) => elements.map((element) => element.dataset.componentType))
   expect(actualTypes, '三页题型顺序应为联系人、通用、高级').toEqual(EXPECTED_FIELD_SEQUENCE)
   await expect(fieldLocator(page, 'payment'), '不应添加付款档位').toHaveCount(0)
-  logger('success', '三页题型结构断言通过', {
+  logger('info', '三页题型结构断言执行完成', {
     pageCount: 3,
     contactFieldCount: CONTACT_FIELD_TYPES.length,
     commonFieldCount: COMMON_FIELD_TYPES.length,
@@ -683,8 +762,8 @@ async function handleProxyEnrollmentDialog(page, formId, logger) {
   const updatePromise = waitForExactResponse(page, 'PUT', `/be/form/${formId}/activity/update-props`)
   const detailPromise = waitForExactResponse(page, 'GET', `/be/form/${formId}`)
   await dialog.getByRole('button', { name: /我已知悉/ }).click()
-  await assertBusinessResponse(await updatePromise, '保存代为报名设置')
-  await assertBusinessResponse(await detailPromise, '刷新代为报名表单详情')
+  await inspectBusinessResponse(await updatePromise, '保存代为报名设置')
+  await inspectBusinessResponse(await detailPromise, '刷新代为报名表单详情')
   await expect(dialog, '代为报名确认完成后弹窗应关闭').toBeHidden()
 }
 
@@ -692,8 +771,7 @@ async function addContactFieldsToGroup(page, formId, logger) {
   const group = fieldLocator(page, 'fieldGroup')
   await group.scrollIntoViewIfNeeded()
   await group.click()
-  const groupKey = String(await group.getAttribute('data-field-key') ?? '').trim()
-  expect(groupKey, '题组根节点必须包含 data-field-key').toBeTruthy()
+  const groupKey = requireGroupKey(await group.getAttribute('data-field-key'))
   const groupPanel = group.locator('.field-panel').first()
   await expect(groupPanel, '题组内应有可拖放子画布').toBeVisible()
   const contactPalette = page.locator('button[data-component-type="contactGroup"]')
@@ -720,6 +798,15 @@ async function addContactFieldsToGroup(page, formId, logger) {
     )
   }
   logger('success', '题组内已加入姓名、手机号、邮箱，且全部开启收录联系人')
+  return groupKey
+}
+
+function requireGroupKey(value) {
+  const groupKey = String(value ?? '').trim()
+  expect(groupKey, '题组根节点必须包含 data-field-key').toBeTruthy()
+  if (!groupKey) {
+    throw new Error('题组根节点缺少 data-field-key，无法准确定位题组子题并继续流程')
+  }
   return groupKey
 }
 
@@ -784,6 +871,12 @@ function assertSavedPayloads({
   radioOptionUploadIds,
   headerUploadId,
 }) {
+  itemsPayload = itemsPayload && typeof itemsPayload === 'object' && !Array.isArray(itemsPayload)
+    ? itemsPayload
+    : {}
+  configPayload = configPayload && typeof configPayload === 'object' && !Array.isArray(configPayload)
+    ? configPayload
+    : {}
   expect(Number(itemsPayload?.revision_no), '题目保存 revision_no 应至少为 1').toBeGreaterThanOrEqual(1)
   expect(configPayload?.revision_no, '题目和配置保存必须使用同一 revision_no').toBe(itemsPayload.revision_no)
   expect(itemsPayload.title, '保存标题应与设计器一致').toBe(title)
@@ -794,12 +887,15 @@ function assertSavedPayloads({
     expect(itemsPayload.description, `表单内容应包含“${text}”`).toContain(text)
   }
 
-  const items = itemsPayload.items
-  expect(Array.isArray(items), '题目保存 payload.items 必须为数组').toBeTruthy()
+  const hasItemArray = Array.isArray(itemsPayload.items)
+  expect(hasItemArray, '题目保存 payload.items 必须为数组').toBeTruthy()
+  const items = hasItemArray ? itemsPayload.items : []
   expect(items.every((item) => Number(item?.sort) >= 1), '保存的每个题目都应包含有效 sort').toBeTruthy()
-  const businessItems = items.filter((item) => Number(item?.hidden) !== 1)
+  const businessItems = items.filter((item) => (
+    item && typeof item === 'object' && !Array.isArray(item) && Number(item.hidden) !== 1
+  ))
   expect(
-    businessItems.map((item) => item.type_code),
+    businessItems.map((item) => item?.type_code),
     '服务端题目顺序应包含三页根组件及题组内联系人',
   ).toEqual(EXPECTED_SERVER_FIELD_SEQUENCE)
   for (const systemKey of SYSTEM_ITEM_KEYS) {
@@ -818,7 +914,8 @@ function assertSavedPayloads({
   const radio = findServerItem(items, 'radio')
   expect(radio?.common_config?.allow_customized_text?.enabled, '单项选择应允许用户输入').toBe(1)
   expect(radio?.common_config?.allow_image, '单项选择应开启选项图片').toBe(1)
-  expect(radio?.option?.choices?.slice(0, 2).map((choice) => choice.upload_id),
+  const radioChoices = Array.isArray(radio?.option?.choices) ? radio.option.choices : []
+  expect(radioChoices.slice(0, 2).map((choice) => choice?.upload_id),
     '单项选择前两个选项应保存对应 upload_id').toEqual(radioOptionUploadIds)
 
   const checkbox = findServerItem(items, 'checkbox')
@@ -861,8 +958,11 @@ function assertSavedPayloads({
 
   const fieldGroup = findServerItem(items, 'field_group')
   expect(fieldGroup?.item_key, '题组应保存 item_key').toBeTruthy()
-  const groupChildren = items.filter((item) => item?.group_code === fieldGroup.item_key)
-  expect(groupChildren.map((item) => item.type_code), '题组内应保存姓名、手机号、邮箱').toEqual(CONTACT_PRESET_TYPES)
+  const groupKey = fieldGroup?.item_key
+  const groupChildren = groupKey
+    ? items.filter((item) => item?.group_code === groupKey)
+    : []
+  expect(groupChildren.map((item) => item?.type_code), '题组内应保存姓名、手机号、邮箱').toEqual(CONTACT_PRESET_TYPES)
   for (const child of groupChildren) {
     expect(child?.common_config?.collect_to_contact?.enabled,
       `题组内 ${child.type_code} 应默认收录联系人`).toBe(1)
@@ -929,10 +1029,12 @@ export async function run({
   extraHTTPHeaders,
   variables = {},
   headerImagePath,
+  artifactWriter,
   captureFailureScreenshot = true,
   signal,
   logger,
   recordApiResponse,
+  recordResourceResponse,
 }) {
   if (!siteBaseUrl) throw new Error('运行环境必须提供 Web 基址')
   if (!apiBaseUrl) throw new Error('运行环境必须提供 API 基址')
@@ -954,7 +1056,10 @@ export async function run({
   let context
   let page
   let stopAbortClose = () => undefined
-  let stopApiResponseRecorder = async () => undefined
+  let networkObserver = {
+    setPhase: () => undefined,
+    stop: async () => undefined,
+  }
   try {
     throwIfRunAborted(signal)
     logger('info', '启动 Chrome 无头浏览器，界面不会显示', { browser: 'Google Chrome', headless: true })
@@ -968,11 +1073,13 @@ export async function run({
       timezoneId: 'Asia/Shanghai',
     })
     throwIfRunAborted(signal)
-    page = await context.newPage()
-    stopApiResponseRecorder = attachApiResponseRecorder(page, {
+    networkObserver = attachNetworkObserver(context, {
+      initialPhase: '浏览器初始化',
       onApiResponse: recordApiResponse,
-      shouldRecord: ({ url }) => url.origin === apiOrigin,
+      onResourceResponse: recordResourceResponse,
     })
+    await networkObserver.ready
+    page = await context.newPage()
     page.setDefaultTimeout(ACTION_TIMEOUT_MS)
     page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS)
 
@@ -996,10 +1103,12 @@ export async function run({
     logger('success', '已将环境登录 Token 注入浏览器会话（Token 内容已隐藏）')
 
     let formId = ''
+    networkObserver.setPhase('页面初始化')
     logger('info', '访问表单活动创建页', { path: '/form-activity/index', title })
     await page.goto(pageUrl(siteBaseUrl, '/form-activity/index'), { waitUntil: 'domcontentloaded' })
     await expect(page, 'Token 生效后不应跳转登录页').not.toHaveURL(/\/login(?:[/?#]|$)/)
 
+    networkObserver.setPhase('创建空白表单')
     const createResponse = await waitForApiResponse(
       page,
       '/be/form',
@@ -1011,6 +1120,7 @@ export async function run({
     if (!formId) throw new Error('创建表单后 URL 或响应中未返回表单 id')
     logger('success', '已通过页面进入表单设计器', { formId })
 
+    networkObserver.setPhase('设计全题型表单')
     const contactPalette = page.locator('button[data-component-type="contactGroup"]')
     await expect(contactPalette, '设计器题型库应显示联系人快捷项').toBeVisible()
 
@@ -1071,6 +1181,7 @@ export async function run({
     await configureLayoutFields(page, logger)
     const headerUploadId = await uploadHeaderImageAndApplyTheme(page, imagePath, logger)
 
+    networkObserver.setPhase('保存草稿')
     logger('info', '点击“保存草稿”')
     const itemSavePromise = waitForExactResponse(page, 'PUT', `/be/form/${formId}/items`)
     const configSavePromise = waitForExactResponse(page, 'PUT', `/be/form/${formId}/config`)
@@ -1079,10 +1190,10 @@ export async function run({
       itemSavePromise,
       configSavePromise,
     ])
-    await assertBusinessResponse(itemSaveResponse, '保存表单题目')
-    await assertBusinessResponse(configSaveResponse, '保存表单配置')
-    const itemsPayload = itemSaveResponse.request().postDataJSON()
-    const configPayload = configSaveResponse.request().postDataJSON()
+    await inspectBusinessResponse(itemSaveResponse, '保存表单题目')
+    await inspectBusinessResponse(configSaveResponse, '保存表单配置')
+    const itemsPayload = parseRequestPayload(itemSaveResponse.request(), '保存表单题目')
+    const configPayload = parseRequestPayload(configSaveResponse.request(), '保存表单配置')
     const savedRevisionNo = assertSavedPayloads({
       itemsPayload,
       configPayload,
@@ -1100,8 +1211,10 @@ export async function run({
       requiredQuestionCount: REQUIRED_FIELD_TYPES.length,
     })
 
+    networkObserver.setPhase('联系人设置')
     await ensureIgnoreStrategyInSettings(page, logger)
 
+    networkObserver.setPhase('发布表单')
     logger('info', '点击设置页“发布”按钮')
     const publishButton = page.getByRole('button', { name: /^(发布|發佈)$/ })
     if (!await publishButton.isVisible().catch(() => false)) {
@@ -1114,13 +1227,17 @@ export async function run({
     const publishPromise = waitForExactResponse(page, 'POST', `/be/form/${formId}/publish`)
     await publishButton.click()
     const publishResponse = await publishPromise
-    const publishBody = await assertBusinessResponse(publishResponse, '发布表单')
-    expect(String(publishBody.data?.form_id ?? ''), '发布响应 form_id 应匹配').toBe(String(formId))
-    expect(publishBody.data?.status, '发布响应状态应为 published').toBe('published')
-    expect(Number(publishBody.data?.revision_no), '发布响应 revision_no 应匹配已保存版本').toBe(savedRevisionNo)
+    const publishOutcome = await inspectBusinessResponse(publishResponse, '发布表单')
+    const publishBody = publishOutcome.body
+    if (publishOutcome.bodyValid) {
+      expect(String(publishBody?.data?.form_id ?? ''), '发布响应 form_id 应匹配').toBe(String(formId))
+      expect(publishBody?.data?.status, '发布响应状态应为 published').toBe('published')
+      expect(Number(publishBody?.data?.revision_no), '发布响应 revision_no 应匹配已保存版本').toBe(savedRevisionNo)
+    }
     await page.waitForURL(/\/form-activity\/list(?:[/?#]|$)/, { timeout: NAVIGATION_TIMEOUT_MS })
     logger('success', '表单发布成功并已回到列表页')
 
+    networkObserver.setPhase('已发布列表验证')
     const auditTabs = page.locator('.form-activity-audit-tabs')
     if (await auditTabs.isVisible().catch(() => false)) {
       await auditTabs.getByText(/已发布|已發佈/, { exact: true }).click()
@@ -1135,41 +1252,48 @@ export async function run({
         && url.searchParams.get('filter[title]') === title
     }, { timeout: ACTION_TIMEOUT_MS })
     await page.getByRole('button', { name: /查询|查詢|搜索|搜尋/ }).click()
-    const listBody = await assertBusinessResponse(await listSearchPromise, '查询已发布表单列表')
-    const publishedRecord = listBody.data?.list?.find((record) => String(record?.id ?? '') === String(formId))
+    const listOutcome = await inspectBusinessResponse(await listSearchPromise, '查询已发布表单列表')
+    const listBody = listOutcome.body
+    const publishedRecords = Array.isArray(listBody?.data?.list) ? listBody.data.list : []
+    if (listOutcome.bodyValid) {
+      expect(Array.isArray(listBody?.data?.list), '列表接口 data.list 应为数组').toBe(true)
+    }
+    const publishedRecord = publishedRecords.find((record) => String(record?.id ?? '') === String(formId))
     expect(publishedRecord, '列表接口应返回本次发布的表单').toBeTruthy()
-    expect(publishedRecord.title, '列表接口标题应匹配').toBe(title)
-    expect(publishedRecord.status, '列表接口状态应为 published').toBe('published')
-    expect(Number(publishedRecord.current_revision_no), '列表接口版本应匹配发布版本').toBe(savedRevisionNo)
+    expect(publishedRecord?.title, '列表接口标题应匹配').toBe(title)
+    expect(publishedRecord?.status, '列表接口状态应为 published').toBe('published')
+    expect(Number(publishedRecord?.current_revision_no), '列表接口版本应匹配发布版本').toBe(savedRevisionNo)
     const titleLink = page.locator('.form-activity-list__title-link', { hasText: title })
     await expect(titleLink, '已发布列表中应找到本次创建的全题型表单').toHaveCount(1)
     await expect(titleLink, '列表中的表单标题应完全匹配').toHaveText(title)
-    logger('success', '已发布列表断言通过，目标表单可见', { formId, title })
+    logger('info', '已发布列表断言执行完成', { formId, title })
 
+    networkObserver.setPhase('读取发布契约')
     const formDetailResponse = await fetchFormDetail(page, apiBaseUrl, formId, authorization)
-    const formCode = firstFormCode(publishBody, publishedRecord, formDetailResponse) || String(formId)
+    const formCode = firstFormCode(publishBody, publishedRecord, formDetailResponse)
     const formContract = createFormLinkContract({
       formId,
       formCode,
       title,
       revisionNo: savedRevisionNo,
-      items: formDetailResponse?.data?.items || formDetailResponse?.data?.form?.items || itemsPayload.items,
+      items: formDetailResponse?.data?.items || formDetailResponse?.data?.form?.items || itemsPayload?.items || [],
     })
     logger('success', '已生成可供后续填写脚本使用的表单联动参数', {
       formId,
-      formCode,
+      legacyFormCode: formCode || undefined,
       fieldCount: Object.values(formContract.fieldKeys).filter(Boolean).length,
     })
 
+    networkObserver.setPhase('运行结果汇总')
     expect(tokenViolations, '所有 API 业务请求都必须携带环境 Token').toEqual([])
     expect(authenticatedRequestCount, '至少应观察到一个携带 Token 的业务请求').toBeGreaterThan(0)
     expect(authenticatedRequestCount, '携带 Token 的请求数应等于全部业务请求数').toBe(businessRequestCount)
-    logger('success', '浏览器请求 Token 断言通过', {
+    logger('info', '浏览器请求 Token 断言执行完成', {
       businessRequestCount,
       authenticatedRequestCount,
       token: '[REDACTED]',
     })
-    logger('success', 'Chrome 无头全题型三页 UI 自动化执行完成，所有断言通过')
+    logger('success', 'Chrome 无头全题型三页 UI 自动化执行完成，网络健康结果将在 Runner 收口时汇总')
 
     return {
       formId,
@@ -1200,14 +1324,24 @@ export async function run({
     if (signal?.aborted) {
       logger('info', '已响应强制停止，正在清理 Chrome 无头浏览器')
     } else if (captureFailureScreenshot && page) {
-      const screenshotPath = await screenshotFailure(page, title)
-      logger('error', 'UI 自动化执行失败，已保存当前页面截图', { screenshotPath })
+      try {
+        const screenshot = await screenshotFailure(page, title, artifactWriter)
+        logger('error', 'UI 自动化执行失败，已保存当前页面截图', {
+          screenshotPath: screenshot.absolutePath,
+          artifact: screenshot,
+        })
+      } catch (screenshotError) {
+        logger('error', 'UI 自动化执行失败，当前页面截图保存失败', {
+          reason: screenshotError instanceof Error ? screenshotError.message : String(screenshotError),
+        })
+      }
     } else {
       logger('error', 'UI 自动化执行失败（测试模式未输出失败截图）')
     }
     throw error
   } finally {
-    await stopApiResponseRecorder()
+    networkObserver.setPhase('结束清理')
+    await networkObserver.stop()
     const abortCloseStarted = await stopAbortClose()
     if (!abortCloseStarted) await closePlaywrightHandles({ context, browser }, { logger })
   }
@@ -1228,5 +1362,8 @@ export {
   FORM_CONTENT_ITEMS,
   FORM_SUBTITLE,
   REQUIRED_FIELD_TYPES,
+  assertSavedPayloads,
+  inspectBusinessResponse,
+  requireGroupKey,
   timestampTitle,
 }

@@ -1,8 +1,8 @@
 export const LPXAVN_SCRIPT_ID = 'form-lpxavn-submit'
 export const ALL_FIELDS_SUBMIT_SCRIPT_ID = 'form-all-fields-submit'
 export const SUBMISSION_REPLY_EDIT_SCRIPT_ID = 'form-submission-reply-edit'
-export const DEFAULT_LPXAVN_REQUEST_PATH = '/form/?id={{FORM_CODE}}'
-export const DEFAULT_ALL_FIELDS_REQUEST_PATH = '/form/?id={{FORM_CODE}}'
+export const DEFAULT_LPXAVN_REQUEST_PATH = '/form/?id={{FORM_ID}}'
+export const DEFAULT_ALL_FIELDS_REQUEST_PATH = '/form/?id={{FORM_ID}}'
 export const DEFAULT_SUBMISSION_REPLY_EDIT_REQUEST_PATH = '/form-activity/submission/preview/reply/{{SUBMISSION_ID}}?fid={{FORM_ID}}'
 const REQUEST_PATH_SCRIPT_IDS = new Set([
   LPXAVN_SCRIPT_ID,

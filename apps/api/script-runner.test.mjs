@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import * as fileSystem from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import test from 'node:test'
 
 import {
@@ -66,6 +66,10 @@ test('accepts a registered script with a same-origin authorization context', () 
       apiBaseUrl: 'https://example.test/api',
       ignoreHTTPSErrors: true,
       variables: { FORM_ID: 'form-123' },
+      firstPartyOrigins: [
+        'https://forms.example.test/path',
+        'https://forms.example.test/other',
+      ],
       authorizationOrigin: 'https://example.test',
       extraHTTPHeaders: { Authorization: 'Bearer test-token' },
     },
@@ -75,8 +79,54 @@ test('accepts a registered script with a same-origin authorization context', () 
   assert.equal(result.siteBaseUrl, 'https://example.test/')
   assert.equal(result.ignoreHTTPSErrors, true)
   assert.deepEqual(result.variables, { FORM_ID: 'form-123' })
+  assert.deepEqual(result.firstPartyOrigins, ['https://forms.example.test'])
   assert.equal(result.authorizationOrigin, 'https://example.test')
   assert.equal(result.timeoutMs, 300_000)
+})
+
+test('rejects malformed explicit first-party network origins', () => {
+  for (const firstPartyOrigins of [
+    'https://forms.example.test',
+    ['ws://forms.example.test'],
+    Array.from({ length: 21 }, (_, index) => `https://forms-${index}.example.test`),
+  ]) {
+    assert.throws(
+      () => validateRunRequest({
+        ...validRunPayload(),
+        context: { ...validRunPayload().context, firstPartyOrigins },
+      }),
+      /一方网络来源/,
+    )
+  }
+})
+
+test('accepts a safe execution ID for artifact grouping and rejects path-like values', () => {
+  const result = validateRunRequest({
+    ...validRunPayload(),
+    executionId: 'execution-001',
+  })
+  assert.equal(result.executionId, 'execution-001')
+
+  for (const executionId of ['', '../other-run', 'run/step', 'run.step']) {
+    assert.throws(
+      () => validateRunRequest({ ...validRunPayload(), executionId }),
+      /制品执行 ID 格式无效/,
+    )
+  }
+})
+
+test('keeps a supplied run ID as the artifact attempt ID and rejects incompatible IDs', async () => {
+  assert.equal(validateRunRequest({
+    ...validRunPayload(),
+    runId: 'attempt-001',
+  }).scriptId, 'form-contact-publish')
+
+  for (const runId of ['short', '-attempt-001', '_attempt-001', 'attempt.001']) {
+    assert.throws(
+      () => validateRunRequest({ ...validRunPayload(), runId }),
+      /运行任务 ID 格式无效/,
+    )
+  }
 })
 
 test('accepts a per-script execution timeout and rejects unsafe timeout values', () => {
@@ -284,6 +334,47 @@ test('executes a custom script with its persistent timeout instead of client ove
   })
 })
 
+test('provides trusted script identity and an attempt-scoped artifact writer', async (t) => {
+  const scriptsDirectory = await temporaryScriptsDirectory(t)
+  const artifactRootDirectory = await fileSystem.mkdtemp(join(tmpdir(), 'autotest-runner-artifacts-'))
+  t.after(() => fileSystem.rm(artifactRootDirectory, { recursive: true, force: true }))
+  const config = registeredConfig()
+  let receivedContext
+
+  const result = await executeRegisteredScript({
+    ...validRunPayload(config.id),
+    runId: 'attempt-001',
+    executionId: 'execution-001',
+  }, {
+    artifactRootDirectory,
+    scriptsDirectory,
+    scriptConfigRepository: { get: async () => config },
+    loadScript: async () => ({
+      run: async (context) => {
+        receivedContext = context
+        await context.artifactWriter.writeFile('result.txt', 'artifact body', {
+          type: 'attachment',
+          mimeType: 'text/plain',
+        })
+        return { completed: true }
+      },
+    }),
+  })
+
+  assert.equal(receivedContext.scriptId, config.id)
+  assert.equal(receivedContext.scriptName, config.name)
+  assert.equal(receivedContext.artifactWriter.executionId, 'execution-001')
+  assert.equal(receivedContext.artifactWriter.stepId, config.id)
+  assert.equal(receivedContext.artifactWriter.attemptId, 'attempt-001')
+  assert.equal(result.ok, true)
+  assert.equal(result.artifacts.length, 1)
+  assert.equal(
+    result.artifacts[0].absolutePath,
+    resolve(artifactRootDirectory, 'execution-001', config.id, 'attempt-001', 'result.txt'),
+  )
+  assert.equal(await fileSystem.readFile(result.artifacts[0].absolutePath, 'utf8'), 'artifact body')
+})
+
 test('redacts authorization values and ANSI control sequences from errors', () => {
   const authorization = 'Bearer sensitive-runtime-token'
   const rawError = new Error(
@@ -327,6 +418,7 @@ test('passes AbortSignal to a non-cooperative script and bounds cancellation cle
   assert.equal(receivedSignal.aborted, true)
   assert.equal(result.ok, false)
   assert.equal(result.cancelled, true)
+  assert.equal(result.continuePipeline, undefined)
   assert.equal(result.status, 'interrupted')
   assert.equal(result.error, '操作栏强制停止')
   assert.equal(result.logs.at(-1)?.level, 'warning')
@@ -335,6 +427,131 @@ test('passes AbortSignal to a non-cooperative script and bounds cancellation cle
   assert.ok(result.logs.some((log) => /取消清理超过 20 ms/.test(log.message)))
   assert.deepEqual(streamedLogs, result.logs)
   assert.equal(result.logs.some((log) => log.level === 'error'), false)
+})
+
+test('seals artifact capture after cancellation cleanup times out and removes late temporary output', async (t) => {
+  const artifactRootDirectory = await fileSystem.mkdtemp(join(tmpdir(), 'autotest-runner-late-artifact-'))
+  t.after(() => fileSystem.rm(artifactRootDirectory, { recursive: true, force: true }))
+  const controller = new AbortController()
+  let notifyScriptStarted
+  let notifyCaptureStarted
+  let releaseProducer
+  let temporaryPath
+  let captureOutcome
+  const scriptStarted = new Promise((resolveStarted) => { notifyScriptStarted = resolveStarted })
+  const captureStarted = new Promise((resolveStarted) => { notifyCaptureStarted = resolveStarted })
+  const producerRelease = new Promise((resolveProducer) => { releaseProducer = resolveProducer })
+  const execution = executeRegisteredScript({
+    ...validRunPayload(),
+    executionId: 'execution-late-001',
+    runId: 'attempt-late-001',
+  }, {
+    signal: controller.signal,
+    abortCleanupTimeoutMs: 20,
+    artifactRootDirectory,
+    loadScript: async () => ({
+      run: ({ artifactWriter, signal }) => {
+        notifyScriptStarted()
+        signal.addEventListener('abort', () => {
+          const capture = artifactWriter.capture('screenshots/late.png', async (targetPath) => {
+            temporaryPath = targetPath
+            notifyCaptureStarted()
+            await producerRelease
+            await fileSystem.writeFile(targetPath, Buffer.from('late screenshot'))
+          }, { type: 'screenshot', mimeType: 'image/png' })
+          captureOutcome = capture.then(
+            () => null,
+            (captureError) => captureError,
+          )
+        }, { once: true })
+        return new Promise(() => {})
+      },
+    }),
+  })
+
+  await scriptStarted
+  const cancelledAt = performance.now()
+  controller.abort('停止并封口制品')
+  await captureStarted
+  const result = await execution
+  const finalPath = resolve(
+    artifactRootDirectory,
+    'execution-late-001',
+    'form-contact-publish',
+    'attempt-late-001',
+    'screenshots',
+    'late.png',
+  )
+
+  assert.equal(result.cancelled, true)
+  assert.deepEqual(result.artifacts, [])
+  assert.ok(performance.now() - cancelledAt < 250)
+  assert.ok(result.logs.some((log) => /制品捕获清理超过 .*已放弃 1 个未完成制品/.test(log.message)))
+  await assert.rejects(fileSystem.access(finalPath))
+
+  releaseProducer()
+  const captureError = await captureOutcome
+  assert.match(captureError?.message ?? '', /已封口/)
+  await assert.rejects(fileSystem.access(temporaryPath))
+  await assert.rejects(fileSystem.access(finalPath))
+})
+
+test('counts artifact sealing against the configured script timeout', async (t) => {
+  const artifactRootDirectory = await fileSystem.mkdtemp(join(tmpdir(), 'autotest-runner-seal-timeout-'))
+  t.after(() => fileSystem.rm(artifactRootDirectory, { recursive: true, force: true }))
+  const config = registeredConfig({
+    id: 'form-contact-publish',
+    entryFile: 'form-contact-publish.ui.spec.mjs',
+    timeoutMs: 1_000,
+  })
+  let releaseProducer
+  let captureOutcome
+  const producerRelease = new Promise((resolveProducer) => { releaseProducer = resolveProducer })
+
+  const result = await executeRegisteredScript({
+    ...validRunPayload(),
+    executionId: 'execution-seal-timeout-001',
+    runId: 'attempt-seal-timeout-001',
+  }, {
+    abortCleanupTimeoutMs: 2_000,
+    artifactRootDirectory,
+    scriptConfigRepository: { get: async () => config },
+    loadScript: async () => ({
+      run: ({ artifactWriter }) => {
+        const capture = artifactWriter.capture('traces/late.zip', async (temporaryPath) => {
+          await producerRelease
+          await fileSystem.writeFile(temporaryPath, Buffer.from('late trace'))
+        }, { type: 'trace', mimeType: 'application/zip' })
+        captureOutcome = capture.then(
+          () => null,
+          (captureError) => captureError,
+        )
+        return { completed: true }
+      },
+    }),
+  })
+
+  assert.equal(result.ok, false)
+  assert.equal(result.timedOut, true)
+  assert.equal(result.cancelled, undefined)
+  assert.equal(result.status, 'failed')
+  assert.equal(result.result, undefined)
+  assert.match(result.error, /超过 1000 ms/)
+  assert.ok(result.logs.some((log) => log.level === 'error' && /执行超时/.test(log.message)))
+  assert.ok(result.logs.some((log) => /制品捕获清理超过 .*已放弃 1 个未完成制品/.test(log.message)))
+  assert.deepEqual(result.artifacts, [])
+
+  releaseProducer()
+  const captureError = await captureOutcome
+  assert.match(captureError?.message ?? '', /已封口/)
+  await assert.rejects(fileSystem.access(resolve(
+    artifactRootDirectory,
+    'execution-seal-timeout-001',
+    'form-contact-publish',
+    'attempt-seal-timeout-001',
+    'traces',
+    'late.zip',
+  )))
 })
 
 test('waits for cooperative script cleanup before reporting cancellation', async () => {
@@ -401,6 +618,7 @@ test('returns every recorded assertion in execution order, including the failing
   })
 
   assert.equal(result.ok, false)
+  assert.equal(result.continuePipeline, true)
   assert.deepEqual(result.assertions.map(({ sequence, name, module, status }) => ({
     sequence,
     name,
@@ -430,6 +648,9 @@ test('returns structured API responses and redacts sensitive request and respons
           durationMs: 18.6,
           requestBody: { title: '完整表单', mobile: '13671153204' },
           responseBody: { code: 0, data: { id: 'form-1', access_token: 'response-token' } },
+          bodyReadError: 'response body unavailable token=diagnostic-secret',
+          warning: true,
+          incomplete: true,
         })
         return { formId: 'form-1' }
       },
@@ -446,9 +667,488 @@ test('returns structured API responses and redacts sensitive request and respons
     status: 200,
     ok: true,
     durationMs: 19,
+    phase: '未标记阶段',
+    isFirstParty: true,
     requestBody: { title: '完整表单', mobile: '[REDACTED]' },
     responseBody: { code: 0, data: { id: 'form-1', access_token: '[REDACTED]' } },
+    bodyReadError: 'response body unavailable token=[REDACTED]',
+    warning: true,
+    incomplete: true,
   }])
+  assert.deepEqual(result.networkSummary, {
+    api: { observed: 1, recorded: 1, dropped: 0, passed: 0, failed: 0, warnings: 1 },
+    resources: { observed: 0, recorded: 0, dropped: 0, passed: 0, failed: 0, warnings: 0 },
+  })
+  assert.deepEqual(result.resourceResponses, [])
+  assert.equal(result.assertions.length, 0)
+  assert.equal(result.logs.some(({ level, message }) => (
+    level === 'warning' && message.includes('接口响应采集不完整')
+  )), true)
+})
+
+test('records API and resource failures without interrupting script work and fails only first-party health', async () => {
+  let laterWorkExecuted = false
+  const result = await executeRegisteredScript(validRunPayload(), {
+    loadScript: async () => ({
+      run: async ({ recordApiResponse, recordResourceResponse }) => {
+        recordApiResponse({
+          phase: '最终提交',
+          method: 'post',
+          url: 'https://example.test/api/submissions?signature=private-signature',
+          pageUrl: 'https://example.test/form/?session=user-session',
+          status: 503,
+          ok: false,
+          durationMs: 1500,
+          failureKind: 'http',
+          error: 'request failed: https://example.test/api/submissions?token=private-token',
+          requestBody: { authorization: 'Bearer leaked', title: '表单' },
+        })
+        recordApiResponse({
+          phase: '最终提交',
+          method: 'get',
+          url: 'https://example.test/api/forms/current',
+          status: 200,
+          ok: true,
+          durationMs: 12,
+        })
+        recordApiResponse({
+          phase: '页面初始化',
+          method: 'post',
+          url: 'https://analytics.example.net/collect?api_key=analytics-key',
+          status: 0,
+          ok: false,
+          failureKind: 'network',
+          error: 'net::ERR_FAILED token=analytics-token',
+        })
+        recordResourceResponse({
+          phase: '页面初始化',
+          resourceType: 'script',
+          url: 'https://example.test/assets/app.js?X-Amz-Signature=signed-value',
+          frameUrl: 'https://example.test/form/?credential=frame-secret',
+          status: 404,
+          ok: false,
+          durationMs: 31,
+          mimeType: 'text/html',
+          failureKind: 'http',
+          error: 'Not Found',
+          diagnostics: ['CORS detail token=diagnostic-secret'],
+          streaming: false,
+        })
+        recordResourceResponse({
+          phase: '页面初始化',
+          resourceType: 'stylesheet',
+          url: 'https://example.test/assets/app.css',
+          status: 200,
+          ok: true,
+          durationMs: 9,
+          fromCache: true,
+        })
+        recordResourceResponse({
+          phase: '页面初始化',
+          resourceType: 'image',
+          url: 'https://cdn.example.net/tracker.png?Expires=1234',
+          status: 0,
+          ok: false,
+          durationMs: 50,
+          failureKind: 'network',
+          error: 'net::ERR_BLOCKED_BY_CLIENT',
+        })
+        laterWorkExecuted = true
+        return { completed: true }
+      },
+    }),
+  })
+
+  assert.equal(laterWorkExecuted, true)
+  assert.equal(result.ok, false)
+  assert.equal(result.continuePipeline, true)
+  assert.deepEqual(result.result, { completed: true })
+  assert.deepEqual(result.networkSummary, {
+    api: { observed: 3, recorded: 3, dropped: 0, passed: 1, failed: 1, warnings: 1 },
+    resources: { observed: 3, recorded: 3, dropped: 0, passed: 1, failed: 2, warnings: 0 },
+  })
+
+  const failedAssertions = result.assertions.filter(({ status }) => status === 'failed')
+  assert.equal(failedAssertions.length, 3)
+  assert.deepEqual(failedAssertions.map(({ module }) => module), [
+    '接口健康',
+    '资源加载健康',
+    '资源加载健康',
+  ])
+  assert.match(failedAssertions[0].name, /最终提交.*POST.*status=503.*request failed/)
+  assert.match(failedAssertions[1].name, /页面初始化.*script.*status=404.*Not Found/)
+  assert.equal(result.assertions.filter(({ status }) => status === 'passed').length, 2)
+
+  assert.match(result.apiResponses[0].url, /signature=%5BREDACTED%5D/)
+  assert.match(result.apiResponses[0].pageUrl, /session=%5BREDACTED%5D/)
+  assert.doesNotMatch(JSON.stringify(result.apiResponses[0]), /private|Bearer leaked/)
+  assert.match(result.resourceResponses[0].url, /X-Amz-Signature=%5BREDACTED%5D/)
+  assert.match(result.resourceResponses[0].frameUrl, /credential=%5BREDACTED%5D/)
+  assert.deepEqual(result.resourceResponses[0].diagnostics, ['CORS detail token=[REDACTED]'])
+  assert.equal(result.resourceResponses[0].streaming, false)
+  assert.equal(result.resourceResponses[1].fromCache, true)
+
+  assert.equal(result.logs.filter(({ level }) => level === 'error').length, 3)
+  assert.equal(result.logs.filter(({ message }) => /第三方.*失败/.test(message)).length, 1)
+  assert.doesNotMatch(
+    JSON.stringify({ logs: result.logs, resources: result.resourceResponses }),
+    /private-token|analytics-token|analytics-key|diagnostic-secret/,
+  )
+})
+
+test('keeps third-party API failures as warnings without failing the script', async () => {
+  const result = await executeRegisteredScript(validRunPayload(), {
+    loadScript: async () => ({
+      run: async ({ recordApiResponse }) => {
+        recordApiResponse({
+          phase: '页面初始化',
+          method: 'POST',
+          url: 'https://third-party.example/collect',
+          status: 0,
+          ok: false,
+          error: 'net::ERR_BLOCKED_BY_CLIENT',
+        })
+        return { completed: true }
+      },
+    }),
+  })
+
+  assert.equal(result.ok, true)
+  assert.equal(result.continuePipeline, undefined)
+  assert.equal(result.networkSummary.api.warnings, 1)
+  assert.equal(result.assertions.length, 0)
+  assert.equal(result.logs.some(({ level, message }) => (
+    level === 'warning' && /第三方接口请求失败/.test(message)
+  )), true)
+})
+
+test('treats the TEST public form origin and explicit custom origins as first-party while keeping vendors as warnings', async () => {
+  const payload = {
+    scriptId: 'form-lpxavn-submit',
+    context: {
+      siteBaseUrl: 'https://lx.admin.lingxi.tech/',
+      apiBaseUrl: 'https://lx.admin.lingxi.tech/api',
+      authorizationOrigin: 'https://lx.admin.lingxi.tech',
+      extraHTTPHeaders: { Authorization: 'Bearer test-token' },
+      firstPartyOrigins: ['https://forms.customer.example/runtime-path'],
+    },
+  }
+  const result = await executeRegisteredScript(payload, {
+    loadScript: async () => ({
+      run: async ({ recordApiResponse }) => {
+        for (const url of [
+          'https://lx.lingxi.tech/f/form/test-code',
+          'https://forms.customer.example/api/form',
+          'https://telemetry.vendor.example/collect',
+        ]) {
+          recordApiResponse({
+            phase: '公开表单加载',
+            method: 'GET',
+            url,
+            status: 503,
+            ok: false,
+            error: 'Service Unavailable',
+          })
+        }
+      },
+    }),
+  })
+
+  assert.deepEqual(result.apiResponses.map(({ isFirstParty }) => isFirstParty), [true, true, false])
+  assert.deepEqual(result.networkSummary.api, {
+    observed: 3,
+    recorded: 3,
+    dropped: 0,
+    passed: 0,
+    failed: 2,
+    warnings: 1,
+  })
+  assert.equal(result.ok, false)
+  assert.equal(result.continuePipeline, true)
+  assert.equal(result.assertions.filter(({ module, status }) => (
+    module === '接口健康' && status === 'failed'
+  )).length, 2)
+  assert.equal(result.assertions.some(({ name }) => name.includes('telemetry.vendor.example')), false)
+  assert.equal(result.logs.some(({ level, message }) => (
+    level === 'warning' && message.includes('telemetry.vendor.example')
+  )), true)
+})
+
+test('derives the public origin for generic admin and local TEST host conventions', async () => {
+  const cases = [
+    {
+      siteOrigin: 'https://tenant.admin.example.test',
+      publicUrl: 'https://tenant.example.test/f/form/code',
+    },
+    {
+      siteOrigin: 'https://tenant.b.lingxi-hk.localtest',
+      publicUrl: 'https://tenant.f.lingxi-hk.localtest/f/form/code',
+    },
+  ]
+
+  for (const { siteOrigin, publicUrl } of cases) {
+    const result = await executeRegisteredScript({
+      scriptId: 'form-lpxavn-submit',
+      context: {
+        siteBaseUrl: `${siteOrigin}/`,
+        apiBaseUrl: `${siteOrigin}/api`,
+        authorizationOrigin: siteOrigin,
+        extraHTTPHeaders: { Authorization: 'Bearer test-token' },
+      },
+    }, {
+      loadScript: async () => ({
+        run: async ({ recordApiResponse }) => recordApiResponse({
+          phase: '公开表单加载',
+          method: 'GET',
+          url: publicUrl,
+          status: 500,
+          ok: false,
+          error: 'fixture failure',
+        }),
+      }),
+    })
+
+    assert.equal(result.apiResponses[0].isFirstParty, true, siteOrigin)
+    assert.equal(result.networkSummary.api.failed, 1, siteOrigin)
+    assert.equal(result.networkSummary.api.warnings, 0, siteOrigin)
+  }
+})
+
+test('excludes ignored navigation aborts from resource records and health counters', async () => {
+  const result = await executeRegisteredScript(validRunPayload(), {
+    loadScript: async () => ({
+      run: async ({ recordResourceResponse }) => {
+        recordResourceResponse({
+          phase: '页面跳转',
+          resourceType: 'document',
+          url: 'https://example.test/aborted-first',
+          status: 0,
+          ok: true,
+          ignored: true,
+          failureKind: 'aborted',
+          error: 'net::ERR_ABORTED',
+        })
+        recordResourceResponse({
+          phase: '页面加载',
+          resourceType: 'script',
+          url: 'https://example.test/app.js',
+          status: 200,
+          ok: true,
+        })
+        recordResourceResponse({
+          phase: '页面跳转',
+          resourceType: 'document',
+          url: 'https://example.test/aborted-second',
+          status: 0,
+          ok: true,
+          ignored: true,
+          failureKind: 'aborted',
+          error: 'net::ERR_ABORTED',
+        })
+        recordResourceResponse({
+          phase: '页面加载',
+          resourceType: 'stylesheet',
+          url: 'https://example.test/app.css',
+          status: 200,
+          ok: true,
+        })
+      },
+    }),
+  })
+
+  assert.deepEqual(result.resourceResponses.map(({ sequence, resourceType }) => ({
+    sequence,
+    resourceType,
+  })), [
+    { sequence: 1, resourceType: 'script' },
+    { sequence: 2, resourceType: 'stylesheet' },
+  ])
+  assert.deepEqual(result.networkSummary.resources, {
+    observed: 2,
+    recorded: 2,
+    dropped: 0,
+    passed: 2,
+    failed: 0,
+    warnings: 0,
+  })
+  assert.equal(result.ok, true)
+  assert.equal(result.logs.some(({ message }) => message.includes('ERR_ABORTED')), false)
+})
+
+test('treats same-host WebSocket errors as resource health failures', async () => {
+  const result = await executeRegisteredScript(validRunPayload(), {
+    loadScript: async () => ({
+      run: async ({ recordResourceResponse }) => {
+        recordResourceResponse({
+          phase: '实时连接',
+          method: 'GET',
+          resourceType: 'websocket',
+          url: 'wss://example.test/socket?token=socket-token',
+          status: 0,
+          ok: false,
+          streaming: true,
+          failureKind: 'websocket',
+          diagnostics: ['WebSocket connection failed token=socket-diagnostic'],
+        })
+      },
+    }),
+  })
+
+  assert.equal(result.ok, false)
+  assert.equal(result.continuePipeline, true)
+  assert.equal(result.resourceResponses[0].isFirstParty, true)
+  assert.equal(result.resourceResponses[0].method, 'GET')
+  assert.equal(result.resourceResponses[0].streaming, true)
+  assert.match(result.resourceResponses[0].url, /token=%5BREDACTED%5D/)
+  assert.deepEqual(result.resourceResponses[0].diagnostics, [
+    'WebSocket connection failed token=[REDACTED]',
+  ])
+  assert.doesNotMatch(JSON.stringify(result), /socket-token|socket-diagnostic/)
+  assert.equal(result.networkSummary.resources.failed, 1)
+})
+
+test('permits pipeline continuation when script and network assertions fail', async () => {
+  const result = await executeRegisteredScript(validRunPayload(), {
+    loadScript: async () => ({
+      run: async ({ recordApiResponse }) => {
+        recordedExpect(false, '业务断言失败').toBe(true)
+        recordApiResponse({
+          phase: '提交',
+          method: 'POST',
+          url: 'https://example.test/api/submit',
+          status: 500,
+          ok: false,
+          error: 'Internal Server Error',
+        })
+      },
+    }),
+  })
+
+  assert.equal(result.ok, false)
+  assert.equal(result.continuePipeline, true)
+  assert.equal(result.assertions.filter(({ status }) => status === 'failed').length, 2)
+})
+
+test('keeps captured network failures as assertions when later script work throws', async () => {
+  const result = await executeRegisteredScript(validRunPayload(), {
+    loadScript: async () => ({
+      run: async ({ recordApiResponse }) => {
+        recordApiResponse({
+          phase: '页面初始化',
+          method: 'GET',
+          url: 'https://example.test/api/bootstrap',
+          status: 503,
+          ok: false,
+          error: 'Service Unavailable',
+        })
+        throw new Error('页面控件不存在')
+      },
+    }),
+  })
+
+  assert.equal(result.ok, false)
+  assert.equal(result.continuePipeline, undefined)
+  assert.match(result.error, /页面控件不存在/)
+  assert.equal(result.assertions.some((assertion) => (
+    assertion.module === '接口健康'
+    && assertion.status === 'failed'
+    && assertion.name.includes('/api/bootstrap')
+  )), true)
+})
+
+test('keeps failures when independent API and resource capture limits are reached', async () => {
+  const result = await executeRegisteredScript(validRunPayload(), {
+    loadScript: async () => ({
+      run: async ({ recordApiResponse, recordResourceResponse }) => {
+        for (let index = 0; index < 500; index += 1) {
+          recordApiResponse({
+            phase: '批量接口',
+            method: 'GET',
+            url: `https://example.test/api/items/${index}`,
+            status: 200,
+            ok: true,
+          })
+        }
+        recordApiResponse({
+          phase: '批量接口',
+          method: 'GET',
+          url: 'https://example.test/api/items/failure',
+          status: 500,
+          ok: false,
+          error: 'fixture API failure',
+        })
+        for (let index = 0; index < 2_000; index += 1) {
+          recordResourceResponse({
+            phase: '批量资源',
+            resourceType: 'image',
+            url: `https://example.test/assets/${index}.png`,
+            status: 200,
+            ok: true,
+          })
+        }
+        recordResourceResponse({
+          phase: '批量资源',
+          resourceType: 'image',
+          url: 'https://example.test/assets/failure.png',
+          status: 404,
+          ok: false,
+          error: 'fixture resource failure',
+        })
+      },
+    }),
+  })
+
+  assert.equal(result.apiResponses.length, 500)
+  assert.equal(result.resourceResponses.length, 2_000)
+  assert.equal(result.apiResponses.at(-1).sequence, 501)
+  assert.equal(result.apiResponses.at(-1).ok, false)
+  assert.equal(result.resourceResponses.at(-1).sequence, 2_001)
+  assert.equal(result.resourceResponses.at(-1).ok, false)
+  assert.deepEqual(result.networkSummary.api, {
+    observed: 501,
+    recorded: 500,
+    dropped: 1,
+    passed: 500,
+    failed: 1,
+    warnings: 0,
+  })
+  assert.deepEqual(result.networkSummary.resources, {
+    observed: 2_001,
+    recorded: 2_000,
+    dropped: 1,
+    passed: 2_000,
+    failed: 1,
+    warnings: 0,
+  })
+})
+
+test('bounds repeated network failure logs and assertion details without hiding overflow', async () => {
+  const result = await executeRegisteredScript(validRunPayload(), {
+    loadScript: async () => ({
+      run: async ({ recordApiResponse }) => {
+        for (let index = 0; index < 501; index += 1) {
+          recordApiResponse({
+            phase: '批量失败接口',
+            method: 'GET',
+            url: `https://example.test/api/failures/${index}`,
+            status: 503,
+            ok: false,
+            error: 'Service Unavailable',
+          })
+        }
+      },
+    }),
+  })
+
+  const networkFailures = result.assertions.filter((assertion) => (
+    assertion.module === '接口健康' && assertion.status === 'failed'
+  ))
+  assert.equal(result.apiResponses.length, 500)
+  assert.equal(result.networkSummary.api.failed, 501)
+  assert.equal(networkFailures.length, 501)
+  assert.match(networkFailures.at(-1).name, /另有 1 个失败接口/)
+  assert.equal(result.logs.filter(({ level }) => level === 'error').length, 200)
+  assert.equal(result.logs.some(({ message }) => /网络失败日志超过 200 条/.test(message)), true)
 })
 
 test('stops a script at its configured timeout and reports a failure instead of interruption', async () => {
@@ -481,6 +1181,7 @@ test('stops a script at its configured timeout and reports a failure instead of 
   assert.equal(result.ok, false)
   assert.equal(result.timedOut, true)
   assert.equal(result.cancelled, undefined)
+  assert.equal(result.continuePipeline, undefined)
   assert.equal(result.status, 'failed')
   assert.match(result.error, /超过 1000 ms/)
   assert.equal(result.logs.some((log) => log.level === 'error' && /执行超时/.test(log.message)), true)
@@ -501,6 +1202,7 @@ test('stops immediately on runtime exceptions and does not execute later work', 
 
   assert.equal(result.ok, false)
   assert.equal(result.error, '接口返回业务码 500')
+  assert.equal(result.continuePipeline, undefined)
   assert.equal(laterWorkExecuted, false)
   assert.equal(result.assertions.length, 1)
 })

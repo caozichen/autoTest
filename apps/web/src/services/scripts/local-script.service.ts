@@ -4,6 +4,9 @@ import {
   type AutomationScript,
   type ScriptDraft,
   type ScriptApiResponse,
+  type ScriptArtifact,
+  type ScriptNetworkSummary,
+  type ScriptResourceResponse,
   type ScriptRunContext,
   type ScriptRunResult,
 } from '@/domain/script'
@@ -30,6 +33,14 @@ import { HttpScriptConfigRepository } from './http-script-config.repository'
 import type { ScriptConfig, ScriptConfigRepository } from './script-config-repository'
 
 const CANCEL_REQUEST_TIMEOUT_MS = 5_000
+const LIVE_REQUEST_TIMEOUT_MS = 5_000
+const RUN_REQUEST_GRACE_MS = 30_000
+const RUN_REGISTRATION_GRACE_MS = 3_000
+const LIVE_PROGRESS_INTERVAL_MS = 2_000
+const PROGRESS_NOTIFICATION_TIMEOUT_MS = 20_000
+const ARTIFACT_SCOPE_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$/
+const ARTIFACT_TYPE_PATTERN = /^[a-zA-Z][a-zA-Z0-9_-]{0,99}$/
+const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f-\u009f]/
 
 type CancellationTarget = 'run' | 'script'
 
@@ -153,10 +164,14 @@ function interruptedRunResult(current?: ScriptRunResult): ScriptRunResult {
 
 interface RunnerResponse {
   ok: boolean
+  continuePipeline?: boolean
   durationMs: number
   logs: ScriptRunResult['logs']
   assertions?: ScriptAssertionResult[]
   apiResponses?: ScriptApiResponse[]
+  resourceResponses?: ScriptResourceResponse[]
+  networkSummary?: ScriptNetworkSummary
+  artifacts?: unknown
   cancelled?: boolean
   timedOut?: boolean
   status?: 'running' | 'passed' | 'failed' | 'interrupted'
@@ -170,14 +185,29 @@ interface RunnerLiveResponse extends RunnerResponse {
 
 interface RunnerCancelResponse {
   ok?: boolean
+  status?: 'interrupted'
+  pendingRegistration?: boolean
   cancelledRunIds?: unknown
+  cleanupTimedOutRunIds?: unknown
+  run?: RunnerLiveResponse
   error?: string
 }
 
 interface ActiveExecution {
   runId: string | null
+  executionId: string
   cancelRequested: boolean
+  cancellationConfirmed: boolean
+  requestController: AbortController | null
   script: AutomationScript
+}
+
+interface LocalScriptServiceOptions {
+  liveRequestTimeoutMs?: number
+  runRequestGraceMs?: number
+  runRegistrationGraceMs?: number
+  liveProgressIntervalMs?: number
+  progressNotificationTimeoutMs?: number
 }
 
 function isKnownStaleCancellation(
@@ -192,52 +222,148 @@ function isKnownStaleCancellation(
   return payload.error === expectedError
 }
 
-async function fetchWithTimeout(
-  fetcher: typeof fetch,
-  input: RequestInfo | URL,
-  init: RequestInit,
+function wait(delayMs: number): Promise<void> {
+  return new Promise((resolve) => globalThis.setTimeout(resolve, delayMs))
+}
+
+async function withTimeout<T>(
+  operation: Promise<T>,
   timeoutMs: number,
-): Promise<Response> {
-  const controller = new AbortController()
+  message: string,
+  onTimeout?: () => void,
+): Promise<T> {
   let timeoutId: ReturnType<typeof globalThis.setTimeout> | undefined
-  let timedOut = false
-  const timeoutPromise = new Promise<never>((_, reject) => {
+  const timeout = new Promise<never>((_, reject) => {
     timeoutId = globalThis.setTimeout(() => {
-      timedOut = true
-      reject(new Error(`Runner 强制停止请求超时（${timeoutMs}ms），请确认 Runner 服务正常后重试`))
-      controller.abort()
+      reject(new Error(message))
+      onTimeout?.()
     }, timeoutMs)
   })
-
   try {
-    return await Promise.race([
-      fetcher(input, { ...init, signal: controller.signal }),
-      timeoutPromise,
-    ])
-  } catch (error) {
-    if (timedOut) {
-      throw new Error(`Runner 强制停止请求超时（${timeoutMs}ms），请确认 Runner 服务正常后重试`)
-    }
-    throw error
+    return await Promise.race([operation, timeout])
   } finally {
     if (timeoutId !== undefined) globalThis.clearTimeout(timeoutId)
   }
 }
 
-function wait(delayMs: number): Promise<void> {
-  return new Promise((resolve) => globalThis.setTimeout(resolve, delayMs))
+async function fetchJsonWithTimeout<T>(
+  fetcher: typeof fetch,
+  input: RequestInfo | URL,
+  init: RequestInit,
+  controller: AbortController,
+  timeoutMs: number,
+  timeoutMessage: string,
+): Promise<{ response: Response; payload: T }> {
+  const operation = (async () => {
+    const response = await fetcher(input, { ...init, signal: controller.signal })
+    const payload = await response.json() as T
+    return { response, payload }
+  })()
+  let removeAbortListener: () => void = () => {}
+  const aborted = new Promise<never>((_, reject) => {
+    const rejectAborted = () => reject(new Error('Runner 请求已取消'))
+    if (controller.signal.aborted) {
+      rejectAborted()
+      return
+    }
+    controller.signal.addEventListener('abort', rejectAborted, { once: true })
+    removeAbortListener = () => controller.signal.removeEventListener('abort', rejectAborted)
+  })
+  try {
+    return await withTimeout(
+      Promise.race([operation, aborted]),
+      timeoutMs,
+      timeoutMessage,
+      () => controller.abort(),
+    )
+  } finally {
+    removeAbortListener()
+  }
+}
+
+function isTerminalRunnerStatus(
+  status: RunnerLiveResponse['status'],
+): status is Exclude<RunnerLiveResponse['status'], 'running'> {
+  return status === 'passed' || status === 'failed' || status === 'interrupted'
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function isAbsoluteArtifactPath(value: string): boolean {
+  return value.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(value) || value.startsWith('\\\\')
+}
+
+function isSafeArtifactRelativePath(value: string): boolean {
+  if (!value || value.length > 4_096 || CONTROL_CHARACTER_PATTERN.test(value)) return false
+  if (value.includes('\\') || value.startsWith('/') || /^[a-zA-Z]:/.test(value)) return false
+  return value.split('/').every((segment) => segment && segment !== '.' && segment !== '..')
+}
+
+function normalizeScriptArtifact(value: unknown): ScriptArtifact | null {
+  if (!isRecord(value)) return null
+  if (
+    typeof value.executionId !== 'string'
+    || !ARTIFACT_SCOPE_ID_PATTERN.test(value.executionId)
+    || typeof value.stepId !== 'string'
+    || !ARTIFACT_SCOPE_ID_PATTERN.test(value.stepId)
+    || typeof value.attemptId !== 'string'
+    || !ARTIFACT_SCOPE_ID_PATTERN.test(value.attemptId)
+    || typeof value.absolutePath !== 'string'
+    || !value.absolutePath
+    || value.absolutePath.length > 4_096
+    || CONTROL_CHARACTER_PATTERN.test(value.absolutePath)
+    || !isAbsoluteArtifactPath(value.absolutePath)
+    || typeof value.relativePath !== 'string'
+    || !isSafeArtifactRelativePath(value.relativePath)
+    || typeof value.type !== 'string'
+    || !ARTIFACT_TYPE_PATTERN.test(value.type)
+    || typeof value.mimeType !== 'string'
+    || !value.mimeType.trim()
+    || value.mimeType.length > 200
+    || CONTROL_CHARACTER_PATTERN.test(value.mimeType)
+    || typeof value.sizeBytes !== 'number'
+    || !Number.isSafeInteger(value.sizeBytes)
+    || value.sizeBytes < 0
+    || typeof value.createdAt !== 'string'
+    || !Number.isFinite(Date.parse(value.createdAt))
+  ) return null
+
+  return {
+    executionId: value.executionId,
+    stepId: value.stepId,
+    attemptId: value.attemptId,
+    absolutePath: value.absolutePath,
+    relativePath: value.relativePath,
+    type: value.type,
+    mimeType: value.mimeType.trim(),
+    sizeBytes: value.sizeBytes,
+    createdAt: new Date(value.createdAt).toISOString(),
+  }
 }
 
 function normalizeRunnerResponse(value: RunnerResponse): ScriptRunResult {
   const cancelled = value.cancelled === true || value.status === 'interrupted'
   return {
     ok: value.ok === true,
+    ...(value.continuePipeline === true ? { continuePipeline: true } : {}),
     ...(cancelled ? { cancelled: true } : {}),
     ...(value.timedOut === true ? { timedOut: true } : {}),
     durationMs: Number.isFinite(value.durationMs) ? value.durationMs : 0,
     logs: Array.isArray(value.logs) ? value.logs : [],
     ...(Array.isArray(value.assertions) ? { assertions: value.assertions } : {}),
     ...(Array.isArray(value.apiResponses) ? { apiResponses: value.apiResponses } : {}),
+    ...(Array.isArray(value.resourceResponses) ? { resourceResponses: value.resourceResponses } : {}),
+    ...(isRecord(value.networkSummary)
+      ? { networkSummary: structuredClone(value.networkSummary) as unknown as ScriptNetworkSummary }
+      : {}),
+    ...(Array.isArray(value.artifacts)
+      ? { artifacts: value.artifacts.flatMap((artifact) => {
+          const normalized = normalizeScriptArtifact(artifact)
+          return normalized ? [normalized] : []
+        }) }
+      : {}),
     ...(value.result ? { output: value.result } : {}),
     ...(value.error ? { error: value.error } : {}),
   }
@@ -248,6 +374,11 @@ export class LocalScriptService implements ScriptService {
   private configs = new Map<string, ScriptConfig>()
   private readonly activeExecutions = new Map<string, ActiveExecution>()
   private readonly configRepository: ScriptConfigRepository
+  private readonly liveRequestTimeoutMs: number
+  private readonly runRequestGraceMs: number
+  private readonly runRegistrationGraceMs: number
+  private readonly liveProgressIntervalMs: number
+  private readonly progressNotificationTimeoutMs: number
   private configMutationVersion = 0
   private configReloadPromise: Promise<void> | null = null
 
@@ -257,9 +388,21 @@ export class LocalScriptService implements ScriptService {
     private readonly livePollIntervalMs = 500,
     private readonly cancelRequestTimeoutMs = CANCEL_REQUEST_TIMEOUT_MS,
     configRepository?: ScriptConfigRepository,
+    options: LocalScriptServiceOptions = {},
   ) {
     this.configRepository = configRepository
       ?? new HttpScriptConfigRepository(this.fetcher, this.runnerUrl)
+    this.liveRequestTimeoutMs = Math.max(1, options.liveRequestTimeoutMs ?? LIVE_REQUEST_TIMEOUT_MS)
+    this.runRequestGraceMs = Math.max(1, options.runRequestGraceMs ?? RUN_REQUEST_GRACE_MS)
+    this.runRegistrationGraceMs = Math.max(
+      1,
+      options.runRegistrationGraceMs ?? RUN_REGISTRATION_GRACE_MS,
+    )
+    this.liveProgressIntervalMs = Math.max(0, options.liveProgressIntervalMs ?? LIVE_PROGRESS_INTERVAL_MS)
+    this.progressNotificationTimeoutMs = Math.max(
+      1,
+      options.progressNotificationTimeoutMs ?? PROGRESS_NOTIFICATION_TIMEOUT_MS,
+    )
   }
 
   async list(): Promise<AutomationScript[]> {
@@ -324,6 +467,7 @@ export class LocalScriptService implements ScriptService {
     if (execution) execution.cancelRequested = true
 
     if (execution && !activeRunId) {
+      execution.cancellationConfirmed = true
       this.markInterrupted(id)
       return { runnerFound: false, cancelledRunIds: [] }
     }
@@ -334,33 +478,143 @@ export class LocalScriptService implements ScriptService {
       : `/scripts/${encodeURIComponent(id)}/cancel`
 
     let response: Response
+    let payload: RunnerCancelResponse
     try {
-      response = await fetchWithTimeout(
+      const cancelController = new AbortController()
+      ;({ response, payload } = await fetchJsonWithTimeout<RunnerCancelResponse>(
         this.fetcher,
         `${this.runnerUrl}${cancellationPath}`,
-        { method: 'POST' },
+        activeRunId
+          ? {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ reserveIfMissing: true }),
+            }
+          : { method: 'POST' },
+        cancelController,
         this.cancelRequestTimeoutMs,
-      )
+        `Runner 强制停止请求超时（${this.cancelRequestTimeoutMs}ms），请确认 Runner 服务正常后重试`,
+      ))
     } catch (error) {
-      if (execution && this.activeExecutions.get(id) === execution) execution.cancelRequested = false
+      if (activeRunId) {
+        const localScript = execution?.script ?? this.scripts.find((item) => item.id === id)
+        if (localScript?.status === 'interrupted' || localScript?.lastRunResult?.cancelled) {
+          return { runnerFound: true, cancelledRunIds: [activeRunId] }
+        }
+        try {
+          const liveController = new AbortController()
+          const { response: liveResponse, payload: live } = await fetchJsonWithTimeout<RunnerLiveResponse>(
+            this.fetcher,
+            `${this.runnerUrl}/runs/${encodeURIComponent(activeRunId)}`,
+            {},
+            liveController,
+            this.liveRequestTimeoutMs,
+            `Runner 停止状态对账超时（${this.liveRequestTimeoutMs}ms）`,
+          )
+          if (liveResponse.ok && (live.status === 'interrupted' || live.cancelled === true)) {
+            if (execution) execution.cancellationConfirmed = true
+            execution?.requestController?.abort()
+            this.markInterrupted(id)
+            return { runnerFound: true, cancelledRunIds: [activeRunId] }
+          }
+        } catch {
+          // 保留原始停止请求错误，状态对账失败不覆盖更具体的原因。
+        }
+      }
+      if (execution && !execution.cancellationConfirmed) execution.cancelRequested = false
       throw error instanceof TypeError
         ? new Error(`无法连接本地 Playwright Runner（${this.runnerUrl}），强制停止失败`)
         : error
     }
 
-    const payload = await response.json().catch(() => ({})) as RunnerCancelResponse
     const staleCancellation = isKnownStaleCancellation(cancellationTarget, response, payload)
-    if (!response.ok && !staleCancellation) {
-      if (execution && this.activeExecutions.get(id) === execution) execution.cancelRequested = false
+    const alreadyInterrupted = Boolean(
+      activeRunId
+      && response.status === 409
+      && (payload.run?.status === 'interrupted' || payload.run?.cancelled === true),
+    )
+    if (!response.ok && !staleCancellation && !alreadyInterrupted) {
+      if (execution && !execution.cancellationConfirmed) execution.cancelRequested = false
       throw new Error(payload.error || `Runner 强制停止返回 HTTP ${response.status}`)
     }
+    if (staleCancellation && activeRunId) {
+      if (execution && !execution.cancellationConfirmed) execution.cancelRequested = false
+      throw new Error('Runner 未确认强制停止：运行任务尚未注册或已过期，请稍后重试')
+    }
 
+    if (execution) execution.cancellationConfirmed = true
+    execution?.requestController?.abort()
     this.markInterrupted(id)
+    const cleanupTimedOutRunIds = Array.isArray(payload.cleanupTimedOutRunIds)
+      ? payload.cleanupTimedOutRunIds.filter((runId): runId is string => typeof runId === 'string')
+      : []
     return {
       runnerFound: !staleCancellation,
-      cancelledRunIds: Array.isArray(payload.cancelledRunIds)
-        ? payload.cancelledRunIds.filter((runId): runId is string => typeof runId === 'string')
-        : [],
+      cancelledRunIds: alreadyInterrupted && activeRunId
+        ? [activeRunId]
+        : Array.isArray(payload.cancelledRunIds)
+          ? payload.cancelledRunIds.filter((runId): runId is string => typeof runId === 'string')
+          : [],
+      ...(cleanupTimedOutRunIds.length > 0 ? { cleanupTimedOutRunIds } : {}),
+    }
+  }
+
+  async stopExecution(executionId: string): Promise<ScriptStopResult> {
+    if (!ARTIFACT_SCOPE_ID_PATTERN.test(executionId)) {
+      throw new Error('运行批次 ID 格式无效')
+    }
+
+    const executions = [...this.activeExecutions.values()]
+      .filter((execution) => execution.executionId === executionId)
+    for (const execution of executions) execution.cancelRequested = true
+
+    let response: Response
+    let payload: RunnerCancelResponse
+    try {
+      const controller = new AbortController()
+      ;({ response, payload } = await fetchJsonWithTimeout<RunnerCancelResponse>(
+        this.fetcher,
+        `${this.runnerUrl}/executions/${encodeURIComponent(executionId)}/cancel`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reason: '用户已从运行记录强制停止运行批次' }),
+        },
+        controller,
+        this.cancelRequestTimeoutMs,
+        `Runner 批次停止请求超时（${this.cancelRequestTimeoutMs}ms），请确认 Runner 服务正常后重试`,
+      ))
+    } catch (error) {
+      for (const execution of executions) {
+        if (!execution.cancellationConfirmed) execution.cancelRequested = false
+      }
+      throw error instanceof TypeError
+        ? new Error(`无法连接本地 Playwright Runner（${this.runnerUrl}），批次停止失败`)
+        : error
+    }
+
+    if (!response.ok) {
+      for (const execution of executions) {
+        if (!execution.cancellationConfirmed) execution.cancelRequested = false
+      }
+      throw new Error(payload.error || `Runner 批次停止返回 HTTP ${response.status}`)
+    }
+
+    for (const execution of executions) {
+      execution.cancellationConfirmed = true
+      execution.requestController?.abort()
+      this.markInterrupted(execution.script.id)
+    }
+    const cancelledRunIds = Array.isArray(payload.cancelledRunIds)
+      ? payload.cancelledRunIds.filter((runId): runId is string => typeof runId === 'string')
+      : []
+    const cleanupTimedOutRunIds = Array.isArray(payload.cleanupTimedOutRunIds)
+      ? payload.cleanupTimedOutRunIds.filter((runId): runId is string => typeof runId === 'string')
+      : []
+    return {
+      runnerFound: cancelledRunIds.length > 0 || cleanupTimedOutRunIds.length > 0,
+      cancelledRunIds,
+      ...(cleanupTimedOutRunIds.length > 0 ? { cleanupTimedOutRunIds } : {}),
     }
   }
 
@@ -387,7 +641,14 @@ export class LocalScriptService implements ScriptService {
       script.lastRunAt = '刚刚'
       script.lastDuration = null
       script.lastRunResult = { ok: false, durationMs: 0, logs: [] }
-      const execution: ActiveExecution = { runId: null, cancelRequested: false, script }
+      const execution: ActiveExecution = {
+        runId: null,
+        executionId: context.executionId ?? '',
+        cancelRequested: false,
+        cancellationConfirmed: false,
+        requestController: null,
+        script,
+      }
       this.activeExecutions.set(script.id, execution)
       Object.assign(storedScript, structuredClone(script))
       return execution
@@ -401,21 +662,28 @@ export class LocalScriptService implements ScriptService {
     for (const execution of executions) {
       const { script } = execution
       let result: ScriptRunResult
-      if (execution.cancelRequested) {
+      if (execution.cancellationConfirmed) {
         result = interruptedRunResult(script.lastRunResult)
         script.lastRunResult = result
         script.status = 'interrupted'
         script.lastDuration = formatDuration(result.durationMs)
-        this.finishExecution(execution)
         const notification = this.notifyProgress(onProgress, script)
         if (notification) await notification
+        this.finishExecution(execution)
         continue
       }
 
       try {
         const runId = crypto.randomUUID()
         execution.runId = runId
-        let requestCompleted = false
+        const pollState: {
+          active: boolean
+          controller: AbortController | null
+        } = { active: true, controller: null }
+        let lastLiveProgressAt = 0
+        let runObserved = false
+        const runDeadlineMs = script.timeoutMs + this.runRequestGraceMs
+        const runDeadlineAt = Date.now() + runDeadlineMs
         const effectiveVariables = {
           ...scriptInputParameterDefaults(script.inputParameters),
           ...runVariables,
@@ -423,60 +691,160 @@ export class LocalScriptService implements ScriptService {
         const requestPath = script.requestPath
           ? resolveScriptRequestPath(script.requestPath, effectiveVariables)
           : undefined
-        const responsePromise = this.fetcher(`${this.runnerUrl}/runs`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            runId,
-            scriptId: script.id,
-            context: {
-              siteBaseUrl: context.siteBaseUrl,
-              apiBaseUrl: context.apiBaseUrl,
-              ignoreHTTPSErrors: context.ignoreHTTPSErrors,
-              variables: effectiveVariables,
-              authorizationOrigin: context.authorizationOrigin,
-              extraHTTPHeaders: context.extraHTTPHeaders,
-              ...(requestPath ? { requestPath } : {}),
-            },
-          }),
+        const acceptLiveSnapshot = async (live: RunnerLiveResponse): Promise<ScriptRunResult | null> => {
+          const liveResult = normalizeRunnerResponse(live)
+          if (isTerminalRunnerStatus(live.status)) return liveResult
+          if (execution.cancelRequested) return null
+          script.lastRunResult = liveResult
+          script.lastDuration = formatDuration(live.durationMs)
+          this.syncExecution(execution)
+          const now = Date.now()
+          if (lastLiveProgressAt === 0
+            || now - lastLiveProgressAt >= this.liveProgressIntervalMs) {
+            lastLiveProgressAt = now
+            const notification = this.notifyProgress(onProgress, script)
+            if (notification) await notification
+          }
+          return null
+        }
+        const postController = new AbortController()
+        execution.requestController = postController
+        const postOutcome = fetchJsonWithTimeout<RunnerResponse>(
+          this.fetcher,
+          `${this.runnerUrl}/runs`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              runId,
+              executionId: context.executionId ?? runId,
+              scriptId: script.id,
+              context: {
+                siteBaseUrl: context.siteBaseUrl,
+                apiBaseUrl: context.apiBaseUrl,
+                ignoreHTTPSErrors: context.ignoreHTTPSErrors,
+                variables: effectiveVariables,
+                authorizationOrigin: context.authorizationOrigin,
+                extraHTTPHeaders: context.extraHTTPHeaders,
+                ...(requestPath ? { requestPath } : {}),
+              },
+            }),
+          },
+          postController,
+          runDeadlineMs,
+          `Runner 执行请求超时（${runDeadlineMs}ms）`,
+        ).then(({ response, payload }) => {
+          const interrupted = payload.cancelled === true || payload.status === 'interrupted'
+          if (!response.ok && !interrupted) {
+            throw new Error(payload.error || `Runner 返回 HTTP ${response.status}`)
+          }
+          return normalizeRunnerResponse(payload)
+        }).then(
+          (postResult) => ({ source: 'post' as const, result: postResult }),
+          (error: unknown) => ({ source: 'post' as const, error }),
+        )
+
+        let resolveTerminal!: (outcome: {
+          source: 'poll'
+          result: ScriptRunResult
+        }) => void
+        const terminalOutcome = new Promise<{
+          source: 'poll'
+          result: ScriptRunResult
+        }>((resolve) => {
+          resolveTerminal = resolve
         })
-        const pollTask = (async () => {
-          while (!requestCompleted) {
+        void (async () => {
+          while (pollState.active) {
             await wait(this.livePollIntervalMs)
-            if (requestCompleted) break
+            if (!pollState.active) break
+            const pollController = new AbortController()
             try {
-              const liveResponse = await this.fetcher(`${this.runnerUrl}/runs/${encodeURIComponent(runId)}`)
+              pollState.controller = pollController
+              const { response: liveResponse, payload: live } = await fetchJsonWithTimeout<RunnerLiveResponse>(
+                this.fetcher,
+                `${this.runnerUrl}/runs/${encodeURIComponent(runId)}`,
+                {},
+                pollController,
+                this.liveRequestTimeoutMs,
+                `Runner 运行状态请求超时（${this.liveRequestTimeoutMs}ms）`,
+              )
               if (!liveResponse.ok) continue
-              const live = await liveResponse.json() as RunnerLiveResponse
-              const liveResult = normalizeRunnerResponse(live)
-              script.lastRunResult = liveResult
-              script.lastDuration = formatDuration(live.durationMs)
-              if (liveResult.cancelled) script.status = 'interrupted'
-              this.syncExecution(execution)
-              const notification = this.notifyProgress(onProgress, script)
-              if (notification) await notification
+              if (!pollState.active) break
+              runObserved = true
+              const terminalResult = await acceptLiveSnapshot(live)
+              if (terminalResult) {
+                resolveTerminal({ source: 'poll', result: terminalResult })
+                break
+              }
             } catch {
-              // 最终 POST 仍负责报告连接或执行错误，轮询失败只跳过本次刷新。
+              // POST 或下次轮询仍可给出结果，本次状态刷新失败不改变脚本结果。
+            } finally {
+              if (pollState.controller === pollController) pollState.controller = null
             }
           }
         })()
-        const response = await responsePromise.finally(() => {
-          requestCompleted = true
-        })
-        await pollTask
-        const payload = await response.json() as RunnerResponse
-        const interrupted = payload.cancelled === true || payload.status === 'interrupted'
-        if (!response.ok && !interrupted) throw new Error(payload.error || `Runner 返回 HTTP ${response.status}`)
-        result = normalizeRunnerResponse(payload)
+
+        const outcome = await Promise.race([postOutcome, terminalOutcome])
+        pollState.active = false
+        pollState.controller?.abort()
+        if (outcome.source === 'poll') postController.abort()
+        if ('error' in outcome && execution.cancellationConfirmed) {
+          result = interruptedRunResult(script.lastRunResult)
+        } else if ('error' in outcome) {
+          const postError = outcome.error
+          let recoveryDeadlineAt = runObserved
+            ? runDeadlineAt
+            : Math.min(runDeadlineAt, Date.now() + this.runRegistrationGraceMs)
+          let firstAttempt = true
+          let recoveredResult: ScriptRunResult | null = null
+          while (firstAttempt || Date.now() < recoveryDeadlineAt) {
+            const deadlineAlreadyReached = Date.now() >= recoveryDeadlineAt
+            firstAttempt = false
+            const requestTimeoutMs = deadlineAlreadyReached
+              ? this.liveRequestTimeoutMs
+              : Math.max(1, Math.min(this.liveRequestTimeoutMs, recoveryDeadlineAt - Date.now()))
+            const recoveryController = new AbortController()
+            try {
+              const { response, payload: live } = await fetchJsonWithTimeout<RunnerLiveResponse>(
+                this.fetcher,
+                `${this.runnerUrl}/runs/${encodeURIComponent(runId)}`,
+                {},
+                recoveryController,
+                requestTimeoutMs,
+                `Runner 恢复状态请求超时（${requestTimeoutMs}ms）`,
+              )
+              if (response.ok) {
+                runObserved = true
+                recoveryDeadlineAt = runDeadlineAt
+                recoveredResult = await acceptLiveSnapshot(live)
+                if (recoveredResult) break
+              }
+            } catch {
+              // 请求可能已经由 Runner 接收，继续在注册或执行截止时间内查询终态。
+            }
+            const remainingMs = recoveryDeadlineAt - Date.now()
+            if (remainingMs > 0) await wait(Math.min(this.livePollIntervalMs, remainingMs))
+          }
+          if (!recoveredResult) {
+            if (runObserved && Date.now() >= runDeadlineAt) {
+              throw new Error(`Runner 执行在 ${runDeadlineMs}ms 内未返回终态`)
+            }
+            throw postError
+          }
+          result = recoveredResult
+        } else {
+          result = outcome.result
+        }
       } catch (error) {
-        result = execution.cancelRequested
+        result = execution.cancellationConfirmed
           ? interruptedRunResult(script.lastRunResult)
           : failedRunResult(error instanceof TypeError
             ? new Error(`无法连接本地 Playwright Runner（${this.runnerUrl}），请确认 npm run dev 已同时启动 Web 和 Runner`)
             : error)
       }
 
-      if (execution.cancelRequested && !result.cancelled) result = interruptedRunResult(result)
+      if (execution.cancellationConfirmed && !result.cancelled) result = interruptedRunResult(result)
       const extraction = extractScriptResponseVariables(script, result)
       if (extraction.extracted.length > 0) {
         Object.assign(runVariables, Object.fromEntries(
@@ -511,9 +879,9 @@ export class LocalScriptService implements ScriptService {
       script.lastRunResult = result
       script.status = result.cancelled ? 'interrupted' : result.ok ? 'passed' : 'failed'
       script.lastDuration = formatDuration(result.durationMs)
-      this.finishExecution(execution)
       const notification = this.notifyProgress(onProgress, script)
       if (notification) await notification
+      this.finishExecution(execution)
     }
     return cloneScripts(executions.map((execution) => execution.script))
   }
@@ -571,6 +939,7 @@ export class LocalScriptService implements ScriptService {
   }
 
   private finishExecution(execution: ActiveExecution): void {
+    execution.requestController = null
     this.syncExecution(execution)
     if (this.activeExecutions.get(execution.script.id) === execution) {
       this.activeExecutions.delete(execution.script.id)
@@ -584,7 +953,13 @@ export class LocalScriptService implements ScriptService {
     if (!onProgress) return
     try {
       const notification = onProgress(structuredClone(script))
-      if (notification) return notification.catch(() => undefined)
+      if (notification) {
+        return withTimeout(
+          notification,
+          this.progressNotificationTimeoutMs,
+          `脚本进度上报超时（${this.progressNotificationTimeoutMs}ms）`,
+        ).catch(() => undefined)
+      }
     } catch {
       // Progress reporting must not change the script execution result.
     }

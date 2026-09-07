@@ -42,6 +42,7 @@ Invoke-RestMethod http://127.0.0.1:4310/health
 | `POST /runs` | 校验并执行已注册脚本；连接会保持到执行完成。 |
 | `GET /runs/:runId` | 查询实时状态、耗时和增量日志。 |
 | `POST /runs/:runId/cancel` | 按运行 ID 精确停止一个任务。 |
+| `POST /executions/:executionId/cancel` | 停止同一批次的全部活动任务，并阻止该批次后续步骤启动。 |
 | `POST /scripts/:scriptId/cancel` | 停止该脚本当前全部活动任务。 |
 | `GET /script-configs` | 查询全部脚本配置。 |
 | `GET /script-configs/:id` | 查询一条脚本配置。 |
@@ -55,6 +56,14 @@ Invoke-RestMethod http://127.0.0.1:4310/health
 | `POST /run-records/migrations/local-storage-v1` | 幂等导入旧版浏览器运行记录。 |
 
 运行状态包括 `running`、`passed`、`failed` 和 `interrupted`。完成后的运行快照保留约 5 分钟，用于页面获取最终状态。取消接口可接收 `{ "reason": "停止原因" }`，原因最多 200 个字符。
+
+`POST /runs` 可在顶层携带 `executionId`。管理端使用运行记录 ID 作为 `executionId`；Runner
+使用注册脚本 ID 作为 `stepId`，并使用本次 `runId` 作为 `attemptId`。Runner 向脚本注入
+`artifactWriter`；已接入的脚本通过它将制品写入
+`outputs/artifacts/<executionId>/<stepId>/<attemptId>/`。未提供 `executionId` 时回退为本次
+`runId`；运行结果和实时快照中的 `artifacts` 返回已成功落盘的制品描述。若 `executionId`
+对应已有运行记录，Runner 会在最终运行结果可见前原子合并对应脚本的制品描述；合并时会
+校验运行记录 ID、脚本 ID 和三级目录后缀，浏览器断开也不会留下无法从运行历史定位的制品。
 
 ## 停止语义与安全
 

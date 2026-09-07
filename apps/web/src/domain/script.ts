@@ -26,16 +26,86 @@ export interface ScriptApiResponse {
   requestBody?: unknown
   responseBody?: unknown
   error?: string
+  bodyReadError?: string
+  warning?: boolean
+  incomplete?: boolean
+  phase?: string
+  pageUrl?: string
+  frameUrl?: string
+  mimeType?: string
+  failureKind?: ScriptNetworkFailureKind
+  isFirstParty?: boolean
+  ignored?: boolean
+  diagnostics?: string[]
+  streaming?: boolean
+}
+
+export type ScriptNetworkFailureKind = string
+
+export interface ScriptResourceResponse {
+  sequence: number
+  timestamp: string
+  name: string
+  method: string
+  url: string
+  resourceType: string
+  status: number
+  ok: boolean
+  durationMs: number
+  phase?: string
+  pageUrl?: string
+  frameUrl?: string
+  mimeType?: string
+  error?: string
+  failureKind?: ScriptNetworkFailureKind
+  fromCache?: boolean
+  fromServiceWorker?: boolean
+  isFirstParty?: boolean
+  ignored?: boolean
+  diagnostics?: string[]
+  streaming?: boolean
+  warning?: boolean
+  incomplete?: boolean
+}
+
+export interface ScriptNetworkCategorySummary {
+  observed: number
+  recorded: number
+  dropped: number
+  passed: number
+  failed: number
+  warnings: number
+}
+
+export interface ScriptNetworkSummary {
+  api: ScriptNetworkCategorySummary
+  resources: ScriptNetworkCategorySummary
+}
+
+export interface ScriptArtifact {
+  executionId: string
+  stepId: string
+  attemptId: string
+  absolutePath: string
+  relativePath: string
+  type: string
+  mimeType: string
+  sizeBytes: number
+  createdAt: string
 }
 
 export interface ScriptRunResult {
   ok: boolean
+  continuePipeline?: boolean
   cancelled?: boolean
   timedOut?: boolean
   durationMs: number
   logs: ScriptRunLog[]
   assertions?: ScriptAssertionResult[]
   apiResponses?: ScriptApiResponse[]
+  resourceResponses?: ScriptResourceResponse[]
+  networkSummary?: ScriptNetworkSummary
+  artifacts?: ScriptArtifact[]
   output?: Record<string, unknown>
   error?: string
 }
@@ -87,6 +157,7 @@ export interface ScriptDraft {
 
 export interface ScriptRunContext {
   environmentId: string
+  executionId?: string
   siteBaseUrl: string
   apiBaseUrl: string
   ignoreHTTPSErrors: boolean

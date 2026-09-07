@@ -44,7 +44,10 @@ export function extractScriptResponseVariables(
   result: ScriptRunResult,
 ): ScriptVariableExtractionReport {
   const bindings = script.responseVariableBindings ?? []
-  if (!result.ok || !result.output || bindings.length === 0) return { extracted: [], failed: [] }
+  const completedWithUsableOutput = result.ok || result.continuePipeline === true
+  if (!completedWithUsableOutput || !result.output || bindings.length === 0) {
+    return { extracted: [], failed: [] }
+  }
 
   const extracted: ExtractedScriptVariable[] = []
   const failed: ScriptResponseVariableBinding[] = []

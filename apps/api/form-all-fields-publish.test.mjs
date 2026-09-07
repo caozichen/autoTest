@@ -3,6 +3,7 @@ import { createServer } from 'node:http'
 import { basename } from 'node:path'
 import test from 'node:test'
 
+import { runWithAssertionRecorder } from '../../scripts/support/recorded-expect.mjs'
 import {
   ADVANCED_FIELD_TYPES,
   CASCADER_LEVEL_VALUES,
@@ -18,8 +19,31 @@ import {
   FORM_CONTENT_ITEMS,
   FORM_SUBTITLE,
   REQUIRED_FIELD_TYPES,
+  assertSavedPayloads,
+  inspectBusinessResponse,
+  requireGroupKey,
   run,
 } from '../../scripts/form-all-fields-publish.ui.spec.mjs'
+
+function createScreenshotArtifactWriter(captures, stepId) {
+  return {
+    async captureScreenshot(page, relativePath, options) {
+      const artifact = {
+        executionId: 'run-record-001',
+        stepId,
+        attemptId: 'attempt-001',
+        absolutePath: `/tmp/autotest-artifacts/run-record-001/${stepId}/attempt-001/${relativePath}`,
+        relativePath,
+        type: 'screenshot',
+        mimeType: 'image/png',
+        sizeBytes: 128,
+        createdAt: '2026-09-04T08:00:00.000Z',
+      }
+      captures.push({ page, relativePath, options, artifact })
+      return artifact
+    },
+  }
+}
 
 const IMAGE_FILE_NAME = basename(DEFAULT_HEADER_IMAGE_PATH)
 const SYSTEM_ITEM_KEYS = ['duration', 'device', 'os', 'browser']
@@ -31,6 +55,135 @@ const SERVER_TYPE_BY_DESIGNER_TYPE = Object.freeze({
   fieldGroup: 'field_group',
   matrixChoice: 'matrix_choice',
   ranking: 'sort',
+})
+
+test('records malformed saved payloads without throwing a secondary runtime error', async () => {
+  const assertions = []
+  let reachedEnd = false
+  const revisionNo = await runWithAssertionRecorder(
+    'form-all-fields-publish',
+    (assertion) => assertions.push(assertion),
+    () => {
+      const result = assertSavedPayloads({
+        itemsPayload: null,
+        configPayload: null,
+        title: 'expected title',
+        today: { year: 2026, month: 9, day: 4 },
+        endDate: { year: 2026, month: 10, day: 4 },
+        radioOptionUploadIds: ['upload-1', 'upload-2'],
+        headerUploadId: 'header-upload',
+      })
+      reachedEnd = true
+      return result
+    },
+  )
+
+  assert.equal(reachedEnd, true)
+  assert.equal(Number.isNaN(revisionNo), true)
+  assert.ok(assertions.length > 10)
+  assert.ok(assertions.some((assertion) => (
+    assertion.status === 'failed' && assertion.name.includes('payload.items 必须为数组')
+  )))
+  assert.ok(assertions.some((assertion) => (
+    assertion.status === 'failed' && assertion.name.includes('系统推荐页面底色')
+  )))
+})
+
+test('records malformed saved item entries without dereferencing null values', async () => {
+  const assertions = []
+  let reachedEnd = false
+
+  await runWithAssertionRecorder(
+    'form-all-fields-publish',
+    (assertion) => assertions.push(assertion),
+    () => {
+      assertSavedPayloads({
+        itemsPayload: { items: [null, 'invalid-item', 7] },
+        configPayload: {},
+        title: 'expected title',
+        today: { year: 2026, month: 9, day: 4 },
+        endDate: { year: 2026, month: 10, day: 4 },
+        radioOptionUploadIds: ['upload-1', 'upload-2'],
+        headerUploadId: 'header-upload',
+      })
+      reachedEnd = true
+    },
+  )
+
+  assert.equal(reachedEnd, true)
+  assert.ok(assertions.some((assertion) => (
+    assertion.status === 'failed' && assertion.name.includes('服务端题目顺序')
+  )))
+})
+
+test('records a missing group key and then stops as an explicit flow blocker', async () => {
+  const assertions = []
+
+  assert.throws(
+    () => runWithAssertionRecorder(
+      'form-all-fields-publish',
+      (assertion) => assertions.push(assertion),
+      () => requireGroupKey(null),
+    ),
+    /无法准确定位题组子题并继续流程/,
+  )
+  assert.ok(assertions.some((assertion) => (
+    assertion.status === 'failed' && assertion.name.includes('data-field-key')
+  )))
+})
+
+test('records unreadable and invalid business response bodies without stopping later work', async () => {
+  const cases = [
+    {
+      label: '读取失败',
+      response: {
+        ok: () => true,
+        status: () => 200,
+        text: async () => { throw new Error('body released after navigation') },
+      },
+      expectedFailure: '',
+      expectedSucceeded: true,
+    },
+    {
+      label: '无效 JSON',
+      response: {
+        ok: () => true,
+        status: () => 200,
+        text: async () => '{not-json}',
+      },
+      expectedFailure: '接口应返回有效 JSON',
+      expectedSucceeded: false,
+    },
+  ]
+
+  for (const fixture of cases) {
+    const assertions = []
+    let reachedLaterWork = false
+    const outcome = await runWithAssertionRecorder(
+      'form-all-fields-publish',
+      (assertion) => assertions.push(assertion),
+      async () => {
+        const inspected = await inspectBusinessResponse(fixture.response, fixture.label)
+        reachedLaterWork = true
+        return inspected
+      },
+    )
+
+    assert.equal(reachedLaterWork, true)
+    assert.equal(outcome.succeeded, fixture.expectedSucceeded)
+    assert.deepEqual(outcome.body, {})
+    assert.equal(outcome.bodyValid, false)
+    if (fixture.expectedFailure) {
+      assert.ok(assertions.some(({ status, name }) => (
+        status === 'failed' && name.includes(fixture.expectedFailure)
+      )))
+    } else {
+      assert.equal(outcome.warning, true)
+      assert.equal(outcome.incomplete, true)
+      assert.equal(outcome.bodyReadError, 'body released after navigation')
+      assert.equal(assertions.some(({ status }) => status === 'failed'), false)
+    }
+  }
 })
 
 function sendJson(response, body) {
@@ -133,7 +286,8 @@ function mockApplicationHtml() {
         headers: { 'Content-Type': 'application/json', Authorization: token(), ...(options.headers || {}) },
       })
       const body = await response.json()
-      if (!response.ok || !body || body.code !== 0) {
+      const allowInjectedFailure = response.headers.get('x-autotest-allow-failure') === 'true'
+      if (!allowInjectedFailure && (!response.ok || !body || body.code !== 0)) {
         throw new Error(body && body.message ? body.message : 'API business request failed')
       }
       return body
@@ -862,6 +1016,11 @@ test('creates, configures, uploads, saves, and publishes the complete three-page
   let forcedBusinessFailure = ''
   let uploadSequence = 0
   const uploadIntents = new Map()
+  const screenshotCaptures = []
+  const artifactWriter = createScreenshotArtifactWriter(
+    screenshotCaptures,
+    'form-all-fields-publish',
+  )
 
   const server = createServer(async (request, response) => {
     const url = new URL(request.url, 'http://127.0.0.1')
@@ -952,7 +1111,11 @@ test('creates, configures, uploads, saves, and publishes the complete three-page
       return
     }
     if (request.method === 'POST' && url.pathname === '/api/be/form') {
-      sendJson(response, { code: 0, message: 'success', data: { id: 202 } })
+      sendJson(response, {
+        code: 0,
+        message: 'success',
+        data: { id: 202, form_id: 202, form_code: '951000000000000202' },
+      })
       return
     }
     if (request.method === 'PUT' && url.pathname === '/api/be/form/202/activity/update-props') {
@@ -960,7 +1123,11 @@ test('creates, configures, uploads, saves, and publishes the complete three-page
       return
     }
     if (request.method === 'GET' && url.pathname === '/api/be/form/202') {
-      sendJson(response, { code: 0, message: 'success', data: { form: { id: 202, form_code: 'dynamic-all-fields' } } })
+      sendJson(response, {
+        code: 0,
+        message: 'success',
+        data: { form: { id: 202, form_id: 202, form_code: '951000000000000202' } },
+      })
       return
     }
     if (request.method === 'PUT' && url.pathname === '/api/be/form/202/items') {
@@ -981,14 +1148,23 @@ test('creates, configures, uploads, saves, and publishes the complete three-page
     }
     if (request.method === 'POST' && url.pathname === '/api/be/form/202/publish') {
       if (forcedBusinessFailure === 'publish') {
-        sendJson(response, { code: 403001, message: 'mock publish business failure', data: null })
+        response.writeHead(200, {
+          'Content-Type': 'application/json; charset=utf-8',
+          'X-Autotest-Allow-Failure': 'true',
+        })
+        response.end(JSON.stringify({ code: 403001, message: 'mock publish business failure', data: null }))
         return
       }
       published = true
       sendJson(response, {
         code: 0,
         message: 'success',
-        data: { form_id: 202, revision_no: 1, status: 'published' },
+        data: {
+          form_id: 202,
+          form_code: '951000000000000202',
+          revision_no: 1,
+          status: 'published',
+        },
       })
       return
     }
@@ -999,6 +1175,8 @@ test('creates, configures, uploads, saves, and publishes the complete three-page
         data: {
           list: [{
             id: 202,
+            form_id: 202,
+            form_code: '951000000000000202',
             title: savedTitle,
             status: published ? 'published' : 'draft',
             current_revision_no: 1,
@@ -1018,20 +1196,24 @@ test('creates, configures, uploads, saves, and publishes the complete three-page
     assert.ok(address && typeof address === 'object')
     const origin = 'http://127.0.0.1:' + address.port
     const logs = []
-    const runScenario = () => run({
+    const runScenario = (overrides = {}) => run({
       siteBaseUrl: origin + '/',
       apiBaseUrl: origin + '/api',
       ignoreHTTPSErrors: false,
       extraHTTPHeaders: { Authorization: 'Bearer all-fields-token' },
-      captureFailureScreenshot: false,
+      artifactWriter,
       logger: (level, message, details) => logs.push({ level, message, details }),
       recordApiResponse: (response) => apiResponses.push(response),
+      ...overrides,
     })
     const result = await runScenario()
+    assert.equal(screenshotCaptures.length, 0)
 
     assert.equal(result.formId, '202')
-    assert.equal(result.formCode, 'dynamic-all-fields')
-    assert.equal(result.formContract.formCode, 'dynamic-all-fields')
+    assert.equal(result.formCode, '')
+    assert.equal(result.formContract.formId, '202')
+    assert.equal(result.formContract.formCode, '')
+    assert.notEqual(result.formContract.formId, '951000000000000202')
     assert.equal(result.formContract.fieldKeys.radio, savedItemsPayload.items.find((item) => item.type_code === 'radio').item_key)
     assert.equal(result.status, 'published')
     assert.equal(result.browser, 'chrome')
@@ -1042,7 +1224,12 @@ test('creates, configures, uploads, saves, and publishes the complete three-page
     assert.deepEqual(result.publishResponse, {
       code: 0,
       message: 'success',
-      data: { form_id: 202, revision_no: 1, status: 'published' },
+      data: {
+        form_id: 202,
+        form_code: '951000000000000202',
+        revision_no: 1,
+        status: 'published',
+      },
     })
     assert.equal(result.publishedRecord.id, 202)
     assert.equal(result.publishedRecord.status, 'published')
@@ -1153,18 +1340,40 @@ test('creates, configures, uploads, saves, and publishes the complete three-page
     assert.ok(logs.some((log) => log.level === 'success' && log.message.includes('全题型三页 UI 自动化执行完成')))
 
     forcedBusinessFailure = 'save-config'
-    await assert.rejects(
+    const saveConfigAssertions = []
+    const saveConfigResult = await runWithAssertionRecorder(
+      'form-all-fields-publish',
+      (assertion) => saveConfigAssertions.push(assertion),
       runScenario,
-      /保存表单配置业务码应为 0/,
-      'HTTP 200 但保存业务码非 0 时必须失败',
     )
+    assert.equal(saveConfigResult.status, 'published')
+    assert.equal(screenshotCaptures.length, 0)
+    const saveConfigFailureIndex = saveConfigAssertions.findIndex(({ status, name }) => (
+      status === 'failed' && name.includes('保存表单配置业务码应为 0')
+    ))
+    const saveConfigLaterAssertionIndex = saveConfigAssertions.findIndex(({ status, name }) => (
+      status === 'passed' && name.includes('已发布列表中应找到本次创建的全题型表单')
+    ))
+    assert.ok(saveConfigFailureIndex >= 0)
+    assert.ok(saveConfigLaterAssertionIndex > saveConfigFailureIndex)
 
     forcedBusinessFailure = 'publish'
-    await assert.rejects(
+    const publishAssertions = []
+    const publishResult = await runWithAssertionRecorder(
+      'form-all-fields-publish',
+      (assertion) => publishAssertions.push(assertion),
       runScenario,
-      /发布表单业务码应为 0/,
-      'HTTP 200 但发布业务码非 0 时必须失败',
     )
+    assert.equal(publishResult.status, 'published')
+    assert.equal(screenshotCaptures.length, 0)
+    const publishFailureIndex = publishAssertions.findIndex(({ status, name }) => (
+      status === 'failed' && name.includes('发布表单业务码应为 0')
+    ))
+    const publishLaterAssertionIndex = publishAssertions.findIndex(({ status, name }) => (
+      status === 'passed' && name.includes('已发布列表中应找到本次创建的全题型表单')
+    ))
+    assert.ok(publishFailureIndex >= 0)
+    assert.ok(publishLaterAssertionIndex > publishFailureIndex)
     forcedBusinessFailure = ''
   } finally {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))

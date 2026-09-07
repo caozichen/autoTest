@@ -5,6 +5,7 @@ import test from 'node:test'
 import {
   DEFAULT_REQUEST_PATH,
   buildDetailUrl,
+  inspectMutationResponse,
   isSubmissionMutation,
   normalizeRequestPath,
   parseSubmissionAssertions,
@@ -12,6 +13,27 @@ import {
   resolveSubmissionContext,
   run,
 } from '../../scripts/form-submission-reply-edit.ui.spec.mjs'
+import { runWithAssertionRecorder } from '../../scripts/support/recorded-expect.mjs'
+
+function createScreenshotArtifactWriter(captures) {
+  return {
+    async captureScreenshot(page, relativePath, options) {
+      const artifact = {
+        executionId: 'run-record-001',
+        stepId: 'form-submission-reply-edit',
+        attemptId: 'attempt-001',
+        absolutePath: `/tmp/autotest-artifacts/run-record-001/form-submission-reply-edit/attempt-001/${relativePath}`,
+        relativePath,
+        type: 'screenshot',
+        mimeType: 'image/png',
+        sizeBytes: 128,
+        createdAt: '2026-09-04T08:00:00.000Z',
+      }
+      captures.push({ page, relativePath, options, artifact })
+      return artifact
+    },
+  }
+}
 
 function fakeResponse(method, url) {
   return {
@@ -217,6 +239,22 @@ test('matches same-origin submission mutations and rejects reads or cross-origin
   ), false)
 })
 
+test('keeps an unreadable successful mutation body from becoming an assertion failure', async () => {
+  const assertions = []
+  const outcome = await runWithAssertionRecorder(
+    'form-submission-reply-edit',
+    (assertion) => assertions.push(assertion),
+    () => inspectMutationResponse({
+      ok: () => true,
+      status: () => 200,
+      text: async () => { throw new Error('body released after navigation') },
+    }),
+  )
+
+  assert.deepEqual(outcome, { body: null, succeeded: true })
+  assert.equal(assertions.filter((assertion) => assertion.status === 'failed').length, 0)
+})
+
 test('edits a local submission reply through Google Chrome and restores the detail state', async () => {
   const mutations = []
   const server = createServer(async (request, response) => {
@@ -295,7 +333,7 @@ test('edits a local submission reply through Google Chrome and restores the deta
   }
 })
 
-test('does not submit when a configured detail-field assertion fails', async () => {
+test('records a configured detail-field assertion failure and still submits the edit', async () => {
   let mutationCount = 0
   const server = createServer((request, response) => {
     const url = new URL(request.url, 'http://127.0.0.1')
@@ -312,18 +350,43 @@ test('does not submit when a configured detail-field assertion fails', async () 
     const address = server.address()
     assert.ok(address && typeof address === 'object')
     const origin = `http://127.0.0.1:${address.port}`
-    await assert.rejects(run({
+    const screenshotCaptures = []
+    const logs = []
+    const assertions = []
+    const runScenario = (overrides = {}) => run({
       siteBaseUrl: `${origin}/`,
       apiBaseUrl: `${origin}/api`,
       extraHTTPHeaders: { Authorization: 'Bearer reply-edit-token' },
       variables: {
         SUBMISSION_ASSERTIONS: JSON.stringify({ fields: { 姓名: '姓名' } }),
-        SUBMISSION_EDIT_VALUES: JSON.stringify({ '姓名[1]': '不应提交的姓名' }),
+        SUBMISSION_EDIT_VALUES: JSON.stringify({ '姓名[1]': '断言失败后仍提交的姓名' }),
       },
-      captureFailureScreenshot: false,
-      logger: () => undefined,
-    }), /提报详情应唯一显示字段“姓名”/)
-    assert.equal(mutationCount, 0)
+      logger: (level, message, details) => logs.push({ level, message, details }),
+      ...overrides,
+    })
+    const result = await runWithAssertionRecorder(
+      'form-submission-reply-edit',
+      (assertion) => assertions.push(assertion),
+      () => runScenario({ artifactWriter: createScreenshotArtifactWriter(screenshotCaptures) }),
+    )
+
+    assert.equal(result.submitted, true)
+    assert.deepEqual(result.appliedEditFields, ['姓名[1]'])
+    assert.equal(mutationCount, 1)
+    assert.equal(screenshotCaptures.length, 0)
+    const failedAssertionIndex = assertions.findIndex((assertion) => (
+      assertion.status === 'failed'
+      && assertion.name.includes('提报详情应唯一显示字段“姓名”')
+    ))
+    const completedAssertionIndex = assertions.findIndex((assertion) => (
+      assertion.status === 'passed'
+      && assertion.name.includes('提交成功后详情态字段“姓名[1]”应回显修改值')
+    ))
+    assert.ok(failedAssertionIndex >= 0)
+    assert.ok(completedAssertionIndex > failedAssertionIndex)
+    assert.ok(logs.some((log) => (
+      log.level === 'success' && log.message.includes('页面恢复详情态')
+    )))
   } finally {
     await new Promise((resolvePromise, rejectPromise) => {
       server.close((error) => error ? rejectPromise(error) : resolvePromise())

@@ -102,6 +102,17 @@ describe('LocalRunRecordService', () => {
       level: 'success' as const,
       message: '表单提交完成',
     }
+    const liveResource = {
+      sequence: 1,
+      timestamp: '2026-08-12T08:00:01.500Z',
+      name: 'app.js',
+      method: 'GET',
+      url: 'https://example.test/app.js',
+      resourceType: 'script',
+      status: 200,
+      ok: true,
+      durationMs: 12,
+    }
 
     await service.updateScriptProgress(started.id, {
       scriptId: 'login-regression',
@@ -114,6 +125,11 @@ describe('LocalRunRecordService', () => {
       status: 'passed',
       durationMs: 2_000,
       logs: [firstLog, secondLog],
+      resourceResponses: [liveResource],
+      networkSummary: {
+        api: { observed: 0, recorded: 0, dropped: 0, passed: 0, failed: 0, warnings: 0 },
+        resources: { observed: 1, recorded: 1, dropped: 0, passed: 1, failed: 0, warnings: 0 },
+      },
     })
 
     expect(live.scripts[0]).toMatchObject({ status: 'passed', durationMs: 2_000 })
@@ -129,6 +145,8 @@ describe('LocalRunRecordService', () => {
     expect(completed.status).toBe('passed')
     expect(completed.logs.filter((log) => log.scope === 'script').map((log) => log.message))
       .toEqual(['开始填写表单', '表单提交完成'])
+    expect(completed.scripts[0]?.resourceResponses).toEqual([liveResource])
+    expect(completed.scripts[0]?.networkSummary.resources).toMatchObject({ observed: 1, passed: 1 })
   })
 
   it('migrates only the three known legacy seed ids and preserves real records', async () => {
@@ -160,6 +178,37 @@ describe('LocalRunRecordService', () => {
     ])
     expect(storage.getItem('autotest.run-records.v1')).not.toContain('"id":"seed-batch-001"')
     expect(storage.getItem('autotest.run-records.v1')).toContain('"id":"seed-batch-001-real"')
+  })
+
+  it('restores legacy script records without artifact or network metadata using empty defaults', async () => {
+    const storage = new MemoryStorage()
+    const service = new LocalRunRecordService(
+      storage,
+      nowFactory([firstTime, secondTime]),
+      idFactory(['legacy-run-001', 'start-log', 'failure-log']),
+    )
+    const started = await service.start(startDraft())
+    const completed = await service.fail(started.id, { stage: 'runner', error: 'fixture failure' })
+    const legacyRecord = structuredClone(completed) as RunRecord & {
+      scripts: Array<RunRecord['scripts'][number] & {
+        artifacts?: RunRecord['scripts'][number]['artifacts']
+        resourceResponses?: RunRecord['scripts'][number]['resourceResponses']
+        networkSummary?: RunRecord['scripts'][number]['networkSummary']
+      }>
+    }
+    delete legacyRecord.scripts[0]?.artifacts
+    delete legacyRecord.scripts[0]?.resourceResponses
+    delete legacyRecord.scripts[0]?.networkSummary
+    storage.setItem('autotest.run-records.v1', JSON.stringify([legacyRecord]))
+
+    const restored = new LocalRunRecordService(storage, () => thirdTime, () => 'unused')
+
+    expect((await restored.get(started.id))?.scripts[0]?.artifacts).toEqual([])
+    expect((await restored.get(started.id))?.scripts[0]?.resourceResponses).toEqual([])
+    expect((await restored.get(started.id))?.scripts[0]?.networkSummary).toEqual({
+      api: { observed: 0, recorded: 0, dropped: 0, passed: 0, failed: 0, warnings: 0 },
+      resources: { observed: 0, recorded: 0, dropped: 0, passed: 0, failed: 0, warnings: 0 },
+    })
   })
 
   it('persists a completed batch and restores its snapshots', async () => {
@@ -202,6 +251,49 @@ describe('LocalRunRecordService', () => {
           durationMs: 26,
           requestBody: { title: '完整表单' },
           responseBody: { code: 0, data: { id: 'form-1' } },
+          phase: '创建表单',
+          pageUrl: 'https://lx.admin.lingxi.tech/forms',
+          frameUrl: 'https://lx.admin.lingxi.tech/forms',
+          mimeType: 'application/json',
+          isFirstParty: true,
+          bodyReadError: 'Network.getResponseBody: body released after navigation',
+          warning: true,
+          incomplete: true,
+        }],
+        resourceResponses: [{
+          sequence: 1,
+          timestamp: secondTime.toISOString(),
+          name: 'app.js',
+          method: 'GET',
+          url: 'https://lx.admin.lingxi.tech/assets/app.js',
+          resourceType: 'script',
+          status: 503,
+          ok: false,
+          durationMs: 320,
+          phase: '页面初始化',
+          pageUrl: 'https://lx.admin.lingxi.tech/forms',
+          frameUrl: 'https://lx.admin.lingxi.tech/forms',
+          mimeType: 'application/javascript',
+          error: 'Service Unavailable',
+          failureKind: 'http',
+          fromCache: false,
+          fromServiceWorker: false,
+          isFirstParty: true,
+        }],
+        networkSummary: {
+          api: { observed: 1, recorded: 1, dropped: 0, passed: 0, failed: 0, warnings: 1 },
+          resources: { observed: 3, recorded: 1, dropped: 2, passed: 2, failed: 1, warnings: 0 },
+        },
+        artifacts: [{
+          executionId: 'run-000001',
+          stepId: 'login-regression',
+          attemptId: 'runner-run-0001',
+          absolutePath: '/workspace/outputs/artifacts/run-000001/login-regression/runner-run-0001/failure.png',
+          relativePath: 'failure.png',
+          type: 'screenshot',
+          mimeType: 'image/png',
+          sizeBytes: 512,
+          createdAt: secondTime.toISOString(),
         }],
         output: { status: 'passed' },
       }],
@@ -244,6 +336,49 @@ describe('LocalRunRecordService', () => {
       durationMs: 26,
       requestBody: { title: '完整表单' },
       responseBody: { code: 0, data: { id: 'form-1' } },
+      phase: '创建表单',
+      pageUrl: 'https://lx.admin.lingxi.tech/forms',
+      frameUrl: 'https://lx.admin.lingxi.tech/forms',
+      mimeType: 'application/json',
+      isFirstParty: true,
+      bodyReadError: 'Network.getResponseBody: body released after navigation',
+      warning: true,
+      incomplete: true,
+    }])
+    expect((await restored.get(started.id))?.scripts[0]?.resourceResponses).toEqual([{
+      sequence: 1,
+      timestamp: secondTime.toISOString(),
+      name: 'app.js',
+      method: 'GET',
+      url: 'https://lx.admin.lingxi.tech/assets/app.js',
+      resourceType: 'script',
+      status: 503,
+      ok: false,
+      durationMs: 320,
+      phase: '页面初始化',
+      pageUrl: 'https://lx.admin.lingxi.tech/forms',
+      frameUrl: 'https://lx.admin.lingxi.tech/forms',
+      mimeType: 'application/javascript',
+      error: 'Service Unavailable',
+      failureKind: 'http',
+      fromCache: false,
+      fromServiceWorker: false,
+      isFirstParty: true,
+    }])
+    expect((await restored.get(started.id))?.scripts[0]?.networkSummary).toEqual({
+      api: { observed: 1, recorded: 1, dropped: 0, passed: 0, failed: 0, warnings: 1 },
+      resources: { observed: 3, recorded: 1, dropped: 2, passed: 2, failed: 1, warnings: 0 },
+    })
+    expect((await restored.get(started.id))?.scripts[0]?.artifacts).toEqual([{
+      executionId: 'run-000001',
+      stepId: 'login-regression',
+      attemptId: 'runner-run-0001',
+      absolutePath: '/workspace/outputs/artifacts/run-000001/login-regression/runner-run-0001/failure.png',
+      relativePath: 'failure.png',
+      type: 'screenshot',
+      mimeType: 'image/png',
+      sizeBytes: 512,
+      createdAt: secondTime.toISOString(),
     }])
   })
 
@@ -322,6 +457,35 @@ describe('LocalRunRecordService', () => {
           durationMs: 5,
           error: 'Bearer token-value-123 对应断言失败',
         }],
+        apiResponses: [{
+          sequence: 1,
+          timestamp: secondTime.toISOString(),
+          name: '提交 token-value-123',
+          method: 'POST',
+          url: 'https://api.example.test/form?token=token-value-123',
+          status: 0,
+          ok: false,
+          durationMs: 20,
+          pageUrl: 'https://example.test/forms/13800000000',
+          frameUrl: 'https://example.test/forms/13800000000',
+          error: 'Bearer token-value-123 请求失败',
+          bodyReadError: '响应正文包含 token-value-123',
+        }],
+        resourceResponses: [{
+          sequence: 1,
+          timestamp: secondTime.toISOString(),
+          name: 'token-value-123.png',
+          method: 'GET',
+          url: 'https://cdn.example.test/token-value-123.png',
+          resourceType: 'image',
+          status: 0,
+          ok: false,
+          durationMs: 20,
+          pageUrl: 'https://example.test/forms/13800000000',
+          frameUrl: 'https://example.test/forms/13800000000',
+          error: '资源 token-value-123 加载失败',
+          diagnostics: ['CORS 拒绝 token-value-123'],
+        }],
         output: { access_token: 'token-value-123', state: 'failed' },
       }],
     })
@@ -338,6 +502,22 @@ describe('LocalRunRecordService', () => {
     expect(restoredAssertion).toMatchObject({
       name: '手机号 [REDACTED] 对应验证码 [REDACTED] 应通过',
       error: 'Bearer [REDACTED] 对应断言失败',
+    })
+    const restoredScript = (await new LocalRunRecordService(storage, () => thirdTime, () => 'unused')
+      .get(started.id))?.scripts[0]
+    expect(restoredScript?.apiResponses[0]).toMatchObject({
+      name: '提交 [REDACTED]',
+      url: 'https://api.example.test/form?token=[REDACTED]',
+      pageUrl: 'https://example.test/forms/[REDACTED]',
+      error: 'Bearer [REDACTED] 请求失败',
+      bodyReadError: '响应正文包含 [REDACTED]',
+    })
+    expect(restoredScript?.resourceResponses[0]).toMatchObject({
+      name: '[REDACTED].png',
+      url: 'https://cdn.example.test/[REDACTED].png',
+      pageUrl: 'https://example.test/forms/[REDACTED]',
+      error: '资源 [REDACTED] 加载失败',
+      diagnostics: ['CORS 拒绝 [REDACTED]'],
     })
   })
 
