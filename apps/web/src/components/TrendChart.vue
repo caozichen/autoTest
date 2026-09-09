@@ -22,7 +22,7 @@ function renderChart(): void {
   chart ??= init(chartElement.value)
   chart.setOption({
     animationDuration: 450,
-    color: ['#2563eb', '#e2555d'],
+    color: ['#2563eb', '#FFD700', '#e2555d'],
     tooltip: {
       trigger: 'axis',
       backgroundColor: '#1f2a44',
@@ -60,6 +60,14 @@ function renderChart(): void {
         lineStyle: { width: 3 },
         areaStyle: { color: 'rgba(37, 99, 235, 0.08)' },
         data: props.data.map((item) => item.passed),
+      },
+      {
+        name: '部分通过',
+        type: 'line',
+        smooth: true,
+        showSymbol: false,
+        lineStyle: { width: 2 },
+        data: props.data.map((item) => item.partial),
       },
       {
         name: '失败',

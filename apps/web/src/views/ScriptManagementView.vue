@@ -53,7 +53,8 @@ const statusOptions: Array<{ label: string; value: 'all' | ScriptStatus }> = [
   { label: '可运行', value: 'ready' },
   { label: '执行中', value: 'running' },
   { label: '最近通过', value: 'passed' },
-  { label: '最近失败', value: 'failed' },
+  { label: '部分通过', value: 'partial' },
+  { label: '执行失败', value: 'failed' },
   { label: '已中断', value: 'interrupted' },
   { label: '已停用', value: 'disabled' },
 ]
@@ -62,7 +63,8 @@ const statusMap: Record<ScriptStatus, { label: string; type: 'success' | 'warnin
   ready: { label: '可运行', type: 'info' },
   running: { label: '执行中', type: 'warning' },
   passed: { label: '已通过', type: 'success' },
-  failed: { label: '失败', type: 'danger' },
+  partial: { label: '部分通过', type: 'warning' },
+  failed: { label: '执行失败', type: 'danger' },
   interrupted: { label: '已中断', type: 'info' },
   disabled: { label: '已停用', type: 'info' },
 }
@@ -419,6 +421,9 @@ async function runScripts(targets: AutomationScript[]): Promise<void> {
       runRecord = await services.runRecords.complete(runRecord.id, {
         scripts: completed.map((script) => ({
           scriptId: script.id,
+          status: script.status === 'passed' || script.status === 'partial'
+            ? script.status
+            : 'failed',
           ok: script.lastRunResult?.ok ?? script.status === 'passed',
           durationMs: script.lastRunResult?.durationMs ?? 0,
           logs: script.lastRunResult?.logs ?? [],
@@ -444,10 +449,17 @@ async function runScripts(targets: AutomationScript[]): Promise<void> {
     const firstResult = completed[0]
     if (firstResult) openResult(firstResult)
     const failedCount = completed.filter((script) => script.status === 'failed').length
+    const partialCount = completed.filter((script) => script.status === 'partial').length
     if (runRecord.status === 'interrupted') {
       ElMessage.warning('脚本运行已被强制停止')
     } else if (failedCount > 0) {
       ElMessage.error(`${failedCount} 个脚本执行失败，请查看运行日志`)
+    } else if (partialCount > 0) {
+      ElMessage({
+        type: 'warning',
+        message: `${partialCount} 个脚本部分通过，请查看未通过断言`,
+        customClass: 'status-message--partial',
+      })
     } else {
       ElMessage.success(
         `${runnable.length} 个脚本已在${environment.name}运行完成${appliedVariableCount > 0 ? `，本次提取 ${appliedVariableCount} 个临时变量` : ''}`,
@@ -613,7 +625,7 @@ onBeforeUnmount(stopLiveRefresh)
         </el-table-column>
         <el-table-column label="状态" width="132">
           <template #default="scope">
-            <el-tag :type="statusMap[displayStatus(scope.row)].type" size="small" effect="light">
+            <el-tag :type="statusMap[displayStatus(scope.row)].type" :class="{ 'status-tag--partial': displayStatus(scope.row) === 'partial' }" size="small" effect="light">
               {{ statusMap[displayStatus(scope.row)].label }}
             </el-tag>
           </template>

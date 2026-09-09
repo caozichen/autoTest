@@ -646,8 +646,8 @@ describe('LocalRunRecordService', () => {
     expect(await new LocalRunRecordService(storage, () => firstTime, () => 'unused').list()).toEqual([])
   })
 
-  it('derives partial status, counts and analysis from mixed script results', async () => {
-    const service = new LocalRunRecordService(new MemoryStorage(), nowFactory([firstTime, secondTime, thirdTime]), idFactory(['run-partial', 'start-log', 'passed-log', 'failed-log', 'finish-log']))
+  it('keeps a batch failed when any script has a hard failure', async () => {
+    const service = new LocalRunRecordService(new MemoryStorage(), nowFactory([firstTime, secondTime, thirdTime]), idFactory(['run-failed', 'start-log', 'passed-log', 'failed-log', 'finish-log']))
     const started = await service.start(twoScriptDraft())
     const completed = await service.complete(started.id, { scripts: [
       { scriptId: 'login-regression', ok: true, durationMs: 1_000, logs: [{ timestamp: secondTime.toISOString(), level: 'success', message: 'passed' }] },
@@ -655,8 +655,8 @@ describe('LocalRunRecordService', () => {
     ] })
 
     expect(completed).toMatchObject({
-      status: 'partial',
-      counts: { total: 2, passed: 1, failed: 1, skipped: 0 },
+      status: 'failed',
+      counts: { total: 2, passed: 1, partial: 0, failed: 1, skipped: 0 },
       analysis: {
         passRate: 50,
         averageDurationMs: 2_000,
@@ -664,6 +664,101 @@ describe('LocalRunRecordService', () => {
         logCounts: { info: 1, success: 1, warning: 1, error: 1 },
         failureGroups: [{ reason: 'assertion failed', count: 1 }],
       },
+    })
+  })
+
+  it('derives partial status, counts and strict pass rate from assertion-only issues', async () => {
+    const service = new LocalRunRecordService(
+      new MemoryStorage(),
+      nowFactory([firstTime, secondTime, thirdTime]),
+      idFactory(['run-partial', 'start-log', 'passed-log', 'partial-log', 'finish-log']),
+    )
+    const started = await service.start(twoScriptDraft())
+    const completed = await service.complete(started.id, { scripts: [
+      {
+        scriptId: 'login-regression',
+        status: 'passed',
+        durationMs: 1_000,
+        logs: [{ timestamp: secondTime.toISOString(), level: 'success', message: 'passed' }],
+      },
+      {
+        scriptId: 'api-smoke',
+        status: 'partial',
+        durationMs: 3_000,
+        error: '脚本已执行完成，共有 1 条断言失败',
+        logs: [{ timestamp: secondTime.toISOString(), level: 'warning', message: 'assertion issue' }],
+      },
+    ] })
+
+    expect(completed).toMatchObject({
+      status: 'partial',
+      counts: { total: 2, passed: 1, partial: 1, failed: 0, skipped: 0 },
+      analysis: {
+        passRate: 50,
+        averageDurationMs: 2_000,
+        slowestScriptRecordId: `${started.id}:api-smoke`,
+        failureGroups: [],
+      },
+      scripts: [
+        { status: 'passed' },
+        { status: 'partial' },
+      ],
+    })
+  })
+
+  it('migrates only legacy assertion-completion failures to partial', async () => {
+    const storage = new MemoryStorage()
+    const source = new LocalRunRecordService(
+      storage,
+      nowFactory([firstTime, secondTime]),
+      idFactory(['run-legacy-partial', 'start-log', 'script-log', 'finish-log']),
+    )
+    const started = await source.start(startDraft())
+    await source.complete(started.id, { scripts: [{
+      scriptId: 'login-regression',
+      status: 'failed',
+      durationMs: 500,
+      error: '脚本已执行完成，共有 2 条断言失败',
+      logs: [],
+    }] })
+
+    const restored = await new LocalRunRecordService(storage, () => thirdTime, () => 'unused')
+      .get(started.id)
+
+    expect(restored).toMatchObject({
+      status: 'partial',
+      counts: { total: 1, passed: 0, partial: 1, failed: 0, skipped: 0 },
+      scripts: [{ status: 'partial' }],
+    })
+  })
+
+  it('treats an unfinished completed batch as failed even when another script is partial', async () => {
+    const service = new LocalRunRecordService(
+      new MemoryStorage(),
+      nowFactory([firstTime, secondTime]),
+      idFactory(['run-blocked', 'start-log', 'partial-log', 'finish-log']),
+    )
+    const started = await service.start(twoScriptDraft())
+    const completed = await service.complete(started.id, { scripts: [
+      {
+        scriptId: 'login-regression',
+        status: 'partial',
+        durationMs: 500,
+        error: '脚本已执行完成，共有 1 条断言失败',
+        logs: [],
+      },
+      {
+        scriptId: 'api-smoke',
+        status: 'skipped',
+        durationMs: 0,
+        error: '前序步骤阻断，未执行',
+        logs: [],
+      },
+    ] })
+
+    expect(completed).toMatchObject({
+      status: 'failed',
+      counts: { total: 2, passed: 0, partial: 1, failed: 0, skipped: 1 },
     })
   })
 

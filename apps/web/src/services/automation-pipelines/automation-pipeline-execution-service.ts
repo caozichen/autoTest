@@ -65,9 +65,18 @@ function scriptSnapshot(script: AutomationScript) {
 }
 
 function resultCompletion(scriptId: string, result: ScriptRunResult): CompleteRunScriptDraft {
+  const status = result.timedOut === true
+    ? 'failed'
+    : result.status === 'partial'
+      ? 'partial'
+      : result.status === 'failed'
+        ? 'failed'
+        : result.ok
+          ? 'passed'
+          : result.continuePipeline === true ? 'partial' : 'failed'
   return {
     scriptId,
-    status: result.ok ? 'passed' : 'failed',
+    status,
     ok: result.ok,
     durationMs: result.durationMs,
     logs: result.logs,
@@ -355,7 +364,6 @@ export class LocalAutomationPipelineExecutionService implements AutomationPipeli
     for (const [index, step] of pipeline.steps.entries()) {
       if (execution.cancelRequested) return this.interruptExecution(execution)
       let completion: CompleteRunScriptDraft
-      let continueAfterStepFailure = false
       try {
         Object.assign(pipelineVariables, resolveStepVariables(step, outputs))
         const context: ScriptRunContext = {
@@ -385,8 +393,6 @@ export class LocalAutomationPipelineExecutionService implements AutomationPipeli
           throw new Error(`Runner 未返回脚本 ${step.scriptId} 的执行结果`)
         }
         completion = resultCompletion(step.scriptId, completedScript.lastRunResult)
-        continueAfterStepFailure = completedScript.lastRunResult.continuePipeline === true
-          && completedScript.lastRunResult.timedOut !== true
         if (completedScript.lastRunResult.output) {
           outputs.set(step.scriptId, completedScript.lastRunResult.output)
         }
@@ -407,14 +413,13 @@ export class LocalAutomationPipelineExecutionService implements AutomationPipeli
         ))
       } catch (error) {
         if (execution.cancelRequested) return this.interruptExecution(execution)
-        continueAfterStepFailure = false
         completion = failedCompletion(step.scriptId, errorMessage(error, '脚本执行失败'))
       } finally {
         if (execution.currentScriptId === step.scriptId) execution.currentScriptId = null
       }
 
       completions.push(completion)
-      if (completion.status !== 'failed' || continueAfterStepFailure) continue
+      if (completion.status !== 'failed') continue
       for (const remaining of pipeline.steps.slice(index + 1)) {
         completions.push(skippedCompletion(remaining.scriptId))
       }

@@ -14,6 +14,7 @@ export interface DashboardMetric {
 export interface TrendPoint {
   date: string
   passed: number
+  partial: number
   failed: number
 }
 

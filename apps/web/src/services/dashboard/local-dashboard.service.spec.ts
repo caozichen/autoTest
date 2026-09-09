@@ -58,7 +58,7 @@ function completedRecord(): RunRecord {
     durationMs: 3_000,
     failureStage: 'script',
     error: '断言未通过',
-    counts: { total: 2, passed: 1, failed: 1, skipped: 0 },
+    counts: { total: 2, passed: 1, partial: 0, failed: 1, skipped: 0 },
     scripts: [],
     logs: [],
     analysis: {
@@ -110,7 +110,7 @@ describe('LocalDashboardService', () => {
     expect(snapshot.metrics.find((metric) => metric.id === 'pass-rate')?.value).toBe(50)
     expect(snapshot.metrics.find((metric) => metric.id === 'running')?.value).toBe(0)
     expect(snapshot.metrics.find((metric) => metric.id === 'failed')?.value).toBe(1)
-    expect(snapshot.trend).toEqual([{ date: '08/11', passed: 1, failed: 1 }])
+    expect(snapshot.trend).toEqual([{ date: '08/11', passed: 1, partial: 0, failed: 1 }])
     expect(snapshot.recentRuns).toEqual([{
       id: record.displayId,
       name: record.name,

@@ -1,7 +1,7 @@
 # Playwright Runner
 
 本地 Runner 只接受 `config/scripts/` 中已经持久化的脚本 ID，不接受运行请求传入任意
-文件路径。它通过 Playwright Runner 执行已登记的 Playwright 脚本。五个内置表单脚本
+文件路径。它通过 Playwright Runner 执行已登记的 Playwright 脚本。六个内置表单脚本
 都会启动 Google Chrome 无头浏览器，访问目标页面并模拟真实用户操作。
 
 ## 启动
@@ -31,6 +31,7 @@ Invoke-RestMethod http://127.0.0.1:4310/health
 - `form-lpxavn-submit`
 - `form-submission-reply-edit`
 - `form-contact-publish`
+- `form-multilingual-translation-publish`
 
 脚本行为、运行依赖和真实数据副作用见根目录 README 的“已注册脚本”。
 
@@ -54,8 +55,10 @@ Invoke-RestMethod http://127.0.0.1:4310/health
 | `POST /run-records` | 创建运行记录。 |
 | `PATCH /run-records/:id` | 通过 revision 和 updatedAt 并发校验更新运行记录。 |
 | `POST /run-records/migrations/local-storage-v1` | 幂等导入旧版浏览器运行记录。 |
+| `GET /run-records/:id/screenshots/:stepId/:attemptId?path=...` | 读取运行记录中已登记的截图。 |
+| `POST /run-records/:id/screenshots/:stepId/:attemptId/reveal?path=...` | 在系统文件管理器中定位并选中已登记的截图。 |
 
-运行状态包括 `running`、`passed`、`failed` 和 `interrupted`。完成后的运行快照保留约 5 分钟，用于页面获取最终状态。取消接口可接收 `{ "reason": "停止原因" }`，原因最多 200 个字符。
+运行状态包括 `running`、`passed`、`partial`、`failed` 和 `interrupted`。`partial` 表示脚本正常完成但存在失败断言；超时或运行异常才记为 `failed`。完成后的运行快照保留约 5 分钟，用于页面获取最终状态。取消接口可接收 `{ "reason": "停止原因" }`，原因最多 200 个字符。
 
 `POST /runs` 可在顶层携带 `executionId`。管理端使用运行记录 ID 作为 `executionId`；Runner
 使用注册脚本 ID 作为 `stepId`，并使用本次 `runId` 作为 `attemptId`。Runner 向脚本注入

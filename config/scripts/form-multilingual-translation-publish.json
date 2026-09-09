@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "revision": 4,
+  "id": "form-multilingual-translation-publish",
+  "name": "表单多语言 AI 翻译、发布与分享校验",
+  "description": "Chrome 无头模式打开可配置表单的多语言翻译页，执行一键 AI 翻译，校验保存、完成、发布、预览及分享界面的三语言配置与内容。",
+  "directory": "scripts",
+  "entryFile": "form-multilingual-translation-publish.ui.spec.mjs",
+  "timeoutMs": 600000,
+  "enabled": true,
+  "requestPath": "/form-activity/translation?id={{FORM_ID}}",
+  "inputParameters": [
+    {
+      "id": "translation-form-id",
+      "key": "FORM_ID",
+      "value": "4J027Q",
+      "description": "待翻译、完成并发布的表单 ID"
+    },
+    {
+      "id": "translation-ai-timeout-ms",
+      "key": "AI_TRANSLATION_TIMEOUT_MS",
+      "value": "120000",
+      "description": "一键 AI 翻译完成等待超时，默认 2 分钟"
+    },
+    {
+      "id": "translation-expectations",
+      "key": "TRANSLATION_EXPECTATIONS",
+      "value": "{}",
+      "description": "可选关键译文精确断言 JSON"
+    }
+  ],
+  "responseVariableBindings": [],
+  "tags": [
+    "Playwright",
+    "UI",
+    "Headless Chrome",
+    "表单活动",
+    "多语言",
+    "AI 翻译",
+    "P0"
+  ],
+  "createdAt": "2026-09-07T00:00:00.000Z",
+  "updatedAt": "2026-09-08T07:37:08.125Z"
+}

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import {
   ArrowDownBold,
   ArrowUpBold,
@@ -11,11 +11,14 @@ import {
   DataAnalysis,
   Document,
   Files,
+  FolderOpened,
+  Loading,
   Monitor,
   Picture,
   VideoPause,
   Warning,
 } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
 
 import AssertionModuleChart from '@/components/AssertionModuleChart.vue'
 import AssertionOutcomeChart from '@/components/AssertionOutcomeChart.vue'
@@ -57,6 +60,7 @@ type ResourceOutcomeFilter = 'all' | 'failed' | 'passed'
 const API_PAGE_SIZE = 50
 const RESOURCE_PAGE_SIZE = 50
 const ASSERTION_PAGE_SIZE = 100
+const SCREENSHOT_REVEAL_TIMEOUT_MS = 15_000
 
 interface ScreenshotView extends ScriptArtifact {
   key: string
@@ -92,6 +96,8 @@ const resourceOutcomeFilter = ref<ResourceOutcomeFilter>('failed')
 const resourceTypeFilter = ref('all')
 const resourcePage = ref(1)
 const assertionGroupPages = ref<Map<string, number>>(new Map())
+const revealingScreenshotKeys = ref<Set<string>>(new Set())
+const screenshotRevealControllers = new Map<string, AbortController>()
 
 const statusMap: Record<RunRecordStatus, { label: string; type: 'success' | 'warning' | 'danger' | 'info' }> = {
   running: { label: '执行中', type: 'warning' },
@@ -105,7 +111,8 @@ const scriptStatusMap: Record<RunScriptStatus, { label: string; type: 'success' 
   queued: { label: '排队中', type: 'info' },
   running: { label: '执行中', type: 'warning' },
   passed: { label: '已通过', type: 'success' },
-  failed: { label: '失败', type: 'danger' },
+  partial: { label: '部分通过', type: 'warning' },
+  failed: { label: '执行失败', type: 'danger' },
   skipped: { label: '未执行', type: 'info' },
 }
 
@@ -274,9 +281,86 @@ function screenshotUrl(artifact: ScriptArtifact): string {
     + `?path=${encodeURIComponent(artifact.relativePath)}`
 }
 
+function screenshotRevealUrl(artifact: ScriptArtifact): string {
+  const [endpoint, query = ''] = screenshotUrl(artifact).split('?')
+  return `${endpoint}/reveal?${query}`
+}
+
+function setScreenshotRevealing(key: string, revealing: boolean): void {
+  const next = new Set(revealingScreenshotKeys.value)
+  if (revealing) next.add(key)
+  else next.delete(key)
+  revealingScreenshotKeys.value = next
+}
+
+function cancelScreenshotRevealRequests(): void {
+  for (const controller of screenshotRevealControllers.values()) controller.abort()
+  screenshotRevealControllers.clear()
+  revealingScreenshotKeys.value = new Set()
+}
+
+async function revealScreenshot(screenshot: ScreenshotView): Promise<void> {
+  if (screenshotRevealControllers.has(screenshot.key)) return
+  const controller = new AbortController()
+  let timeoutId: ReturnType<typeof setTimeout> | undefined
+  let timedOut = false
+  screenshotRevealControllers.set(screenshot.key, controller)
+  setScreenshotRevealing(screenshot.key, true)
+  try {
+    const request = (async () => {
+      const response = await fetch(screenshotRevealUrl(screenshot), {
+        method: 'POST',
+        headers: { Accept: 'application/json' },
+        signal: controller.signal,
+      })
+      const payload = await response.json().catch(() => null) as {
+        ok?: unknown
+        error?: unknown
+      } | null
+      return { payload, response }
+    })()
+    const timeout = new Promise<never>((_, reject) => {
+      timeoutId = setTimeout(() => {
+        timedOut = true
+        controller.abort()
+        reject(new Error(`Runner 截图定位请求超时（${SCREENSHOT_REVEAL_TIMEOUT_MS}ms）`))
+      }, SCREENSHOT_REVEAL_TIMEOUT_MS)
+    })
+    const cancellation = new Promise<never>((_, reject) => {
+      controller.signal.addEventListener('abort', () => {
+        reject(new Error('截图定位请求已取消'))
+      }, { once: true })
+    })
+
+    const { payload, response } = await Promise.race([request, timeout, cancellation])
+    if (controller.signal.aborted && !timedOut) return
+    if (!response.ok || payload?.ok !== true) {
+      const message = typeof payload?.error === 'string'
+        ? payload.error
+        : `Runner 返回 HTTP ${response.status}`
+      throw new Error(message)
+    }
+  } catch (error) {
+    if (controller.signal.aborted && !timedOut) return
+    const message = timedOut
+      ? `Runner 截图定位请求超时（${SCREENSHOT_REVEAL_TIMEOUT_MS}ms）`
+      : error instanceof Error && error.message.trim()
+        ? error.message
+        : '未知错误'
+    ElMessage.error(`定位截图失败：${message}`)
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId)
+    if (screenshotRevealControllers.get(screenshot.key) === controller) {
+      screenshotRevealControllers.delete(screenshot.key)
+      setScreenshotRevealing(screenshot.key, false)
+    }
+  }
+}
+
 watch(
   () => props.modelValue ? props.record?.id : undefined,
-  (visibleRecordId) => {
+  (visibleRecordId, previousVisibleRecordId) => {
+    if (visibleRecordId !== previousVisibleRecordId) cancelScreenshotRevealRequests()
     if (!visibleRecordId) return
     activeTab.value = 'overview'
     logLevel.value = 'all'
@@ -293,6 +377,8 @@ watch(
     expandedApiResponseKeys.value = new Set(apiResponses.value.slice(0, 1).map((response) => response.key))
   },
 )
+
+onBeforeUnmount(cancelScreenshotRevealRequests)
 
 watch(
   () => apiResponses.value.length,
@@ -497,7 +583,7 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
             aria-label="强制停止运行批次"
             @click="emit('force-stop', record)"
           >强制停止</el-button>
-          <el-tag :type="statusMap[record.status].type" effect="light" size="large">
+          <el-tag :type="statusMap[record.status].type" :class="{ 'status-tag--partial': record.status === 'partial' }" effect="light" size="large">
             {{ statusMap[record.status].label }}
           </el-tag>
           <el-tooltip content="关闭详情" placement="bottom">
@@ -512,7 +598,7 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
           <strong>{{ statusMap[record.status].label }}</strong>
           <p v-if="record.error">{{ record.error }}</p>
           <p v-else>
-            共执行 {{ record.counts.total }} 个脚本，通过 {{ record.counts.passed }} 个，失败 {{ record.counts.failed }} 个。
+            共执行 {{ record.counts.total }} 个脚本，通过 {{ record.counts.passed }} 个，部分通过 {{ record.counts.partial }} 个，执行失败 {{ record.counts.failed }} 个。
           </p>
         </div>
         <strong class="detail-status__rate">{{ record.analysis.passRate }}%</strong>
@@ -534,17 +620,19 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
           <section class="section-block">
             <header class="section-heading">
               <div><h3>批次进度</h3><p>按脚本结果汇总当前批次。</p></div>
-              <span>{{ record.counts.passed + record.counts.failed + record.counts.skipped }} / {{ record.counts.total }}</span>
+              <span>{{ record.counts.passed + record.counts.partial + record.counts.failed + record.counts.skipped }} / {{ record.counts.total }}</span>
             </header>
-            <div class="result-distribution" role="img" :aria-label="`通过 ${record.counts.passed}，失败 ${record.counts.failed}，未执行 ${record.counts.skipped}，待完成 ${pendingRunScriptCount(record.counts)}`">
+            <div class="result-distribution" role="img" :aria-label="`通过 ${record.counts.passed}，部分通过 ${record.counts.partial}，执行失败 ${record.counts.failed}，未执行 ${record.counts.skipped}，待完成 ${pendingRunScriptCount(record.counts)}`">
               <span v-if="record.counts.passed" aria-hidden="true" class="result-distribution__passed" :style="{ flex: record.counts.passed }" />
+              <span v-if="record.counts.partial" aria-hidden="true" class="result-distribution__partial" :style="{ flex: record.counts.partial }" />
               <span v-if="record.counts.failed" aria-hidden="true" class="result-distribution__failed" :style="{ flex: record.counts.failed }" />
               <span v-if="record.counts.skipped" aria-hidden="true" class="result-distribution__skipped" :style="{ flex: record.counts.skipped }" />
               <span v-if="pendingRunScriptCount(record.counts)" aria-hidden="true" class="result-distribution__pending" :style="{ flex: pendingRunScriptCount(record.counts) }" />
             </div>
             <div class="distribution-legend">
               <span><i class="is-passed" />通过 {{ record.counts.passed }}</span>
-              <span><i class="is-failed" />失败 {{ record.counts.failed }}</span>
+              <span><i class="is-partial" />部分通过 {{ record.counts.partial }}</span>
+              <span><i class="is-failed" />执行失败 {{ record.counts.failed }}</span>
               <span><i class="is-skipped" />未执行 {{ record.counts.skipped }}</span>
               <span v-if="pendingRunScriptCount(record.counts)"><i class="is-pending" />待完成 {{ pendingRunScriptCount(record.counts) }}</span>
             </div>
@@ -785,7 +873,7 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
               <el-table-column type="expand">
                 <template #default="scope">
                   <div class="script-expanded">
-                    <div v-if="scope.row.error" class="script-error"><strong>失败原因</strong><p>{{ scope.row.error }}</p></div>
+                    <div v-if="scope.row.error" class="script-error"><strong>{{ scope.row.status === 'partial' ? '未通过断言' : '失败原因' }}</strong><p>{{ scope.row.error }}</p></div>
                     <div v-if="scope.row.output" class="script-output"><strong>结果数据</strong><pre>{{ formatJson(scope.row.output) }}</pre></div>
                     <el-empty v-if="!scope.row.error && !scope.row.output" description="该脚本没有额外结果数据" :image-size="52" />
                   </div>
@@ -802,7 +890,7 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
                 </template>
               </el-table-column>
               <el-table-column label="状态" width="124">
-                <template #default="scope"><el-tag :type="scriptStatusMap[scope.row.status as RunScriptStatus].type" effect="light">{{ scriptStatusMap[scope.row.status as RunScriptStatus].label }}</el-tag></template>
+                <template #default="scope"><el-tag :type="scriptStatusMap[scope.row.status as RunScriptStatus].type" :class="{ 'status-tag--partial': scope.row.status === 'partial' }" effect="light">{{ scriptStatusMap[scope.row.status as RunScriptStatus].label }}</el-tag></template>
               </el-table-column>
               <el-table-column label="日志" width="90" align="center">
                 <template #default="scope">{{ scope.row.logs.length }}</template>
@@ -887,7 +975,23 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
                 <div class="screenshot-cell screenshot-cell--path">
                   <span>本地路径</span>
                   <el-tooltip :content="screenshot.absolutePath" placement="top" :show-after="300">
-                    <code>{{ screenshot.absolutePath }}</code>
+                    <button
+                      type="button"
+                      class="screenshot-path-button"
+                      :disabled="revealingScreenshotKeys.has(screenshot.key)"
+                      :aria-busy="revealingScreenshotKeys.has(screenshot.key)"
+                      :aria-label="`在文件夹中显示并选中：${screenshot.absolutePath}`"
+                      @click="revealScreenshot(screenshot)"
+                    >
+                      <code>{{ screenshot.absolutePath }}</code>
+                      <el-icon
+                        aria-hidden="true"
+                        :class="{ 'is-loading': revealingScreenshotKeys.has(screenshot.key) }"
+                      >
+                        <Loading v-if="revealingScreenshotKeys.has(screenshot.key)" />
+                        <FolderOpened v-else />
+                      </el-icon>
+                    </button>
                   </el-tooltip>
                 </div>
               </article>
@@ -1059,12 +1163,13 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
 
 .detail-status { display: grid; grid-template-columns: 48px 1fr auto; align-items: center; gap: 13px; margin: 16px 0 4px; padding: 13px 15px; color: #166534; border: 1px solid #bbf7d0; border-left: 4px solid var(--color-success, #16a34a); border-radius: 5px; background: #f0fdf4; }
 .detail-status--failed { color: #991b1b; border-color: #fecaca; border-left-color: var(--color-danger, #dc2626); background: #fef2f2; }
-.detail-status--partial { color: #92400e; border-color: #fde68a; border-left-color: var(--color-warning, #d97706); background: #fffbeb; }
+.detail-status--partial { color: var(--color-partial-ink, #1f2a44); border-color: #ffe97a; border-left-color: var(--color-partial, #FFD700); background: var(--color-partial-soft, #fffbe6); }
 .detail-status--interrupted { color: var(--color-text-secondary, #64748b); border-color: var(--color-border, #e5ebf3); border-left-color: var(--color-text-muted, #94a3b8); background: var(--color-bg-subtle, #f8fafc); }
 .detail-status--running { color: #92400e; border-color: #fde68a; border-left-color: var(--color-warning, #d97706); background: #fffbeb; }
 .detail-status__icon { display: grid; width: 44px; height: 44px; place-items: center; color: #fff; background: var(--color-success, #16a34a); border-radius: 5px; }
 .detail-status--failed .detail-status__icon { background: var(--color-danger, #dc2626); }
-.detail-status--partial .detail-status__icon, .detail-status--running .detail-status__icon { background: var(--color-warning, #d97706); }
+.detail-status--partial .detail-status__icon { color: var(--color-partial-ink, #1f2a44); background: var(--color-partial, #FFD700); }
+.detail-status--running .detail-status__icon { background: var(--color-warning, #d97706); }
 .detail-status--interrupted .detail-status__icon { background: var(--color-text-muted, #94a3b8); }
 .detail-status strong, .detail-status p { margin: 0; }
 .detail-status > div strong { font-size: var(--font-lg); }
@@ -1090,6 +1195,7 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
 .section-heading > span { color: var(--color-text-secondary, #64748b); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: var(--font-sm); }
 .result-distribution { display: flex; height: 10px; overflow: hidden; border-radius: 3px; background: var(--color-border-light, #eef2f7); }
 .result-distribution__passed { background: var(--color-success, #16a34a); }
+.result-distribution__partial { background: var(--color-partial, #FFD700); }
 .result-distribution__failed { background: var(--color-danger, #dc2626); }
 .result-distribution__skipped { background: var(--color-text-muted, #94a3b8); }
 .result-distribution__pending { background: var(--color-border, #e5ebf3); }
@@ -1097,6 +1203,7 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
 .distribution-legend span { display: flex; align-items: center; gap: 7px; }
 .distribution-legend i { width: 8px; height: 8px; border-radius: 2px; }
 .distribution-legend .is-passed { background: var(--color-success, #16a34a); }
+.distribution-legend .is-partial { background: var(--color-partial, #FFD700); }
 .distribution-legend .is-failed { background: var(--color-danger, #dc2626); }
 .distribution-legend .is-skipped { background: var(--color-text-muted, #94a3b8); }
 .distribution-legend .is-pending { background: var(--color-border, #e5ebf3); }
@@ -1232,6 +1339,14 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
 .screenshot-cell--script > code { overflow: hidden; margin-top: 4px; color: var(--color-text-secondary, #64748b); font-size: var(--font-caption); text-overflow: ellipsis; white-space: nowrap; }
 .screenshot-cell--path .el-tooltip__trigger { display: block; min-width: 0; }
 .screenshot-cell--path code { display: block; overflow: hidden; color: var(--color-primary, #2563eb); font-size: var(--font-xs); text-overflow: ellipsis; white-space: nowrap; }
+.screenshot-cell--path .screenshot-path-button { display: flex; width: 100%; min-width: 0; align-items: center; gap: 6px; padding: 2px 0; border: 0; outline: none; background: transparent; cursor: pointer; text-align: left; }
+.screenshot-path-button code { flex: 1; }
+.screenshot-path-button .el-icon { flex: 0 0 auto; color: var(--color-primary, #2563eb); font-size: 15px; }
+.screenshot-path-button:hover code { text-decoration: underline; }
+.screenshot-path-button:focus-visible { border-radius: 3px; box-shadow: 0 0 0 2px rgb(37 99 235 / 25%); }
+.screenshot-path-button:disabled { cursor: wait; opacity: 0.65; }
+.screenshot-path-button .is-loading { animation: screenshot-path-loading 1s linear infinite; }
+@keyframes screenshot-path-loading { to { transform: rotate(360deg); } }
 
 .analysis-metrics { display: grid; overflow: hidden; border: 1px solid var(--color-border, #e5ebf3); border-radius: min(var(--radius-card, 6px), 8px); grid-template-columns: repeat(4, minmax(0, 1fr)); background: var(--color-surface, #fff); }
 .analysis-metrics > div { min-width: 0; min-height: 108px; padding: 14px 15px; border-right: 1px solid var(--color-border-light, #eef2f7); }

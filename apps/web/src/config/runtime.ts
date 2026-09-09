@@ -1,5 +1,5 @@
 export const runtimeConfig = Object.freeze({
-  appName: 'AutoTest',
+  appName: '自动化测试平台',
   authMode: 'local' as const,
   localCredentials: {
     username: 'admin',

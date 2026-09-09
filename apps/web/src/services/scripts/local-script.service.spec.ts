@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { LocalScriptService } from './local-script.service'
+import { CANCEL_REQUEST_TIMEOUT_MS, LocalScriptService } from './local-script.service'
 import type { ScriptConfig, ScriptConfigRepository } from './script-config-repository'
 
 const timestamp = '2026-08-31T08:00:00.000Z'
@@ -87,6 +87,19 @@ function initialConfigs(): ScriptConfig[] {
       responseVariableBindings: [
         { id: 'contact-form-id', variableName: 'FORM_ID', responsePath: 'formId', secret: false },
         { id: 'contact-form-contract', variableName: 'FORM_CONTRACT', responsePath: 'formContract', secret: false },
+      ],
+    }),
+    config({
+      id: 'form-multilingual-translation-publish',
+      name: '表单多语言 AI 翻译、发布与分享校验',
+      description: 'Chrome 无头模式打开可配置表单的多语言翻译页，执行一键 AI 翻译，校验保存、完成、发布、预览及分享界面的三语言配置与内容。',
+      entryFile: 'form-multilingual-translation-publish.ui.spec.mjs',
+      timeoutMs: 600_000,
+      requestPath: '/form-activity/translation?id={{FORM_ID}}',
+      inputParameters: [
+        { id: 'translation-form-id', key: 'FORM_ID', value: '4J027Q', description: '待翻译、完成并发布的表单 ID' },
+        { id: 'translation-ai-timeout-ms', key: 'AI_TRANSLATION_TIMEOUT_MS', value: '120000', description: '一键 AI 翻译完成等待超时，默认 2 分钟' },
+        { id: 'translation-expectations', key: 'TRANSLATION_EXPECTATIONS', value: '{}', description: '可选关键译文精确断言 JSON' },
       ],
     }),
   ]
@@ -182,9 +195,16 @@ function settleWithin<T>(promise: Promise<T>, timeoutMs = 250): Promise<T> {
   })
 }
 
+describe('production cancellation budget', () => {
+  it('outlasts the server cancellation wait deadline', () => {
+    expect(CANCEL_REQUEST_TIMEOUT_MS).toBe(20_000)
+    expect(CANCEL_REQUEST_TIMEOUT_MS).toBeGreaterThan(16_000)
+  })
+})
+
 function terminalAssertionFailure(): Response {
   return new Response(JSON.stringify({
-    status: 'failed',
+    status: 'partial',
     ok: false,
     continuePipeline: true,
     durationMs: 21_654,
@@ -211,8 +231,8 @@ describe('LocalScriptService', () => {
   it('starts with submission, reply editing and publishing scripts', async () => {
     const scripts = await createService().list()
 
-    expect(scripts).toHaveLength(5)
-    expect(scripts.every((script) => script.timeoutMs === 300_000)).toBe(true)
+    expect(scripts).toHaveLength(6)
+    expect(scripts.slice(0, 5).every((script) => script.timeoutMs === 300_000)).toBe(true)
     expect(scripts[0]).toMatchObject({
       id: 'form-lpxavn-submit',
       name: 'lpXAVN 全题型表单填写并提交',
@@ -260,6 +280,20 @@ describe('LocalScriptService', () => {
         expect.objectContaining({ variableName: 'FORM_ID', responsePath: 'formId' }),
         expect.objectContaining({ variableName: 'FORM_CONTRACT', responsePath: 'formContract' }),
       ],
+    })
+    expect(scripts[5]).toMatchObject({
+      id: 'form-multilingual-translation-publish',
+      name: '表单多语言 AI 翻译、发布与分享校验',
+      directory: 'scripts',
+      entryFile: 'form-multilingual-translation-publish.ui.spec.mjs',
+      timeoutMs: 600_000,
+      requestPath: '/form-activity/translation?id={{FORM_ID}}',
+      inputParameters: [
+        expect.objectContaining({ key: 'FORM_ID', value: '4J027Q' }),
+        expect.objectContaining({ key: 'AI_TRANSLATION_TIMEOUT_MS', value: '120000' }),
+        expect.objectContaining({ key: 'TRANSLATION_EXPECTATIONS', value: '{}' }),
+      ],
+      responseVariableBindings: [],
     })
   })
 
@@ -470,7 +504,7 @@ describe('LocalScriptService', () => {
       const completed = await settleWithin(runTask)
 
       expect(completed[0]).toMatchObject({
-        status: 'failed',
+        status: 'partial',
         lastRunResult: {
           ok: false,
           continuePipeline: true,
@@ -509,7 +543,7 @@ describe('LocalScriptService', () => {
       await new Promise((resolve) => globalThis.setTimeout(resolve, 0))
 
       expect(completed[0]).toMatchObject({
-        status: 'failed',
+        status: 'partial',
         lastRunResult: {
           ok: false,
           continuePipeline: true,
@@ -518,7 +552,7 @@ describe('LocalScriptService', () => {
       })
       expect((await service.list()).find((script) => script.id === 'form-contact-publish'))
         .toMatchObject({
-          status: 'failed',
+          status: 'partial',
           lastRunResult: { continuePipeline: true },
         })
     } finally {
@@ -548,7 +582,7 @@ describe('LocalScriptService', () => {
     }))
 
     expect(completed[0]).toMatchObject({
-      status: 'failed',
+      status: 'partial',
       lastRunResult: {
         continuePipeline: true,
         error: '脚本已执行完成，共有 1 条断言失败',
@@ -590,7 +624,7 @@ describe('LocalScriptService', () => {
 
     expect(liveRequestCount).toBe(3)
     expect(completed[0]).toMatchObject({
-      status: 'failed',
+      status: 'partial',
       lastRunResult: { continuePipeline: true },
     })
   })
@@ -651,7 +685,7 @@ describe('LocalScriptService', () => {
     const completed = await settleWithin(runTask)
 
     expect(completed[0]).toMatchObject({
-      status: 'failed',
+      status: 'partial',
       lastRunResult: { continuePipeline: true },
     })
   })
@@ -723,7 +757,7 @@ describe('LocalScriptService', () => {
 
     expect(onProgress).toHaveBeenCalled()
     expect(completed[0]).toMatchObject({
-      status: 'failed',
+      status: 'partial',
       lastRunResult: {
         ok: false,
         continuePipeline: true,
@@ -806,6 +840,49 @@ describe('LocalScriptService', () => {
     expect(requestBody).toMatchObject({
       scriptId: 'form-lpxavn-submit',
       context: { requestPath: '/form/?id=configured' },
+    })
+    expect(requestBody).not.toHaveProperty('timeoutMs')
+  })
+
+  it('resolves the multilingual translation form ID and passes its scoped defaults to the runner', async () => {
+    let requestBody: {
+      scriptId: string
+      context: { requestPath?: string; variables: Record<string, string> }
+    } | undefined
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/runs') && init?.method === 'POST') {
+        requestBody = JSON.parse(String(init.body)) as typeof requestBody
+      }
+      return new Response(JSON.stringify({
+        ok: true,
+        durationMs: 100,
+        logs: [],
+        result: { published: true },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    })
+    const service = createService(fetcher as typeof fetch)
+
+    await service.run(['form-multilingual-translation-publish'], {
+      environmentId: 'env-testing',
+      siteBaseUrl: 'https://lx.admin.lingxi.tech/',
+      apiBaseUrl: 'https://lx.admin.lingxi.tech/api',
+      ignoreHTTPSErrors: false,
+      variables: { FORM_ID: 'dynamic-form-id', AUTH_TOKEN: 'runtime-token' },
+      authorizationOrigin: 'https://lx.admin.lingxi.tech',
+      extraHTTPHeaders: { Authorization: 'Bearer runtime-token' },
+    })
+
+    expect(requestBody).toMatchObject({
+      scriptId: 'form-multilingual-translation-publish',
+      context: {
+        requestPath: '/form-activity/translation?id=dynamic-form-id',
+        variables: {
+          FORM_ID: 'dynamic-form-id',
+          AI_TRANSLATION_TIMEOUT_MS: '120000',
+          TRANSLATION_EXPECTATIONS: '{}',
+          AUTH_TOKEN: 'runtime-token',
+        },
+      },
     })
     expect(requestBody).not.toHaveProperty('timeoutMs')
   })

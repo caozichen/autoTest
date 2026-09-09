@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict'
 import { request as httpRequest } from 'node:http'
 import { once } from 'node:events'
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
 
 import { RunRecordFileStore } from './run-record-store.mjs'
-import { createRunnerServer } from './server.mjs'
+import { createRunnerServer, revealFileInFolder } from './server.mjs'
 
 function runPayload(runId, scriptId = 'form-contact-publish') {
   return {
@@ -51,6 +51,7 @@ async function startTestServer(t, {
   artifactRootDirectory,
   runRecordDirectory,
   runRecordStore,
+  revealFile,
   scriptConfigDirectory,
   scriptsDirectory,
 } = {}) {
@@ -66,6 +67,7 @@ async function startTestServer(t, {
     ...(artifactRootDirectory ? { artifactRootDirectory } : {}),
     ...(runRecordDirectory ? { runRecordDirectory } : {}),
     ...(runRecordStore ? { runRecordStore } : {}),
+    ...(revealFile ? { revealFile } : {}),
     ...(scriptConfigDirectory ? { scriptConfigDirectory } : {}),
     ...(scriptsDirectory ? { scriptsDirectory } : {}),
   })
@@ -188,6 +190,12 @@ function screenshotUrl(baseUrl, artifact, { relativePath = artifact.relativePath
     baseUrl,
   )
   url.searchParams.set('path', relativePath)
+  return url
+}
+
+function screenshotRevealUrl(baseUrl, artifact, options) {
+  const url = screenshotUrl(baseUrl, artifact, options)
+  url.pathname += '/reveal'
   return url
 }
 
@@ -488,7 +496,7 @@ test('exposes resource evidence, network summary, and the pipeline continuation 
     signals: [],
     executeScript: async () => ({
       ok: false,
-      status: 'failed',
+      status: 'partial',
       continuePipeline: true,
       durationMs: 10,
       logs: [],
@@ -512,9 +520,11 @@ test('exposes resource evidence, network summary, and the pipeline continuation 
 
   assert.equal(response.status, 200)
   assert.equal(result.continuePipeline, true)
+  assert.equal(result.status, 'partial')
   assert.deepEqual(result.resourceResponses, resourceResponses)
   assert.deepEqual(result.networkSummary, networkSummary)
   assert.equal(snapshot.continuePipeline, true)
+  assert.equal(snapshot.status, 'partial')
   assert.deepEqual(snapshot.resourceResponses, resourceResponses)
   assert.deepEqual(snapshot.networkSummary, networkSummary)
 })
@@ -673,6 +683,121 @@ test('persists cancelled-run artifacts before the stop response completes', asyn
   assert.deepEqual(detail.record.scripts[0].artifacts, [artifact])
 })
 
+test('uses the Finder reveal flag without opening the screenshot on macOS', async () => {
+  const calls = []
+  await revealFileInFolder('/tmp/folder/screenshot with spaces.png', {
+    platform: 'darwin',
+    execute: async (...args) => calls.push(args),
+  })
+
+  assert.deepEqual(calls, [[
+    '/usr/bin/open',
+    ['-R', '/tmp/folder/screenshot with spaces.png'],
+    { timeout: 10_000 },
+  ]])
+})
+
+test('uses the Explorer select flag without opening the screenshot on Windows', async () => {
+  const calls = []
+  await revealFileInFolder('C:\\folder\\screenshot with spaces.png', {
+    platform: 'win32',
+    execute: async (...args) => calls.push(args),
+  })
+
+  assert.deepEqual(calls, [[
+    'explorer.exe',
+    ['/select,C:\\folder\\screenshot with spaces.png'],
+    { timeout: 10_000, windowsHide: true },
+  ]])
+})
+
+test('rejects screenshot reveal on unsupported operating systems', async () => {
+  let executed = false
+  await assert.rejects(
+    revealFileInFolder('/tmp/folder/screenshot.png', {
+      platform: 'linux',
+      execute: async () => { executed = true },
+    }),
+    (error) => {
+      assert.equal(error.statusCode, 501)
+      assert.equal(error.code, 'SCREENSHOT_REVEAL_UNSUPPORTED')
+      return true
+    },
+  )
+  assert.equal(executed, false)
+})
+
+test('reveals a registered screenshot using its verified real path', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'autotest-server-screenshot-reveal-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const artifactRootDirectory = join(root, 'artifacts')
+  const runRecordStore = new RunRecordFileStore({ directory: join(root, 'records') })
+  const record = storedRecord('stored-screenshot-reveal-001')
+  const screenshotBody = Buffer.from('registered screenshot')
+  const artifact = storedArtifact(record.id, {
+    rootDirectory: artifactRootDirectory,
+    relativePath: 'screenshots/带空格 failure.png',
+    sizeBytes: screenshotBody.length,
+  })
+  record.scripts[0].artifacts = [artifact]
+  await mkdir(dirname(artifact.absolutePath), { recursive: true })
+  await writeFile(artifact.absolutePath, screenshotBody)
+  await runRecordStore.create(record)
+  const revealedPaths = []
+  const { baseUrl } = await startTestServer(t, {
+    artifactRootDirectory,
+    runRecordStore,
+    revealFile: async (absolutePath) => revealedPaths.push(absolutePath),
+  })
+
+  const response = await fetch(screenshotRevealUrl(baseUrl, artifact), {
+    method: 'POST',
+    headers: { Origin: 'http://127.0.0.1:5174' },
+  })
+
+  assert.equal(response.status, 200)
+  assert.equal(response.headers.get('access-control-allow-origin'), 'http://127.0.0.1:5174')
+  assert.deepEqual(await response.json(), { ok: true })
+  assert.deepEqual(revealedPaths, [await realpath(artifact.absolutePath)])
+
+  const rejectedOrigin = await fetch(screenshotRevealUrl(baseUrl, artifact), {
+    method: 'POST',
+    headers: { Origin: 'https://attacker.example' },
+  })
+  assert.equal(rejectedOrigin.status, 403)
+  assert.equal(revealedPaths.length, 1)
+})
+
+test('reports file manager failures without exposing command details', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'autotest-server-screenshot-reveal-failure-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const artifactRootDirectory = join(root, 'artifacts')
+  const runRecordStore = new RunRecordFileStore({ directory: join(root, 'records') })
+  const record = storedRecord('stored-screenshot-reveal-failure-001')
+  const screenshotBody = Buffer.from('registered screenshot')
+  const artifact = storedArtifact(record.id, {
+    rootDirectory: artifactRootDirectory,
+    sizeBytes: screenshotBody.length,
+  })
+  record.scripts[0].artifacts = [artifact]
+  await mkdir(dirname(artifact.absolutePath), { recursive: true })
+  await writeFile(artifact.absolutePath, screenshotBody)
+  await runRecordStore.create(record)
+  const { baseUrl } = await startTestServer(t, {
+    artifactRootDirectory,
+    runRecordStore,
+    revealFile: async () => { throw new Error('private command detail') },
+  })
+
+  const response = await fetch(screenshotRevealUrl(baseUrl, artifact), { method: 'POST' })
+  const payload = await response.json()
+
+  assert.equal(response.status, 500)
+  assert.equal(payload.code, 'SCREENSHOT_REVEAL_FAILED')
+  assert.equal(payload.error, '无法在文件夹中显示截图，请确认系统文件管理器可用')
+  assert.equal(JSON.stringify(payload).includes('private command detail'), false)
+})
+
 test('serves registered screenshots from the trusted artifact root with safe response headers', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'autotest-server-screenshot-'))
   t.after(() => rm(root, { recursive: true, force: true }))
@@ -782,7 +907,12 @@ test('rejects unregistered, malformed, non-image, escaped, and linked screenshot
     directoryLinkedArtifact,
   ]
   await runRecordStore.create(record)
-  const { baseUrl } = await startTestServer(t, { artifactRootDirectory, runRecordStore })
+  const revealedPaths = []
+  const { baseUrl } = await startTestServer(t, {
+    artifactRootDirectory,
+    runRecordStore,
+    revealFile: async (absolutePath) => revealedPaths.push(absolutePath),
+  })
 
   for (const artifact of [
     nonScreenshot,
@@ -794,6 +924,10 @@ test('rejects unregistered, malformed, non-image, escaped, and linked screenshot
     const response = await fetch(screenshotUrl(baseUrl, artifact))
     assert.equal(response.status, 404, artifact.relativePath)
     assert.equal((await response.json()).code, 'SCREENSHOT_NOT_FOUND')
+
+    const revealResponse = await fetch(screenshotRevealUrl(baseUrl, artifact), { method: 'POST' })
+    assert.equal(revealResponse.status, 404, artifact.relativePath)
+    assert.equal((await revealResponse.json()).code, 'SCREENSHOT_NOT_FOUND')
   }
 
   for (const relativePath of [
@@ -805,6 +939,12 @@ test('rejects unregistered, malformed, non-image, escaped, and linked screenshot
   ]) {
     const response = await fetch(screenshotUrl(baseUrl, outsideArtifact, { relativePath }))
     assert.equal(response.status, 400, relativePath)
+
+    const revealResponse = await fetch(
+      screenshotRevealUrl(baseUrl, outsideArtifact, { relativePath }),
+      { method: 'POST' },
+    )
+    assert.equal(revealResponse.status, 400, relativePath)
   }
 
   const unregistered = await fetch(screenshotUrl(baseUrl, {
@@ -813,10 +953,21 @@ test('rejects unregistered, malformed, non-image, escaped, and linked screenshot
     relativePath: 'screenshots/missing.png',
   }))
   assert.equal(unregistered.status, 404)
+  const unregisteredReveal = await fetch(screenshotRevealUrl(baseUrl, {
+    ...outsideArtifact,
+    attemptId: 'attempt-missing',
+    relativePath: 'screenshots/missing.png',
+  }), { method: 'POST' })
+  assert.equal(unregisteredReveal.status, 404)
 
   const duplicatePathUrl = screenshotUrl(baseUrl, outsideArtifact)
   duplicatePathUrl.searchParams.append('path', outsideArtifact.relativePath)
   assert.equal((await fetch(duplicatePathUrl)).status, 400)
+
+  const duplicateRevealPathUrl = screenshotRevealUrl(baseUrl, outsideArtifact)
+  duplicateRevealPathUrl.searchParams.append('path', outsideArtifact.relativePath)
+  assert.equal((await fetch(duplicateRevealPathUrl, { method: 'POST' })).status, 400)
+  assert.deepEqual(revealedPaths, [])
 })
 
 test('cancel waits for cooperative executor cleanup before responding', async (t) => {

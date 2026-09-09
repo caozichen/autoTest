@@ -8,10 +8,10 @@ defineProps<{
 
 <template>
   <aside class="app-sidebar" :class="{ 'app-sidebar--compact': compact }">
-    <div class="brand">
-      <span class="brand__mark"><el-icon :size="21"><Monitor /></el-icon></span>
-      <span v-if="!compact" class="brand__name">AutoTest</span>
-    </div>
+    <RouterLink class="brand" to="/" aria-label="自动化测试平台首页">
+      <img class="brand__mark" src="/brand-mark.svg" alt="" />
+      <span v-if="!compact" class="brand__name">自动化测试平台</span>
+    </RouterLink>
 
     <nav class="nav" aria-label="主导航">
       <p v-if="!compact" class="nav__caption">工作台</p>
@@ -73,27 +73,43 @@ defineProps<{
 .brand {
   display: flex;
   height: 60px;
+  flex: 0 0 60px;
   align-items: center;
   gap: 9px;
   padding: 0 14px;
+  color: inherit;
   border-bottom: 1px solid var(--color-border-light);
+  text-decoration: none;
 }
 
 .brand__mark {
-  display: grid;
-  width: 32px;
-  height: 32px;
-  flex: 0 0 32px;
-  place-items: center;
-  color: #fff;
-  border-radius: 6px;
-  background: var(--color-primary);
+  display: block;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
 }
 
 .brand__name {
   color: var(--color-text-primary);
-  font-size: var(--font-brand);
-  font-weight: 750;
+  font-size: 17px;
+  font-weight: 720;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.brand:hover .brand__name,
+.brand:focus-visible .brand__name {
+  color: var(--color-primary);
+}
+
+.brand:focus-visible {
+  outline: 2px solid rgb(37 99 235 / 28%);
+  outline-offset: -2px;
+}
+
+.app-sidebar--compact .brand {
+  justify-content: center;
+  padding: 0;
 }
 
 .nav {

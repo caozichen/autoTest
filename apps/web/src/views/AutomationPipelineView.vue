@@ -168,10 +168,16 @@ function runPipeline(pipeline: AutomationPipeline): void {
       await loadData()
       if (record.status === 'passed') {
         ElMessage.success(`“${pipeline.name}”已按顺序运行完成`)
+      } else if (record.status === 'partial') {
+        ElMessage({
+          type: 'warning',
+          message: `“${pipeline.name}”部分通过，请查看未通过断言`,
+          customClass: 'status-message--partial',
+        })
       } else if (record.status === 'interrupted') {
         ElMessage.warning(`“${pipeline.name}”已停止`)
       } else {
-        ElMessage.error(`“${pipeline.name}”运行未全部通过，请查看运行记录`)
+        ElMessage.error(`“${pipeline.name}”执行失败，请查看运行记录`)
       }
     })
     .catch((error) => {

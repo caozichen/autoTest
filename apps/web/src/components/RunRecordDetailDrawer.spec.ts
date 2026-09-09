@@ -15,6 +15,7 @@ import {
   type PropType,
   type Ref,
 } from 'vue'
+import { ElMessage } from 'element-plus'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('./AssertionModuleChart.vue', () => ({
@@ -24,12 +25,13 @@ vi.mock('./AssertionOutcomeChart.vue', () => ({
   default: { name: 'AssertionOutcomeChartStub', render: () => null },
 }))
 
-import type { RunRecord } from '@/domain/run-record'
+import type { RunRecord, RunScriptRecord } from '@/domain/run-record'
 import type { ScriptArtifact } from '@/domain/script'
 import RunRecordDetailDrawer from './RunRecordDetailDrawer.vue'
 
 const mountedApps: App[] = []
 const ACTIVE_TAB_KEY = Symbol('active-tab')
+const TABLE_ROWS_KEY = Symbol('table-rows')
 
 function emptyNetworkSummary() {
   return {
@@ -58,7 +60,7 @@ function runRecord(updatedAt = '2026-09-04T00:00:00.000Z'): RunRecord {
     updatedAt,
     finishedAt: null,
     durationMs: null,
-    counts: { total: 1, passed: 0, failed: 0, skipped: 0 },
+    counts: { total: 1, passed: 0, partial: 0, failed: 0, skipped: 0 },
     scripts: [],
     logs: [],
     analysis: {
@@ -69,6 +71,71 @@ function runRecord(updatedAt = '2026-09-04T00:00:00.000Z'): RunRecord {
       failureGroups: [],
     },
   }
+}
+
+function partialRunRecord(): RunRecord {
+  const record = runRecord('2026-09-04T00:00:04.000Z')
+  const script = (
+    id: string,
+    status: RunScriptRecord['status'],
+    assertions: RunScriptRecord['assertions'],
+    error?: string,
+  ): RunScriptRecord => ({
+    id,
+    recordId: `script-record-${id}`,
+    name: `脚本 ${id}`,
+    directory: 'scripts',
+    entryFile: `${id}.mjs`,
+    tags: ['回归'],
+    status,
+    durationMs: 1_000,
+    logs: [],
+    assertions,
+    apiResponses: [],
+    resourceResponses: [],
+    networkSummary: emptyNetworkSummary(),
+    artifacts: [],
+    ...(error ? { error } : {}),
+  })
+
+  record.status = 'partial'
+  record.finishedAt = '2026-09-04T00:00:04.000Z'
+  record.durationMs = 4_000
+  record.counts = { total: 2, passed: 1, partial: 1, failed: 0, skipped: 0 }
+  record.scripts = [
+    script('passed', 'passed', [{
+      sequence: 1,
+      timestamp: '2026-09-04T00:00:01.000Z',
+      name: '页面可访问',
+      module: '页面',
+      matcher: 'toBeVisible',
+      status: 'passed',
+      durationMs: 8,
+    }]),
+    script('partial', 'partial', [
+      {
+        sequence: 1,
+        timestamp: '2026-09-04T00:00:02.000Z',
+        name: '标题正确',
+        module: '页面',
+        matcher: 'toHaveText',
+        status: 'passed',
+        durationMs: 5,
+      },
+      {
+        sequence: 2,
+        timestamp: '2026-09-04T00:00:03.000Z',
+        name: '提交成功',
+        module: '提交',
+        matcher: 'toBeTruthy',
+        status: 'failed',
+        durationMs: 9,
+        error: '提交断言未通过',
+      },
+    ], '提交断言未通过'),
+  ]
+  record.analysis.passRate = 50
+  return record
 }
 
 function artifact(overrides: Partial<ScriptArtifact> = {}): ScriptArtifact {
@@ -309,7 +376,7 @@ function scaleRecord(): RunRecord {
   record.status = 'failed'
   record.finishedAt = '2026-09-04T00:02:00.000Z'
   record.durationMs = 120_000
-  record.counts = { total: 5, passed: 0, failed: 5, skipped: 0 }
+  record.counts = { total: 5, passed: 0, partial: 0, failed: 5, skipped: 0 }
   record.scripts = Array.from({ length: 5 }, (_, scriptIndex) => ({
     id: `network-script-${scriptIndex + 1}`,
     recordId: `network-script-record-${scriptIndex + 1}`,
@@ -383,6 +450,10 @@ const TabsStub = defineComponent({
         onClick: () => emit('update:modelValue', 'screenshots'),
       }, '选择'),
       h('button', {
+        'data-testid': 'select-scripts',
+        onClick: () => emit('update:modelValue', 'scripts'),
+      }, '脚本结果'),
+      h('button', {
         'data-testid': 'select-analysis',
         onClick: () => emit('update:modelValue', 'analysis'),
       }, '数据分析'),
@@ -446,6 +517,39 @@ const TooltipStub = defineComponent({
   },
 })
 
+const TableStub = defineComponent({
+  props: {
+    data: { type: Array as PropType<unknown[]>, default: () => [] },
+  },
+  setup(props, { slots }) {
+    provide(TABLE_ROWS_KEY, computed(() => props.data))
+    return () => h('div', { 'data-testid': 'table' }, slots.default?.())
+  },
+})
+
+const TableColumnStub = defineComponent({
+  props: {
+    label: { type: String, default: '' },
+    type: { type: String, default: '' },
+  },
+  setup(props, { slots }) {
+    const rows = inject<ComputedRef<unknown[]>>(TABLE_ROWS_KEY, computed(() => []))
+    return () => h('section', {
+      'data-column-label': props.label || props.type,
+    }, rows.value.flatMap((row, index) => slots.default?.({ row, $index: index }) ?? []))
+  },
+})
+
+const TagStub = defineComponent({
+  inheritAttrs: false,
+  props: {
+    type: { type: String, default: '' },
+  },
+  setup(props, { attrs, slots }) {
+    return () => h('span', { ...attrs, 'data-tag-type': props.type }, slots.default?.())
+  },
+})
+
 function mountDrawer(
   record: Ref<RunRecord | null>,
   visible = ref(true),
@@ -470,6 +574,9 @@ function mountDrawer(
   app.component('el-tab-pane', TabPaneStub)
   app.component('el-image', ImageStub)
   app.component('el-tooltip', TooltipStub)
+  app.component('el-table', TableStub)
+  app.component('el-table-column', TableColumnStub)
+  app.component('el-tag', TagStub)
   mountedApps.push(app)
   app.mount(root)
   return { root, visible }
@@ -478,6 +585,9 @@ function mountDrawer(
 afterEach(() => {
   for (const app of mountedApps.splice(0)) app.unmount()
   document.body.replaceChildren()
+  vi.unstubAllGlobals()
+  vi.restoreAllMocks()
+  vi.useRealTimers()
 })
 
 describe('RunRecordDetailDrawer', () => {
@@ -504,7 +614,7 @@ describe('RunRecordDetailDrawer', () => {
 
   it('reserves the unfinished share of an in-progress batch as a pending segment', async () => {
     const record = runRecord()
-    record.counts = { total: 3, passed: 1, failed: 0, skipped: 0 }
+    record.counts = { total: 3, passed: 1, partial: 0, failed: 0, skipped: 0 }
     const { root } = mountDrawer(ref(record))
     await nextTick()
 
@@ -516,6 +626,33 @@ describe('RunRecordDetailDrawer', () => {
     expect(passed?.style.flexGrow).toBe('1')
     expect(pending?.style.flexGrow).toBe('2')
     expect(root.textContent).toContain('待完成 2')
+  })
+
+  it('renders partially passing scripts as a completed gold segment with explicit status text', async () => {
+    const { root } = mountDrawer(ref(partialRunRecord()))
+    await nextTick()
+
+    const distribution = root.querySelector<HTMLElement>('.result-distribution')
+    const partial = distribution?.querySelector<HTMLElement>('.result-distribution__partial')
+
+    expect(distribution?.getAttribute('aria-label')).toBe(
+      '通过 1，部分通过 1，执行失败 0，未执行 0，待完成 0',
+    )
+    expect(partial?.style.flexGrow).toBe('1')
+    expect(distribution?.querySelector('.result-distribution__pending')).toBeNull()
+    expect(root.querySelector('.section-heading > span')?.textContent).toBe('2 / 2')
+    expect(root.querySelector('.distribution-legend')?.textContent).toContain('部分通过 1')
+    expect(root.querySelector('.distribution-legend')?.textContent).toContain('执行失败 0')
+
+    root.querySelector<HTMLButtonElement>('[data-testid="select-scripts"]')?.click()
+    await nextTick()
+
+    const statusColumn = root.querySelector<HTMLElement>('[data-column-label="状态"]')
+    expect(statusColumn?.textContent).toContain('部分通过')
+    expect(statusColumn?.querySelector('[data-tag-type="warning"]')).not.toBeNull()
+    expect(statusColumn?.querySelector('.status-tag--partial')).not.toBeNull()
+    expect(root.querySelector<HTMLElement>('[data-column-label="expand"]')?.textContent)
+      .toContain('未通过断言')
   })
 
   it('keeps the selected tab when polling replaces the same run record', async () => {
@@ -631,6 +768,168 @@ describe('RunRecordDetailDrawer', () => {
     expect(thumbnails.map((thumbnail) => thumbnail.dataset.initialIndex)).toEqual(['0', '1'])
     expect(thumbnails.every((thumbnail) => thumbnail.dataset.previewTeleported === 'true')).toBe(true)
     expect(thumbnails.every((thumbnail) => thumbnail.dataset.hideOnClickModal === 'true')).toBe(true)
+  })
+
+  it('reveals a screenshot from its clickable local path without opening the image', async () => {
+    let completeRequest: ((response: Response) => void) | undefined
+    const fetcher = vi.fn(() => new Promise<Response>((resolve) => {
+      completeRequest = resolve
+    }))
+    vi.stubGlobal('fetch', fetcher)
+    const { root } = mountDrawer(ref(screenshotRecord()))
+    await nextTick()
+    root.querySelector<HTMLButtonElement>('[data-testid="select-screenshots"]')?.click()
+    await nextTick()
+
+    const pathButtons = [...root.querySelectorAll<HTMLButtonElement>('.screenshot-path-button')]
+    expect(pathButtons).toHaveLength(2)
+    expect(pathButtons[0]?.tagName).toBe('BUTTON')
+    expect(pathButtons[0]?.getAttribute('aria-label')).toContain(
+      '/workspace/outputs/artifacts/run-record-001/form-publish/attempt-publish/screenshots/publish-failure.png',
+    )
+
+    pathButtons[0]?.click()
+    pathButtons[0]?.click()
+    await nextTick()
+
+    expect(fetcher).toHaveBeenCalledTimes(1)
+    const [requestUrl, requestInit] = fetcher.mock.calls[0] ?? []
+    const parsedUrl = new URL(String(requestUrl))
+    expect(parsedUrl.pathname).toBe(
+      '/run-records/run-record-001/screenshots/form-publish/attempt-publish/reveal',
+    )
+    expect(parsedUrl.searchParams.get('path')).toBe('screenshots/publish-failure.png')
+    expect(requestInit).toEqual({
+      method: 'POST',
+      headers: { Accept: 'application/json' },
+      signal: expect.any(AbortSignal),
+    })
+    expect(pathButtons[0]?.disabled).toBe(true)
+    expect(pathButtons[0]?.getAttribute('aria-busy')).toBe('true')
+
+    completeRequest?.(new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+    await vi.waitFor(() => expect(pathButtons[0]?.disabled).toBe(false))
+  })
+
+  it('cancels pending screenshot reveals when the record changes or the drawer closes', async () => {
+    const pendingRequests: Array<{
+      reject: (error: Error) => void
+      signal: AbortSignal
+    }> = []
+    const fetcher = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => (
+      new Promise<Response>((_resolve, reject) => {
+        pendingRequests.push({
+          reject,
+          signal: init?.signal as AbortSignal,
+        })
+      })
+    ))
+    vi.stubGlobal('fetch', fetcher)
+    const messageSpy = vi.spyOn(ElMessage, 'error').mockImplementation(() => ({
+      close: () => undefined,
+    }))
+    const record = ref<RunRecord | null>(screenshotRecord())
+    const visible = ref(true)
+    const { root } = mountDrawer(record, visible)
+    await nextTick()
+    root.querySelector<HTMLButtonElement>('[data-testid="select-screenshots"]')?.click()
+    await nextTick()
+
+    root.querySelector<HTMLButtonElement>('.screenshot-path-button')?.click()
+    await nextTick()
+    expect(pendingRequests).toHaveLength(1)
+    expect(pendingRequests[0]?.signal.aborted).toBe(false)
+
+    const replacement = screenshotRecord('2026-09-04T00:00:05.000Z')
+    replacement.id = 'run-record-002'
+    record.value = replacement
+    await nextTick()
+    expect(pendingRequests[0]?.signal.aborted).toBe(true)
+
+    root.querySelector<HTMLButtonElement>('[data-testid="select-screenshots"]')?.click()
+    await nextTick()
+    const replacementPathButton = root.querySelector<HTMLButtonElement>('.screenshot-path-button')
+    replacementPathButton?.click()
+    await nextTick()
+    expect(pendingRequests).toHaveLength(2)
+    expect(replacementPathButton?.disabled).toBe(true)
+
+    pendingRequests[0]?.reject(new Error('旧记录的迟到失败'))
+    await Promise.resolve()
+    await nextTick()
+    expect(replacementPathButton?.disabled).toBe(true)
+    expect(messageSpy).not.toHaveBeenCalled()
+
+    visible.value = false
+    await nextTick()
+    expect(pendingRequests[1]?.signal.aborted).toBe(true)
+    pendingRequests[1]?.reject(new Error('已关闭抽屉的迟到失败'))
+    await Promise.resolve()
+    await nextTick()
+    expect(messageSpy).not.toHaveBeenCalled()
+
+    visible.value = true
+    await nextTick()
+    root.querySelector<HTMLButtonElement>('[data-testid="select-screenshots"]')?.click()
+    await nextTick()
+    expect(root.querySelector<HTMLButtonElement>('.screenshot-path-button')?.disabled).toBe(false)
+  })
+
+  it('times out a hanging screenshot reveal and restores the path action', async () => {
+    vi.useFakeTimers()
+    let requestSignal: AbortSignal | undefined
+    vi.stubGlobal('fetch', vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      requestSignal = init?.signal as AbortSignal
+      return new Promise<Response>(() => undefined)
+    }))
+    const messageSpy = vi.spyOn(ElMessage, 'error').mockImplementation(() => ({
+      close: () => undefined,
+    }))
+    const { root } = mountDrawer(ref(screenshotRecord()))
+    await nextTick()
+    root.querySelector<HTMLButtonElement>('[data-testid="select-screenshots"]')?.click()
+    await nextTick()
+    const pathButton = root.querySelector<HTMLButtonElement>('.screenshot-path-button')
+
+    pathButton?.click()
+    await nextTick()
+    expect(pathButton?.disabled).toBe(true)
+
+    await vi.advanceTimersByTimeAsync(15_000)
+    await nextTick()
+
+    expect(requestSignal?.aborted).toBe(true)
+    expect(pathButton?.disabled).toBe(false)
+    expect(messageSpy).toHaveBeenCalledWith(
+      '定位截图失败：Runner 截图定位请求超时（15000ms）',
+    )
+  })
+
+  it('shows the Runner error when a screenshot cannot be revealed', async () => {
+    const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      ok: false,
+      error: '截图不存在',
+    }), {
+      status: 404,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+    vi.stubGlobal('fetch', fetcher)
+    const messageSpy = vi.spyOn(ElMessage, 'error').mockImplementation(() => ({
+      close: () => undefined,
+    }))
+    const { root } = mountDrawer(ref(screenshotRecord()))
+    await nextTick()
+    root.querySelector<HTMLButtonElement>('[data-testid="select-screenshots"]')?.click()
+    await nextTick()
+
+    root.querySelector<HTMLButtonElement>('.screenshot-path-button')?.click()
+
+    await vi.waitFor(() => {
+      expect(messageSpy).toHaveBeenCalledWith('定位截图失败：截图不存在')
+    })
   })
 
   it('separates resources from APIs, prioritizes failures and caps each rendered page', async () => {

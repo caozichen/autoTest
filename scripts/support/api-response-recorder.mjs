@@ -980,7 +980,7 @@ export function attachNetworkObserver(target, {
     })
   }
 
-  const stop = async () => {
+  const stop = async ({ discardPending = false } = {}) => {
     if (stopPromise) return stopPromise
     stopPromise = (async () => {
       stopping = true
@@ -998,10 +998,15 @@ export function attachNetworkObserver(target, {
       detachPageDiagnostics()
 
       const pendingAtSeal = states.size
+      const discardedPending = discardPending ? pendingAtSeal : 0
       for (const candidate of [...deferredFailures]) flushDeferredFailure(candidate)
       for (const group of [...diagnosticGroups.values()]) flushDiagnosticGroup(group)
       for (const state of [...states.values()]) {
         if (state.finalized) continue
+        if (discardPending) {
+          retireState(state)
+          continue
+        }
         const response = state.response
         completeState(state, applyDiagnostics({
           ...commonEntry(state, response),
@@ -1027,6 +1032,7 @@ export function attachNetworkObserver(target, {
           sealedAt: sealedAt.toISOString(),
           durationMs: Math.max(0, sealedAt.getTime() - observerStartedAt.getTime()),
           pendingAtSeal,
+          discardedPending,
           api: summarizeEntries(api),
           resources: summarizeEntries(resources),
         },

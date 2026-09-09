@@ -13,15 +13,19 @@ import {
 } from './script-request-url'
 
 describe('script request URL', () => {
-  it('enables linked URL configuration for submission and reply editing scripts', () => {
+  it('enables linked URL configuration for submission, reply editing, and translation scripts', () => {
     expect(supportsScriptRequestPath('form-lpxavn-submit')).toBe(true)
     expect(supportsScriptRequestPath('form-all-fields-submit')).toBe(true)
     expect(supportsScriptRequestPath('form-submission-reply-edit')).toBe(true)
+    expect(supportsScriptRequestPath('form-multilingual-translation-publish')).toBe(true)
     expect(supportsScriptRequestPath('form-all-fields-publish')).toBe(false)
     expect(defaultRequestPathForScript('form-lpxavn-submit')).toBe('/form/?id={{FORM_ID}}')
     expect(defaultRequestPathForScript('form-all-fields-submit')).toBe('/form/?id={{FORM_ID}}')
     expect(defaultRequestPathForScript('form-submission-reply-edit')).toBe(
       '/form-activity/submission/preview/reply/{{SUBMISSION_ID}}?fid={{FORM_ID}}',
+    )
+    expect(defaultRequestPathForScript('form-multilingual-translation-publish')).toBe(
+      '/form-activity/translation?id={{FORM_ID}}',
     )
   })
 
@@ -33,11 +37,14 @@ describe('script request URL', () => {
     expect(publicOriginForEnvironment('https://public.example.test/base')).toBe('https://public.example.test')
   })
 
-  it('uses the admin origin for submission reply editing only', () => {
+  it('uses the admin origin for submission reply editing and multilingual translation', () => {
     const siteBaseUrl = 'https://lx.admin.lingxi.tech/console'
     expect(requestOriginForScript('form-lpxavn-submit', siteBaseUrl)).toBe('https://lx.lingxi.tech')
     expect(requestOriginForScript('form-all-fields-submit', siteBaseUrl)).toBe('https://lx.lingxi.tech')
     expect(requestOriginForScript('form-submission-reply-edit', siteBaseUrl)).toBe(
+      'https://lx.admin.lingxi.tech',
+    )
+    expect(requestOriginForScript('form-multilingual-translation-publish', siteBaseUrl)).toBe(
       'https://lx.admin.lingxi.tech',
     )
     expect(buildScriptRequestUrl(
@@ -47,6 +54,14 @@ describe('script request URL', () => {
       { SUBMISSION_ID: 'lpXAWZ', FORM_ID: 'lg2bkk' },
     )).toBe(
       'https://lx.admin.lingxi.tech/form-activity/submission/preview/reply/lpXAWZ?fid=lg2bkk',
+    )
+    expect(buildScriptRequestUrl(
+      'form-multilingual-translation-publish',
+      siteBaseUrl,
+      '/form-activity/translation?id={{FORM_ID}}',
+      { FORM_ID: 'dynamic-form-id' },
+    )).toBe(
+      'https://lx.admin.lingxi.tech/form-activity/translation?id=dynamic-form-id',
     )
   })
 

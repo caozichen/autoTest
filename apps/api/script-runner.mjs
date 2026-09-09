@@ -15,8 +15,12 @@ import {
   assertSafeScriptConfigId,
   resolveScriptEntryUrl,
 } from './script-config-repository.mjs'
+import {
+  ScriptUnhandledRejectionError,
+  runWithScriptRejectionBoundary,
+} from './script-rejection-boundary.mjs'
 
-const DEFAULT_ABORT_CLEANUP_TIMEOUT_MS = 3_000
+export const DEFAULT_ABORT_CLEANUP_TIMEOUT_MS = 15_000
 const MAX_API_RESPONSES = 500
 const MAX_RESOURCE_RESPONSES = 2_000
 const MAX_NETWORK_FAILURE_LOGS = 200
@@ -325,7 +329,7 @@ function cancellationReason(signal) {
   return '用户强制停止运行'
 }
 
-function createAbortGate(signal, logger, secrets, isTimeout) {
+function createAbortGate(signal, logger, secrets, terminalCause) {
   if (!signal) return null
 
   let rejectGate
@@ -336,11 +340,13 @@ function createAbortGate(signal, logger, secrets, isTimeout) {
   const abort = () => {
     if (abortError) return
     const reason = sanitizeErrorMessage(cancellationReason(signal), secrets)
+    const cause = terminalCause()
     abortError = new Error(reason)
-    abortError.name = isTimeout() ? 'TimeoutError' : 'AbortError'
-    logger(isTimeout() ? 'error' : 'warning', isTimeout()
-      ? `执行超时：${reason}`
-      : `执行已取消：${reason}`)
+    abortError.name = cause === 'timeout' ? 'TimeoutError' : 'AbortError'
+    if (cause === 'timeout') logger('error', `执行超时：${reason}`)
+    else if (cause === 'unhandled-rejection') {
+      logger('error', `执行因未处理的异步错误终止：${reason}`)
+    } else logger('warning', `执行已取消：${reason}`)
     rejectGate(abortError)
   }
 
@@ -607,6 +613,7 @@ export async function executeRegisteredScript(payload, {
     scriptsDirectory,
   })
   const context = validateRunRequest({ ...payload, timeoutMs: config.timeoutMs })
+  const secrets = [context.extraHTTPHeaders.Authorization]
   const attemptId = payload.runId ?? randomUUID()
   const artifactWriter = artifactWriterFactory({
     rootDirectory: artifactRootDirectory,
@@ -633,7 +640,9 @@ export async function executeRegisteredScript(payload, {
   const startedAt = performance.now()
   const executionDeadline = startedAt + context.timeoutMs
   const executionController = new AbortController()
-  let timedOut = false
+  let terminalCause = null
+  let unhandledRejectionError = null
+  let finalizedResult = null
   let networkHealthSealed = false
   let networkFailedAssertionCount = 0
   let networkFailureLogCount = 0
@@ -677,11 +686,11 @@ export async function executeRegisteredScript(payload, {
         `制品捕获清理超过 ${boundedSealTimeoutMs} ms，已放弃 ${sealed.abandonedCaptureCount} 个未完成制品`,
       )
     }
-    if (!timedOut && performance.now() >= executionDeadline) {
-      timedOut = true
+    if (!terminalCause && performance.now() >= executionDeadline) {
+      terminalCause = 'timeout'
       executionController.abort(new Error(timeoutMessage))
     }
-    const finalTerminalResult = timedOut
+    let finalTerminalResult = terminalCause === 'timeout'
       ? {
           ok: false,
           timedOut: true,
@@ -689,7 +698,18 @@ export async function executeRegisteredScript(payload, {
           error: timeoutMessage,
         }
       : terminalResult
-    return {
+    if (terminalCause === 'unhandled-rejection') {
+      finalTerminalResult = {
+        ...terminalResult,
+        ok: false,
+        status: 'failed',
+        error: sanitizeErrorMessage(unhandledRejectionError, secrets),
+      }
+      delete finalTerminalResult.cancelled
+      delete finalTerminalResult.timedOut
+      delete finalTerminalResult.continuePipeline
+    }
+    finalizedResult = {
       ...finalTerminalResult,
       durationMs: Math.round(performance.now() - startedAt),
       logs,
@@ -702,9 +722,9 @@ export async function executeRegisteredScript(payload, {
       },
       artifacts: sealed.artifacts,
     }
+    return finalizedResult
   }
 
-  const secrets = [context.extraHTTPHeaders.Authorization]
   const recordAssertion = (assertion) => {
     assertions.push({
       sequence: assertions.length + 1,
@@ -779,38 +799,67 @@ export async function executeRegisteredScript(payload, {
   }
   const recordApiResponse = (response) => recordNetworkResponse(response, 'api')
   const recordResourceResponse = (response) => recordNetworkResponse(response, 'resource')
-  const relayExternalAbort = () => executionController.abort(signal?.reason)
+  const relayExternalAbort = () => {
+    if (!terminalCause) terminalCause = 'cancel'
+    if (terminalCause === 'cancel') executionController.abort(signal?.reason)
+  }
   if (signal?.aborted) relayExternalAbort()
   else signal?.addEventListener('abort', relayExternalAbort, { once: true })
   const timeoutId = setTimeout(() => {
-    timedOut = true
+    if (terminalCause) return
+    terminalCause = 'timeout'
     executionController.abort(new Error(timeoutMessage))
   }, Math.max(0, executionDeadline - performance.now()))
   const abortGate = createAbortGate(
     executionController.signal,
     logger,
     secrets,
-    () => timedOut,
+    () => terminalCause,
   )
   let scriptRunPromise = null
 
   try {
-    const scriptModule = await waitWithAbort(loadScript(scriptUrl), abortGate)
-    if (typeof scriptModule.run !== 'function') throw new Error('脚本入口未导出 run 函数')
-    scriptRunPromise = Promise.resolve().then(() => runWithAssertionRecorder(
-      context.scriptId,
-      recordAssertion,
-      () => scriptModule.run({
-        ...context,
-        scriptName: config.name,
-        artifactWriter,
-        logger,
-        signal: executionController.signal,
-        recordApiResponse,
-        recordResourceResponse,
-      }),
-    ))
-    const result = await waitWithAbort(scriptRunPromise, abortGate)
+    const result = await runWithScriptRejectionBoundary(async () => {
+      const scriptImportUrl = new URL(scriptUrl)
+      scriptImportUrl.searchParams.set('runner-attempt', attemptId)
+      const scriptModule = await waitWithAbort(loadScript(scriptImportUrl), abortGate)
+      if (typeof scriptModule.run !== 'function') throw new Error('脚本入口未导出 run 函数')
+      scriptRunPromise = Promise.resolve().then(() => runWithAssertionRecorder(
+        context.scriptId,
+        recordAssertion,
+        () => scriptModule.run({
+          ...context,
+          scriptName: config.name,
+          artifactWriter,
+          logger,
+          signal: executionController.signal,
+          recordApiResponse,
+          recordResourceResponse,
+        }),
+      ))
+      return waitWithAbort(scriptRunPromise, abortGate)
+    }, {
+      onUnhandledRejection: (error, { late }) => {
+        if (unhandledRejectionError) return
+        unhandledRejectionError = error
+        const message = sanitizeErrorMessage(error, secrets)
+        if (late && finalizedResult) {
+          console.error(
+            `[runner] UNHANDLED_REJECTION_LATE：脚本 ${context.scriptId} `
+            + `运行 ${attemptId} 完成后捕获到异步错误；为保持结果一致未改写已返回结果`,
+          )
+          return
+        }
+        if (terminalCause && terminalCause !== 'unhandled-rejection') {
+          logger('warning', `脚本终止清理期间捕获到未处理的异步错误：${message}`)
+          return
+        }
+
+        terminalCause = 'unhandled-rejection'
+        if (late) logger('error', `脚本结束后捕获到未处理的异步错误：${message}`)
+        if (!executionController.signal.aborted) executionController.abort(error)
+      },
+    })
     if (executionController.signal.aborted) throw abortGate?.error()
     const scriptFailedAssertions = assertions.filter((assertion) => assertion.status === 'failed').length
     const networkFailedAssertions = sealNetworkHealthAssertions()
@@ -824,7 +873,7 @@ export async function executeRegisteredScript(payload, {
       })
       return await finalizeResult({
         ok: false,
-        status: 'failed',
+        status: 'partial',
         continuePipeline: true,
         result,
         error: message,
@@ -832,9 +881,31 @@ export async function executeRegisteredScript(payload, {
     }
     return await finalizeResult({
       ok: true,
+      status: 'passed',
       result,
     })
   } catch (error) {
+    if (terminalCause === 'unhandled-rejection') {
+      const cleanupDeadline = performance.now() + abortCleanupTimeoutMs
+      if (scriptRunPromise) {
+        const cleanupSettled = await waitForSettlement(scriptRunPromise, abortCleanupTimeoutMs)
+        if (!cleanupSettled) {
+          logger(
+            'warning',
+            `异步错误后的脚本清理超过 ${abortCleanupTimeoutMs} ms，Runner 已停止等待`,
+          )
+        }
+      }
+      const artifactSealTimeoutMs = Math.max(0, Math.ceil(cleanupDeadline - performance.now()))
+      return await finalizeResult({
+        ok: false,
+        status: 'failed',
+        error: sanitizeErrorMessage(
+          unhandledRejectionError ?? new ScriptUnhandledRejectionError(error),
+          secrets,
+        ),
+      }, artifactSealTimeoutMs)
+    }
     if (abortGate?.wasTriggered(error)) {
       const cleanupDeadline = performance.now() + abortCleanupTimeoutMs
       if (scriptRunPromise) {
@@ -847,7 +918,7 @@ export async function executeRegisteredScript(payload, {
         }
       }
       const artifactSealTimeoutMs = Math.max(0, Math.ceil(cleanupDeadline - performance.now()))
-      if (timedOut) {
+      if (terminalCause === 'timeout') {
         return await finalizeResult({
           ok: false,
           timedOut: true,
@@ -866,6 +937,7 @@ export async function executeRegisteredScript(payload, {
     logger('error', `执行失败：${message}`)
     return await finalizeResult({
       ok: false,
+      status: 'failed',
       error: message,
     })
   } finally {

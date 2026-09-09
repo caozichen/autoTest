@@ -1,13 +1,20 @@
 export const LPXAVN_SCRIPT_ID = 'form-lpxavn-submit'
 export const ALL_FIELDS_SUBMIT_SCRIPT_ID = 'form-all-fields-submit'
 export const SUBMISSION_REPLY_EDIT_SCRIPT_ID = 'form-submission-reply-edit'
+export const MULTILINGUAL_TRANSLATION_PUBLISH_SCRIPT_ID = 'form-multilingual-translation-publish'
 export const DEFAULT_LPXAVN_REQUEST_PATH = '/form/?id={{FORM_ID}}'
 export const DEFAULT_ALL_FIELDS_REQUEST_PATH = '/form/?id={{FORM_ID}}'
 export const DEFAULT_SUBMISSION_REPLY_EDIT_REQUEST_PATH = '/form-activity/submission/preview/reply/{{SUBMISSION_ID}}?fid={{FORM_ID}}'
+export const DEFAULT_MULTILINGUAL_TRANSLATION_PUBLISH_REQUEST_PATH = '/form-activity/translation?id={{FORM_ID}}'
 const REQUEST_PATH_SCRIPT_IDS = new Set([
   LPXAVN_SCRIPT_ID,
   ALL_FIELDS_SUBMIT_SCRIPT_ID,
   SUBMISSION_REPLY_EDIT_SCRIPT_ID,
+  MULTILINGUAL_TRANSLATION_PUBLISH_SCRIPT_ID,
+])
+const ADMIN_REQUEST_PATH_SCRIPT_IDS = new Set([
+  SUBMISSION_REPLY_EDIT_SCRIPT_ID,
+  MULTILINGUAL_TRANSLATION_PUBLISH_SCRIPT_ID,
 ])
 const VARIABLE_PATTERN = /{{\s*([^{}]+?)\s*}}/g
 
@@ -26,11 +33,16 @@ export function defaultRequestPathForScript(scriptId?: string): string {
   if (scriptId === LPXAVN_SCRIPT_ID) return DEFAULT_LPXAVN_REQUEST_PATH
   if (scriptId === ALL_FIELDS_SUBMIT_SCRIPT_ID) return DEFAULT_ALL_FIELDS_REQUEST_PATH
   if (scriptId === SUBMISSION_REPLY_EDIT_SCRIPT_ID) return DEFAULT_SUBMISSION_REPLY_EDIT_REQUEST_PATH
+  if (scriptId === MULTILINGUAL_TRANSLATION_PUBLISH_SCRIPT_ID) {
+    return DEFAULT_MULTILINGUAL_TRANSLATION_PUBLISH_REQUEST_PATH
+  }
   return ''
 }
 
 export function requestOriginModeForScript(scriptId?: string): ScriptRequestOriginMode {
-  return scriptId === SUBMISSION_REPLY_EDIT_SCRIPT_ID ? 'admin' : 'public'
+  return typeof scriptId === 'string' && ADMIN_REQUEST_PATH_SCRIPT_IDS.has(scriptId)
+    ? 'admin'
+    : 'public'
 }
 
 function pathWithoutVariableWhitespace(value: string): string {

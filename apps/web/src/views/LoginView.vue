@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { reactive, ref } from 'vue'
-import { Lock, Monitor, User } from '@element-plus/icons-vue'
+import { Lock, User } from '@element-plus/icons-vue'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -51,10 +51,10 @@ async function submit(): Promise<void> {
     <section class="login-card" aria-labelledby="login-title">
       <div class="login-brand">
         <div class="login-brand__identity">
-          <span class="login-brand__mark"><el-icon :size="22"><Monitor /></el-icon></span>
+          <img class="login-brand__mark" src="/brand-mark.svg" alt="" />
           <div>
-            <strong>AutoTest</strong>
-            <span>自动化测试平台</span>
+            <strong>自动化测试平台</strong>
+            <span>本地自动化执行工作台</span>
           </div>
         </div>
         <span class="login-brand__mode">本地模式</span>
@@ -85,7 +85,7 @@ async function submit(): Promise<void> {
       </div>
     </section>
 
-    <footer>AutoTest Platform · Local Workspace</footer>
+    <footer>自动化测试平台 · 本地工作区</footer>
   </main>
 </template>
 
@@ -143,14 +143,10 @@ async function submit(): Promise<void> {
 }
 
 .login-brand__mark {
-  display: grid;
   width: 38px;
   height: 38px;
-  place-items: center;
+  display: block;
   flex: 0 0 auto;
-  color: #fff;
-  border-radius: 6px;
-  background: var(--login-primary);
 }
 
 .login-brand__identity > div {

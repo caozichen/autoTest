@@ -3,7 +3,12 @@ import type { AutomationScript } from '@/domain/script'
 import { extractScriptResponseVariables } from '@/services/scripts/script-response-variables'
 
 function progressStatus(script: AutomationScript): UpdateRunScriptProgressDraft['status'] | null {
-  if (script.status === 'running' || script.status === 'passed' || script.status === 'failed') {
+  if (
+    script.status === 'running'
+    || script.status === 'passed'
+    || script.status === 'partial'
+    || script.status === 'failed'
+  ) {
     return script.status
   }
   return null

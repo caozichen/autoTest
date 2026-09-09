@@ -73,6 +73,7 @@ function recordFixture({
     counts: {
       total: 1,
       passed: status === 'passed' ? 1 : 0,
+      partial: status === 'partial' ? 1 : 0,
       failed: status === 'failed' ? 1 : 0,
       skipped: 0,
     },
@@ -83,7 +84,7 @@ function recordFixture({
       directory: 'scripts',
       entryFile: 'example.spec.mjs',
       tags: ['P0'],
-      status: status === 'running' ? 'queued' : status === 'passed' ? 'passed' : 'failed',
+      status: status === 'running' ? 'queued' : status === 'passed' || status === 'partial' ? status : 'failed',
       durationMs: finished ? 60_000 : null,
       logs: [{ timestamp: updatedAt, level: 'success', message: '脚本日志' }],
       assertions: [{ sequence: 1, status: 'passed', name: '断言' }],
@@ -212,6 +213,155 @@ test('normalizes legacy script records without network evidence fields', async (
   assert.deepEqual(restored.scripts[0].networkSummary, emptySummary)
   assert.equal(Object.hasOwn(legacy.scripts[0], 'resourceResponses'), false)
   assert.equal(Object.hasOwn(legacy.scripts[0], 'networkSummary'), false)
+})
+
+test('persists partial script results and exposes their count in summaries', async (t) => {
+  const directory = await temporaryRecordDirectory(t)
+  const partial = recordFixture({
+    id: 'record-partial-0001',
+    status: 'partial',
+    updatedAt: secondTime,
+  })
+  const store = createTestStore(directory)
+
+  const created = await store.create(partial)
+  const restored = await createTestStore(directory).get(partial.id)
+  const [summary] = await createTestStore(directory).list()
+
+  assert.equal(created.status, 'partial')
+  assert.equal(created.scripts[0].status, 'partial')
+  assert.deepEqual(created.counts, { total: 1, passed: 0, partial: 1, failed: 0, skipped: 0 })
+  assert.deepEqual(restored, created)
+  assert.equal(summary.status, 'partial')
+  assert.equal(summary.scripts[0].status, 'partial')
+  assert.deepEqual(summary.counts, created.counts)
+})
+
+test('normalizes legacy counts without partial while leaving the source record unchanged', async (t) => {
+  const directory = await temporaryRecordDirectory(t)
+  const legacy = recordFixture({ id: 'record-counts-legacy-0001' })
+  delete legacy.counts.partial
+
+  const created = await createTestStore(directory).create(legacy)
+  const restored = await createTestStore(directory).get(legacy.id)
+
+  assert.equal(Object.hasOwn(legacy.counts, 'partial'), false)
+  assert.deepEqual(created.counts, { total: 1, passed: 0, failed: 0, skipped: 0, partial: 0 })
+  assert.deepEqual(restored.counts, created.counts)
+})
+
+test('migrates recognizable legacy assertion failures to partial and recalculates the record', async (t) => {
+  const directory = await temporaryRecordDirectory(t)
+  const legacy = recordFixture({
+    id: 'record-assertion-legacy-0001',
+    status: 'failed',
+    updatedAt: secondTime,
+  })
+  delete legacy.counts.partial
+  legacy.scripts[0].error = '脚本已执行完成，共有 1 条断言失败'
+  legacy.scripts[0].assertions = [
+    { sequence: 1, status: 'passed', name: '页面可以提交' },
+    { sequence: 2, status: 'failed', name: '结果页内容正确' },
+  ]
+  legacy.analysis.failureGroups = [{
+    reason: legacy.scripts[0].error,
+    count: 1,
+    scriptRecordIds: [legacy.scripts[0].recordId],
+  }]
+
+  await fileSystem.writeFile(
+    join(directory, `${legacy.id}.json`),
+    `${JSON.stringify(legacy)}\n`,
+    'utf8',
+  )
+  const store = createTestStore(directory)
+  const restored = await store.get(legacy.id)
+  const [summary] = await store.list()
+
+  assert.equal(restored.status, 'partial')
+  assert.equal(restored.scripts[0].status, 'partial')
+  assert.deepEqual(restored.counts, { total: 1, passed: 0, partial: 1, failed: 0, skipped: 0 })
+  assert.equal(restored.analysis.passRate, 0)
+  assert.equal(restored.analysis.averageDurationMs, 60_000)
+  assert.equal(restored.analysis.slowestScriptRecordId, `${legacy.id}:script-001`)
+  assert.deepEqual(restored.analysis.failureGroups, [])
+  assert.equal(summary.status, 'partial')
+  assert.equal(summary.scripts[0].status, 'partial')
+  assert.deepEqual(summary.counts, restored.counts)
+  assert.equal(legacy.status, 'failed')
+  assert.equal(legacy.scripts[0].status, 'failed')
+})
+
+test('keeps runtime and timeout failures hard and makes them dominate terminal batch status', async (t) => {
+  const directory = await temporaryRecordDirectory(t)
+  const hardFailure = recordFixture({
+    id: 'record-hard-failure-0001',
+    status: 'partial',
+    updatedAt: secondTime,
+  })
+  hardFailure.scripts[0].status = 'passed'
+  hardFailure.scripts[0].error = undefined
+  hardFailure.scripts.push({
+    ...structuredClone(hardFailure.scripts[0]),
+    recordId: `${hardFailure.id}:script-002`,
+    id: 'script-002',
+    name: '运行时异常脚本',
+    status: 'failed',
+    error: '页面控件不存在',
+    artifacts: [],
+  }, {
+    ...structuredClone(hardFailure.scripts[0]),
+    recordId: `${hardFailure.id}:script-003`,
+    id: 'script-003',
+    name: '超时脚本',
+    status: 'failed',
+    error: '脚本执行超过 300000 ms，已自动终止',
+    artifacts: [],
+  })
+  hardFailure.counts = { total: 3, passed: 1, partial: 0, failed: 2, skipped: 0 }
+
+  const created = await createTestStore(directory).create(hardFailure)
+
+  assert.equal(created.status, 'failed')
+  assert.deepEqual(created.scripts.map(({ status }) => status), ['passed', 'failed', 'failed'])
+  assert.deepEqual(created.counts, hardFailure.counts)
+})
+
+test('treats skipped work as a blocked failed batch even when another script is partial', async (t) => {
+  const directory = await temporaryRecordDirectory(t)
+  const blocked = recordFixture({
+    id: 'record-partial-blocked-0001',
+    status: 'partial',
+    updatedAt: secondTime,
+  })
+  blocked.scripts[0].status = 'partial'
+  blocked.scripts.push({
+    ...structuredClone(blocked.scripts[0]),
+    recordId: `${blocked.id}:script-002`,
+    id: 'script-002',
+    name: '被阻断脚本',
+    status: 'skipped',
+    durationMs: null,
+    error: '前序步骤阻断，未执行',
+    artifacts: [],
+  })
+  blocked.counts = { total: 2, passed: 0, partial: 1, failed: 0, skipped: 1 }
+
+  const created = await createTestStore(directory).create(blocked)
+
+  assert.equal(created.status, 'failed')
+  assert.deepEqual(created.counts, blocked.counts)
+})
+
+test('rejects invalid partial counts', async (t) => {
+  const directory = await temporaryRecordDirectory(t)
+  const record = recordFixture({ id: 'record-counts-invalid-0001' })
+  record.counts.partial = -1
+
+  await assert.rejects(
+    createTestStore(directory).create(record),
+    (error) => error instanceof RunRecordStoreError && /counts\.partial/.test(error.message),
+  )
 })
 
 test('rejects inconsistent network summary counters', async (t) => {
@@ -393,7 +543,7 @@ test('persists stale running records as interrupted without deleting them', asyn
     finishedAt: recoveredAt.toISOString(),
     updatedAt: recoveredAt.toISOString(),
     durationMs: 18_000_000,
-    counts: { total: 1, passed: 0, failed: 0, skipped: 1 },
+    counts: { total: 1, passed: 0, partial: 0, failed: 0, skipped: 1 },
     scripts: [{ ...recordFixture().scripts[0], status: 'skipped' }],
     logs: [
       ...recordFixture().logs,
@@ -414,4 +564,48 @@ test('persists stale running records as interrupted without deleting them', asyn
     },
   })
   assert.deepEqual(await fileSystem.readdir(directory), ['record-0001.json'])
+})
+
+test('preserves partial results when recovering stale records and includes them in analysis', async (t) => {
+  const directory = await temporaryRecordDirectory(t)
+  const running = recordFixture({ id: 'record-stale-partial-0001' })
+  running.scripts[0].status = 'partial'
+  running.scripts[0].durationMs = 2_500
+  running.scripts.push({
+    ...structuredClone(running.scripts[0]),
+    recordId: `${running.id}:script-002`,
+    id: 'script-002',
+    name: '排队脚本',
+    status: 'queued',
+    durationMs: null,
+    logs: [],
+    assertions: [],
+    apiResponses: [],
+    resourceResponses: [],
+    networkSummary: {
+      api: { observed: 0, recorded: 0, dropped: 0, passed: 0, failed: 0, warnings: 0 },
+      resources: { observed: 0, recorded: 0, dropped: 0, passed: 0, failed: 0, warnings: 0 },
+    },
+    artifacts: [],
+  })
+  running.counts = { total: 2, passed: 0, partial: 1, failed: 0, skipped: 0 }
+  await createTestStore(directory).create(running)
+  const recoveredAt = new Date('2026-08-31T13:00:00.000Z')
+
+  const recovered = await new RunRecordFileStore({
+    directory,
+    now: () => recoveredAt,
+    logIdFactory: () => 'recovery-log-partial-001',
+  }).get(running.id)
+
+  assert.equal(recovered.status, 'interrupted')
+  assert.deepEqual(recovered.scripts.map(({ status }) => status), ['partial', 'skipped'])
+  assert.deepEqual(recovered.counts, { total: 2, passed: 0, partial: 1, failed: 0, skipped: 1 })
+  assert.deepEqual(recovered.analysis, {
+    passRate: 0,
+    averageDurationMs: 2_500,
+    slowestScriptRecordId: `${running.id}:script-001`,
+    logCounts: { info: 1, success: 0, warning: 1, error: 0 },
+    failureGroups: [],
+  })
 })

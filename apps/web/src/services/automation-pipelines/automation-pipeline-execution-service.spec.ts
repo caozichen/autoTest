@@ -97,7 +97,9 @@ function script(
     entryFile: `${id}.spec.ts`,
     responseVariableBindings: structuredClone(responseVariableBindings),
     tags: [],
-    status: result ? (result.ok ? 'passed' : 'failed') : 'ready',
+    status: result
+      ? result.status === 'partial' ? 'partial' : result.ok ? 'passed' : 'failed'
+      : 'ready',
     updatedAt: '2026-08-12 10:00',
     lastRunAt: null,
     lastDuration: null,
@@ -108,6 +110,7 @@ function script(
 function success(output?: Record<string, unknown>): ScriptRunResult {
   return {
     ok: true,
+    status: 'passed',
     durationMs: 100,
     logs: [{ timestamp: '2026-08-12T10:00:01.000Z', level: 'success', message: 'passed' }],
     ...(output ? { output } : {}),
@@ -129,9 +132,18 @@ const formArtifact = {
 function failed(message: string): ScriptRunResult {
   return {
     ok: false,
+    status: 'failed',
     durationMs: 50,
     logs: [{ timestamp: '2026-08-12T10:00:02.000Z', level: 'error', message }],
     error: message,
+  }
+}
+
+function partial(message: string): ScriptRunResult {
+  return {
+    ...failed(message),
+    status: 'partial',
+    continuePipeline: true,
   }
 }
 
@@ -408,8 +420,8 @@ describe('LocalAutomationPipelineExecutionService', () => {
 
     expect(fixture.contexts.map((item) => item.id)).toEqual(['create', 'publish'])
     expect(record).toMatchObject({
-      status: 'partial',
-      counts: { total: 3, passed: 1, failed: 1, skipped: 1 },
+      status: 'failed',
+      counts: { total: 3, passed: 1, partial: 0, failed: 1, skipped: 1 },
       scripts: [
         { id: 'create', status: 'passed' },
         { id: 'publish', status: 'failed', error: 'publish execution failed' },
@@ -419,11 +431,35 @@ describe('LocalAutomationPipelineExecutionService', () => {
     expect(fixture.runtimeVariables.list()).toEqual([])
   })
 
+  it('lets an explicit failed status override a stale continuation hint', async () => {
+    const fixture = executionFixture({
+      create: {
+        ...failed('创建步骤发生严重执行错误'),
+        continuePipeline: true,
+        output: { data: { form: { id: '123', code: 'FORM-001' } } },
+      },
+      publish: success({ status: 'published' }),
+      verify: success({ visible: true }),
+    })
+
+    const record = await fixture.service.run(pipeline())
+
+    expect(fixture.contexts.map((item) => item.id)).toEqual(['create'])
+    expect(record).toMatchObject({
+      status: 'failed',
+      counts: { total: 3, passed: 0, partial: 0, failed: 1, skipped: 2 },
+      scripts: [
+        { id: 'create', status: 'failed', error: '创建步骤发生严重执行错误' },
+        { id: 'publish', status: 'skipped' },
+        { id: 'verify', status: 'skipped' },
+      ],
+    })
+  })
+
   it('records a network assertion failure and continues when Runner explicitly allows it', async () => {
     const fixture = executionFixture({
       create: {
-        ...failed('资源加载健康检查失败'),
-        continuePipeline: true,
+        ...partial('资源加载健康检查失败'),
         output: { data: { form: { id: '123', code: 'FORM-001', contract: { version: 1 } } } },
       },
       publish: success({ status: 'published' }),
@@ -440,9 +476,9 @@ describe('LocalAutomationPipelineExecutionService', () => {
     })
     expect(record).toMatchObject({
       status: 'partial',
-      counts: { total: 3, passed: 2, failed: 1, skipped: 0 },
+      counts: { total: 3, passed: 2, partial: 1, failed: 0, skipped: 0 },
       scripts: [
-        { id: 'create', status: 'failed', error: '资源加载健康检查失败' },
+        { id: 'create', status: 'partial', error: '资源加载健康检查失败' },
         { id: 'publish', status: 'passed' },
         { id: 'verify', status: 'passed' },
       ],
@@ -455,8 +491,7 @@ describe('LocalAutomationPipelineExecutionService', () => {
         data: { form: { id: '123', code: 'FORM-001', contract: { version: 1 } } },
       }),
       publish: {
-        ...failed('表单提交业务断言失败'),
-        continuePipeline: true,
+        ...partial('表单提交业务断言失败'),
       },
       verify: success({ visible: true }),
     })
@@ -466,10 +501,10 @@ describe('LocalAutomationPipelineExecutionService', () => {
     expect(fixture.contexts.map((item) => item.id)).toEqual(['create', 'publish', 'verify'])
     expect(record).toMatchObject({
       status: 'partial',
-      counts: { total: 3, passed: 2, failed: 1, skipped: 0 },
+      counts: { total: 3, passed: 2, partial: 1, failed: 0, skipped: 0 },
       scripts: [
         { id: 'create', status: 'passed' },
-        { id: 'publish', status: 'failed', error: '表单提交业务断言失败' },
+        { id: 'publish', status: 'partial', error: '表单提交业务断言失败' },
         { id: 'verify', status: 'passed' },
       ],
     })
@@ -478,15 +513,13 @@ describe('LocalAutomationPipelineExecutionService', () => {
   it('continues through consecutive assertion failures without skipping the final step', async () => {
     const fixture = executionFixture({
       create: {
-        ...failed('创建步骤业务断言失败'),
-        continuePipeline: true,
+        ...partial('创建步骤业务断言失败'),
         output: {
           data: { form: { id: '123', code: 'FORM-001', contract: { version: 1 } } },
         },
       },
       publish: {
-        ...failed('发布步骤接口断言失败'),
-        continuePipeline: true,
+        ...partial('发布步骤接口断言失败'),
       },
       verify: success({ visible: true }),
     })
@@ -498,10 +531,10 @@ describe('LocalAutomationPipelineExecutionService', () => {
     expect(fixture.contexts[2]?.context.variables).toMatchObject({ FORM_CODE: 'FORM-001' })
     expect(record).toMatchObject({
       status: 'partial',
-      counts: { total: 3, passed: 1, failed: 2, skipped: 0 },
+      counts: { total: 3, passed: 1, partial: 2, failed: 0, skipped: 0 },
       scripts: [
-        { id: 'create', status: 'failed', error: '创建步骤业务断言失败' },
-        { id: 'publish', status: 'failed', error: '发布步骤接口断言失败' },
+        { id: 'create', status: 'partial', error: '创建步骤业务断言失败' },
+        { id: 'publish', status: 'partial', error: '发布步骤接口断言失败' },
         { id: 'verify', status: 'passed' },
       ],
     })
@@ -538,8 +571,7 @@ describe('LocalAutomationPipelineExecutionService', () => {
   it('stops at the next mapped step when a continuable assertion failure omits its required output', async () => {
     const fixture = executionFixture({
       create: {
-        ...failed('创建步骤业务断言失败'),
-        continuePipeline: true,
+        ...partial('创建步骤业务断言失败'),
         output: { data: { form: {} } },
       },
       publish: success({ status: 'published' }),
@@ -551,9 +583,9 @@ describe('LocalAutomationPipelineExecutionService', () => {
     expect(fixture.contexts.map((item) => item.id)).toEqual(['create'])
     expect(record).toMatchObject({
       status: 'failed',
-      counts: { total: 3, passed: 0, failed: 2, skipped: 1 },
+      counts: { total: 3, passed: 0, partial: 1, failed: 1, skipped: 1 },
       scripts: [
-        { id: 'create', status: 'failed', error: '创建步骤业务断言失败' },
+        { id: 'create', status: 'partial', error: '创建步骤业务断言失败' },
         { id: 'publish', status: 'failed', error: expect.stringContaining('data.form.id') },
         { id: 'verify', status: 'skipped' },
       ],
@@ -563,8 +595,7 @@ describe('LocalAutomationPipelineExecutionService', () => {
   it('clears assertion continuation when applying a response variable throws', async () => {
     const fixture = executionFixture({
       create: {
-        ...failed('创建步骤业务断言失败'),
-        continuePipeline: true,
+        ...partial('创建步骤业务断言失败'),
         output: { data: { form: { id: '123', code: 'FORM-001', contract: {} } } },
       },
       publish: success({ status: 'published' }),
@@ -641,8 +672,8 @@ describe('LocalAutomationPipelineExecutionService', () => {
 
     expect(fixture.contexts.map((item) => item.id)).toEqual(['create', 'publish'])
     expect(record).toMatchObject({
-      status: 'partial',
-      counts: { total: 3, passed: 1, failed: 1, skipped: 1 },
+      status: 'failed',
+      counts: { total: 3, passed: 1, partial: 0, failed: 1, skipped: 1 },
       scripts: [
         { id: 'create', status: 'passed' },
         { id: 'publish', status: 'failed', error: 'Runner connection closed unexpectedly' },

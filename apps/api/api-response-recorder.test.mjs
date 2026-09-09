@@ -659,6 +659,20 @@ test('seals unfinished requests at the deadline, removes listeners, and is idemp
   assert.deepEqual(callbackErrors, [])
 })
 
+test('can discard only unfinished requests during browser teardown', async () => {
+  const context = new FakeNetworkTarget()
+  const observer = attachNetworkObserver(context, { responseDrainTimeoutMs: 20 })
+  const pendingRequest = fakeRequest({ url: 'https://example.test/api/background-poll' })
+  context.emit('request', pendingRequest)
+
+  const result = await observer.stop({ discardPending: true })
+
+  assert.equal(result.summary.pendingAtSeal, 1)
+  assert.equal(result.summary.discardedPending, 1)
+  assert.equal(result.api.length, 0)
+  assert.equal(result.resources.length, 0)
+})
+
 test('shouldRecord and subscriber exceptions never escape network event handlers', async () => {
   const context = new FakeNetworkTarget()
   const observer = attachNetworkObserver(context, {

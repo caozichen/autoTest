@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { CircleCheck, CircleClose, Clock, Document, VideoPause } from '@element-plus/icons-vue'
+import { CircleCheck, CircleClose, Clock, Document, VideoPause, Warning } from '@element-plus/icons-vue'
 
 import type { AutomationScript, ScriptLogLevel } from '@/domain/script'
 
@@ -16,6 +16,7 @@ const emit = defineEmits<{
 const result = computed(() => props.script?.lastRunResult ?? null)
 const isRunning = computed(() => props.script?.status === 'running')
 const isInterrupted = computed(() => props.script?.status === 'interrupted' || result.value?.cancelled === true)
+const isPartial = computed(() => props.script?.status === 'partial' || result.value?.status === 'partial')
 
 const logTypeMap: Record<ScriptLogLevel, 'success' | 'warning' | 'danger' | 'info'> = {
   info: 'info',
@@ -45,10 +46,10 @@ function formatDetails(details?: Record<string, unknown>): string {
     @update:model-value="emit('update:modelValue', $event)"
   >
     <div v-if="script && result" class="run-result">
-      <header :class="['result-summary', isRunning ? 'result-summary--running' : isInterrupted ? 'result-summary--interrupted' : result.ok ? 'result-summary--passed' : 'result-summary--failed']">
-        <el-icon :size="28"><Clock v-if="isRunning" /><VideoPause v-else-if="isInterrupted" /><CircleCheck v-else-if="result.ok" /><CircleClose v-else /></el-icon>
+      <header :class="['result-summary', isRunning ? 'result-summary--running' : isInterrupted ? 'result-summary--interrupted' : isPartial ? 'result-summary--partial' : result.ok ? 'result-summary--passed' : 'result-summary--failed']">
+        <el-icon :size="28"><Clock v-if="isRunning" /><VideoPause v-else-if="isInterrupted" /><Warning v-else-if="isPartial" /><CircleCheck v-else-if="result.ok" /><CircleClose v-else /></el-icon>
         <div>
-          <strong>{{ isRunning ? '执行中' : isInterrupted ? '已强制停止' : result.ok ? '执行通过' : '执行失败' }}</strong>
+          <strong>{{ isRunning ? '执行中' : isInterrupted ? '已强制停止' : isPartial ? '部分通过' : result.ok ? '执行通过' : '执行失败' }}</strong>
           <span>{{ script.name }}</span>
         </div>
         <p><el-icon><Clock /></el-icon>{{ result.durationMs }} ms</p>
@@ -99,6 +100,7 @@ function formatDetails(details?: Record<string, unknown>): string {
 }
 
 .result-summary--passed { color: var(--color-success, #16a34a); border-left-color: var(--color-success, #16a34a); background: #f0fdf4; }
+.result-summary--partial { color: var(--color-partial-ink, #1f2a44); border-left-color: var(--color-partial, #FFD700); background: var(--color-partial-soft, #fffbe6); }
 .result-summary--running { color: var(--color-warning, #d97706); border-left-color: var(--color-warning, #d97706); background: #fffbeb; }
 .result-summary--interrupted { color: var(--color-text-secondary, #64748b); border-left-color: var(--color-text-muted, #94a3b8); background: var(--color-bg-subtle, #f8fafc); }
 .result-summary--failed { color: var(--color-danger, #dc2626); border-left-color: var(--color-danger, #dc2626); background: #fef2f2; }

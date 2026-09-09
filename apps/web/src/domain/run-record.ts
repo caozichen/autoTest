@@ -7,7 +7,7 @@ import type {
 } from './script'
 
 export type RunRecordStatus = 'running' | 'passed' | 'failed' | 'partial' | 'interrupted'
-export type RunScriptStatus = 'queued' | 'running' | 'passed' | 'failed' | 'skipped'
+export type RunScriptStatus = 'queued' | 'running' | 'passed' | 'partial' | 'failed' | 'skipped'
 export type RunRecordLogLevel = 'info' | 'success' | 'warning' | 'error'
 export type RunRecordLogScope = 'batch' | 'login' | 'runner' | 'script'
 export type RunFailureStage = 'login' | 'runner' | 'script'
@@ -55,6 +55,7 @@ export interface RunScriptRecord extends RunScriptSnapshot {
 export interface RunRecordCounts {
   total: number
   passed: number
+  partial: number
   failed: number
   skipped: number
 }
@@ -123,7 +124,7 @@ export interface CompleteRunScriptDraft {
 
 export interface UpdateRunScriptProgressDraft {
   scriptId: string
-  status: Extract<RunScriptStatus, 'running' | 'passed' | 'failed'>
+  status: Extract<RunScriptStatus, 'running' | 'passed' | 'partial' | 'failed'>
   durationMs: number
   logs: CompleteRunScriptDraft['logs']
   assertions?: ScriptAssertionResult[]

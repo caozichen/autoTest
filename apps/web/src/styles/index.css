@@ -26,6 +26,9 @@
   --color-bg-subtle: #f8faff;
   --color-success: #2e9f6b;
   --color-warning: #d88c23;
+  --color-partial: #FFD700;
+  --color-partial-ink: #1f2a44;
+  --color-partial-soft: #fffbe6;
   --color-danger: #e2555d;
   --shadow-card: 0 8px 24px rgb(31 42 68 / 5%);
   --radius-card: 8px;
@@ -66,6 +69,19 @@
   --el-component-size-large: 42px;
   --el-component-size: 38px;
   --el-component-size-small: 32px;
+}
+
+.el-tag.status-tag--partial {
+  --el-tag-bg-color: var(--color-partial);
+  --el-tag-border-color: var(--color-partial);
+  --el-tag-hover-color: var(--color-partial);
+  --el-tag-text-color: var(--color-partial-ink);
+}
+
+.el-message.status-message--partial {
+  --el-message-bg-color: var(--color-partial);
+  --el-message-border-color: var(--color-partial);
+  --el-message-text-color: var(--color-partial-ink);
 }
 
 * {

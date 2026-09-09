@@ -5,11 +5,12 @@ import { isAbsolute, join } from 'node:path'
 export const SAFE_RUN_RECORD_ID_PATTERN = /^[a-zA-Z0-9_-]{8,100}$/
 
 const RUN_RECORD_STATUSES = new Set(['running', 'passed', 'failed', 'partial', 'interrupted'])
-const RUN_SCRIPT_STATUSES = new Set(['queued', 'running', 'passed', 'failed', 'skipped'])
+const RUN_SCRIPT_STATUSES = new Set(['queued', 'running', 'passed', 'partial', 'failed', 'skipped'])
 const DEFAULT_STALE_AFTER_MS = 4 * 60 * 60 * 1_000
 const ARTIFACT_SCOPE_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$/
 const ARTIFACT_TYPE_PATTERN = /^[a-zA-Z][a-zA-Z0-9_-]{0,99}$/
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f-\u009f]/
+const LEGACY_ASSERTION_FAILURE_PATTERN = /^脚本已执行完成，共有 \d+ 条断言失败$/
 
 export class RunRecordStoreError extends Error {
   constructor(message, { statusCode = 400, code = 'INVALID_RUN_RECORD' } = {}) {
@@ -194,6 +195,7 @@ function validateEnvironment(environment) {
 function validateCounts(counts) {
   if (!isObject(counts)) throw new RunRecordStoreError('counts必须是对象')
   for (const key of ['total', 'passed', 'failed', 'skipped']) assertCount(counts[key], `counts.${key}`)
+  if (counts.partial !== undefined) assertCount(counts.partial, 'counts.partial')
 }
 
 export function validateRunRecord(value) {
@@ -226,10 +228,26 @@ export function validateRunRecord(value) {
 
   try {
     const record = JSON.parse(JSON.stringify(value))
+    let migratedLegacyAssertionFailure = false
     for (const script of record.scripts) {
+      if (
+        script.status === 'failed'
+        && typeof script.error === 'string'
+        && LEGACY_ASSERTION_FAILURE_PATTERN.test(script.error.trim())
+      ) {
+        script.status = 'partial'
+        migratedLegacyAssertionFailure = true
+      }
       script.resourceResponses ??= []
       script.networkSummary ??= emptyNetworkSummary()
       script.artifacts ??= []
+    }
+    record.counts = recoveredCounts(record.scripts)
+    if (record.status !== 'running' && record.status !== 'interrupted') {
+      record.status = recoveredTerminalStatus(record.scripts)
+    }
+    if (migratedLegacyAssertionFailure) {
+      record.analysis = recoveredAnalysis(record.scripts, record.logs)
     }
     return record
   } catch {
@@ -295,13 +313,27 @@ function recoveredCounts(scripts) {
   return {
     total: scripts.length,
     passed: scripts.filter((script) => script.status === 'passed').length,
+    partial: scripts.filter((script) => script.status === 'partial').length,
     failed: scripts.filter((script) => script.status === 'failed').length,
     skipped: scripts.filter((script) => script.status === 'skipped').length,
   }
 }
 
+function recoveredTerminalStatus(scripts) {
+  if (scripts.some((script) => (
+    script.status === 'queued'
+    || script.status === 'running'
+    || script.status === 'failed'
+    || script.status === 'skipped'
+  ))) return 'failed'
+  if (scripts.some((script) => script.status === 'partial')) return 'partial'
+  return scripts.every((script) => script.status === 'passed') ? 'passed' : 'failed'
+}
+
 function recoveredAnalysis(scripts, logs) {
-  const completed = scripts.filter((script) => script.status === 'passed' || script.status === 'failed')
+  const completed = scripts.filter((script) => (
+    script.status === 'passed' || script.status === 'partial' || script.status === 'failed'
+  ))
   const durations = completed.map((script) => script.durationMs ?? 0)
   const slowest = [...completed].sort((left, right) => (right.durationMs ?? 0) - (left.durationMs ?? 0))[0]
   const failureMap = new Map()

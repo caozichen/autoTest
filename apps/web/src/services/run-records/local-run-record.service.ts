@@ -30,7 +30,14 @@ const LEGACY_SEED_IDS = new Set(['seed-batch-001', 'seed-batch-002', 'seed-batch
 const REDACTED = '[REDACTED]'
 const SENSITIVE_KEY = /authorization|token|password|passwd|secret|cookie|verify[_-]?code|mobile/i
 const STATUS_VALUES: RunRecordStatus[] = ['running', 'passed', 'failed', 'partial', 'interrupted']
-const SCRIPT_STATUS_VALUES: RunScriptRecord['status'][] = ['queued', 'running', 'passed', 'failed', 'skipped']
+const SCRIPT_STATUS_VALUES: RunScriptRecord['status'][] = [
+  'queued',
+  'running',
+  'passed',
+  'partial',
+  'failed',
+  'skipped',
+]
 const LOG_LEVEL_VALUES: RunRecordLogLevel[] = ['info', 'success', 'warning', 'error']
 const LOG_SCOPE_VALUES: RunRecordLog['scope'][] = ['batch', 'login', 'runner', 'script']
 const ASSERTION_STATUS_VALUES: ScriptAssertionStatus[] = ['passed', 'failed']
@@ -316,6 +323,11 @@ function normalizeStoredScript(value: unknown): RunScriptRecord | null {
         .map(normalizeStoredArtifact)
         .filter((artifact): artifact is ScriptArtifact => Boolean(artifact))
     : []
+  const status = value.status === 'failed'
+    && typeof value.error === 'string'
+    && /^脚本已执行完成，共有 \d+ 条断言失败$/.test(value.error)
+    ? 'partial'
+    : value.status as RunScriptRecord['status']
   return {
     recordId: value.recordId,
     id: value.id,
@@ -323,7 +335,7 @@ function normalizeStoredScript(value: unknown): RunScriptRecord | null {
     directory: value.directory,
     entryFile: value.entryFile,
     tags: [...value.tags] as string[],
-    status: value.status as RunScriptRecord['status'],
+    status,
     durationMs: value.durationMs as number | null,
     logs,
     assertions,
@@ -437,7 +449,9 @@ function emptyLogCounts(): Record<RunRecordLogLevel, number> {
 }
 
 function createAnalysis(scripts: RunScriptRecord[], logs: RunRecordLog[]): RunRecordAnalysis {
-  const completed = scripts.filter((script) => script.status === 'passed' || script.status === 'failed')
+  const completed = scripts.filter((script) => (
+    script.status === 'passed' || script.status === 'partial' || script.status === 'failed'
+  ))
   const durations = completed.map((script) => script.durationMs ?? 0)
   const slowest = [...completed].sort((left, right) => (right.durationMs ?? 0) - (left.durationMs ?? 0))[0]
   const failureMap = new Map<string, string[]>()
@@ -471,16 +485,21 @@ function createCounts(scripts: RunScriptRecord[]) {
   return {
     total: scripts.length,
     passed: scripts.filter((script) => script.status === 'passed').length,
+    partial: scripts.filter((script) => script.status === 'partial').length,
     failed: scripts.filter((script) => script.status === 'failed').length,
     skipped: scripts.filter((script) => script.status === 'skipped').length,
   }
 }
 
 function batchStatus(scripts: RunScriptRecord[]): RunRecordStatus {
-  const passed = scripts.filter((script) => script.status === 'passed').length
-  const failed = scripts.filter((script) => script.status === 'failed').length
-  if (failed === 0 && passed === scripts.length) return 'passed'
-  if (passed > 0 && failed > 0) return 'partial'
+  if (scripts.some((script) => (
+    script.status === 'queued'
+    || script.status === 'running'
+    || script.status === 'failed'
+    || script.status === 'skipped'
+  ))) return 'failed'
+  if (scripts.some((script) => script.status === 'partial')) return 'partial'
+  if (scripts.every((script) => script.status === 'passed')) return 'passed'
   return 'failed'
 }
 
@@ -638,7 +657,9 @@ export class LocalRunRecordService implements RunRecordService {
       {
         id: this.idFactory(),
         timestamp: finishedAt,
-        level: record.scripts.some((script) => script.status === 'failed' || script.status === 'skipped')
+        level: record.scripts.some((script) => (
+          script.status === 'partial' || script.status === 'failed' || script.status === 'skipped'
+        ))
           ? 'warning'
           : 'success',
         scope: 'batch',

@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title id="title">自动化测试平台</title>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#1d4ed8" />
+  <path
+    d="M15.5 16.5h33a3 3 0 0 1 3 3v21a3 3 0 0 1-3 3h-33a3 3 0 0 1-3-3v-21a3 3 0 0 1 3-3Z"
+    fill="none"
+    stroke="#ffffff"
+    stroke-width="3"
+  />
+  <path d="M13.5 23.5h37" fill="none" stroke="#ffffff" stroke-opacity="0.42" stroke-width="3" />
+  <circle cx="18.5" cy="20" r="1.45" fill="#ffffff" />
+  <circle cx="23.5" cy="20" r="1.45" fill="#ffffff" fill-opacity="0.68" />
+  <path
+    d="m21.5 32 6.2 6.1 14.8-13.6"
+    fill="none"
+    stroke="#69e0b4"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    stroke-width="4"
+  />
+  <path d="M32 43.5V50m-7 0h14" fill="none" stroke="#ffffff" stroke-linecap="round" stroke-width="3" />
+</svg>

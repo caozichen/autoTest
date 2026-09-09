@@ -334,6 +334,32 @@ test('executes a custom script with its persistent timeout instead of client ove
   })
 })
 
+test('loads the current registered script source for each execution attempt', async (t) => {
+  const scriptsDirectory = await temporaryScriptsDirectory(t)
+  const config = registeredConfig()
+  const entryPath = join(scriptsDirectory, config.entryFile)
+  const options = {
+    scriptsDirectory,
+    scriptConfigRepository: { get: async () => config },
+  }
+
+  const first = await executeRegisteredScript({
+    ...validRunPayload(config.id),
+    runId: 'attempt-current-source-001',
+  }, options)
+  assert.deepEqual(first.result, { source: 'file' })
+
+  await fileSystem.writeFile(
+    entryPath,
+    'export async function run() { return { source: "updated-file" } }\n',
+  )
+  const second = await executeRegisteredScript({
+    ...validRunPayload(config.id),
+    runId: 'attempt-current-source-002',
+  }, options)
+  assert.deepEqual(second.result, { source: 'updated-file' })
+})
+
 test('provides trusted script identity and an attempt-scoped artifact writer', async (t) => {
   const scriptsDirectory = await temporaryScriptsDirectory(t)
   const artifactRootDirectory = await fileSystem.mkdtemp(join(tmpdir(), 'autotest-runner-artifacts-'))
@@ -599,7 +625,7 @@ test('keeps ordinary script errors classified as failures', async () => {
 
   assert.equal(result.ok, false)
   assert.equal(result.cancelled, undefined)
-  assert.equal(result.status, undefined)
+  assert.equal(result.status, 'failed')
   assert.equal(result.error, '普通脚本错误')
   assert.equal(result.logs.at(-1)?.level, 'error')
   assert.match(result.logs.at(-1)?.message ?? '', /执行失败.*普通脚本错误/)
@@ -618,6 +644,7 @@ test('returns every recorded assertion in execution order, including the failing
   })
 
   assert.equal(result.ok, false)
+  assert.equal(result.status, 'partial')
   assert.equal(result.continuePipeline, true)
   assert.deepEqual(result.assertions.map(({ sequence, name, module, status }) => ({
     sequence,
@@ -761,6 +788,7 @@ test('records API and resource failures without interrupting script work and fai
 
   assert.equal(laterWorkExecuted, true)
   assert.equal(result.ok, false)
+  assert.equal(result.status, 'partial')
   assert.equal(result.continuePipeline, true)
   assert.deepEqual(result.result, { completed: true })
   assert.deepEqual(result.networkSummary, {
@@ -864,6 +892,7 @@ test('treats the TEST public form origin and explicit custom origins as first-pa
     warnings: 1,
   })
   assert.equal(result.ok, false)
+  assert.equal(result.status, 'partial')
   assert.equal(result.continuePipeline, true)
   assert.equal(result.assertions.filter(({ module, status }) => (
     module === '接口健康' && status === 'failed'
@@ -995,6 +1024,7 @@ test('treats same-host WebSocket errors as resource health failures', async () =
   })
 
   assert.equal(result.ok, false)
+  assert.equal(result.status, 'partial')
   assert.equal(result.continuePipeline, true)
   assert.equal(result.resourceResponses[0].isFirstParty, true)
   assert.equal(result.resourceResponses[0].method, 'GET')
@@ -1025,6 +1055,7 @@ test('permits pipeline continuation when script and network assertions fail', as
   })
 
   assert.equal(result.ok, false)
+  assert.equal(result.status, 'partial')
   assert.equal(result.continuePipeline, true)
   assert.equal(result.assertions.filter(({ status }) => status === 'failed').length, 2)
 })
@@ -1047,6 +1078,7 @@ test('keeps captured network failures as assertions when later script work throw
   })
 
   assert.equal(result.ok, false)
+  assert.equal(result.status, 'failed')
   assert.equal(result.continuePipeline, undefined)
   assert.match(result.error, /页面控件不存在/)
   assert.equal(result.assertions.some((assertion) => (
@@ -1201,6 +1233,7 @@ test('stops immediately on runtime exceptions and does not execute later work', 
   })
 
   assert.equal(result.ok, false)
+  assert.equal(result.status, 'failed')
   assert.equal(result.error, '接口返回业务码 500')
   assert.equal(result.continuePipeline, undefined)
   assert.equal(laterWorkExecuted, false)

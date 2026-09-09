@@ -136,6 +136,7 @@ onMounted(() => loadDashboard())
               <div class="run-name">
                 <el-icon v-if="scope.row.status === 'passed'" color="var(--color-success)"><CircleCheck /></el-icon>
                 <el-icon v-else-if="scope.row.status === 'failed'" color="var(--color-danger)"><Warning /></el-icon>
+                <el-icon v-else-if="scope.row.status === 'partial'" class="run-name__partial-icon"><Warning /></el-icon>
                 <el-icon v-else color="var(--color-warning)"><Clock /></el-icon>
                 <strong>{{ scope.row.name }}</strong>
               </div>
@@ -145,7 +146,7 @@ onMounted(() => loadDashboard())
           <el-table-column prop="scriptCount" label="脚本数" width="112" />
           <el-table-column label="状态" width="126">
             <template #default="scope">
-              <el-tag :type="statusMap[scope.row.status as RunStatus].type" effect="light" size="small">
+              <el-tag :type="statusMap[scope.row.status as RunStatus].type" :class="{ 'status-tag--partial': scope.row.status === 'partial' }" effect="light" size="small">
                 {{ statusMap[scope.row.status as RunStatus].label }}
               </el-tag>
             </template>
@@ -455,6 +456,14 @@ onMounted(() => loadDashboard())
   color: var(--color-text-primary);
   font-size: var(--font-md);
   font-weight: 600;
+}
+
+.run-name__partial-icon {
+  width: 20px;
+  height: 20px;
+  color: var(--color-partial-ink, #1f2a44);
+  border-radius: 3px;
+  background: var(--color-partial, #FFD700);
 }
 
 .loading-grid > * {

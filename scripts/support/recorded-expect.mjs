@@ -34,8 +34,48 @@ const FIELD_MODULES = [
   '分割线',
 ]
 
+const TRANSLATION_SCRIPT_PATTERN = /translation|translate|multilingual|i18n/i
+
+const TRANSLATION_STAGE_MODULES = [
+  {
+    module: 'AI 一键翻译',
+    pattern: /AI.*(?:翻译|翻譯)|(?:翻译|翻譯).*AI/i,
+  },
+  {
+    module: '分享与语言切换',
+    pattern: /分享|二维码|二維碼|语言切换|語言切換|切换语言|切換語言/,
+  },
+  {
+    module: '多语言预览',
+    pattern: /(?:多语言|多語言).*(?:预览|預覽)|(?:预览|預覽|公开页|公開頁).*(?:语言|語言|翻译|翻譯)/,
+  },
+  {
+    module: '翻译保存与回读',
+    pattern: /(?:翻译|翻譯).*(?:保存|儲存|回读|回讀|持久化)|(?:保存|儲存|回读|回讀|持久化).*(?:翻译|翻譯)/,
+  },
+  {
+    module: '完成与发布',
+    pattern: /完成(?:并|並|与|與)?(?:发布|發佈|發布)|(?:多语言|多語言|翻译|翻譯).*(?:发布|發佈|發布)|(?:发布|發佈|發布).*(?:多语言|多語言|翻译|翻譯)/,
+  },
+  {
+    module: '多语言设置',
+    pattern: /(?:多语言|多語言).*(?:设置|設定|配置)|(?:设置|設定|配置).*(?:多语言|多語言)|(?:源|来源|來源|目标|目標|默认|默認|預設|启用|啟用)?(?:语言|語言)(?:列表|集合|代码|代碼|顺序|順序|数量|數量|配置|设置|設定)/,
+  },
+]
+
 export function inferAssertionModule(scriptId, name) {
   const text = String(name || '')
+  const normalizedScriptId = String(scriptId || '')
+  const translationScript = TRANSLATION_SCRIPT_PATTERN.test(normalizedScriptId)
+  const explicitTranslationStage = TRANSLATION_STAGE_MODULES.find(({ pattern }) => pattern.test(text))
+  if (explicitTranslationStage) return explicitTranslationStage.module
+  if (translationScript && /(?:保存|儲存|回读|回讀|持久化)/.test(text)) {
+    return '翻译保存与回读'
+  }
+  if (translationScript && /(?:预览|預覽|公开页|公開頁)/.test(text)) return '多语言预览'
+  if (translationScript && /(?:完成|发布|發佈|發布|published)/i.test(text)) return '完成与发布'
+  if (translationScript && /(?:翻译|翻譯)/.test(text)) return 'AI 一键翻译'
+  if (translationScript && /(?:多语言|多語言|语言|語言|locale)/i.test(text)) return '多语言设置'
   const fieldModule = FIELD_MODULES.find((label) => text.includes(label))
   if (fieldModule) return fieldModule
   if (/提交|结果页|submission|请求体|请求 JSON|提交 JSON/i.test(text)) return '表单提交'
@@ -45,10 +85,10 @@ export function inferAssertionModule(scriptId, name) {
   if (/第\s*3\s*页|高级题/.test(text)) return '第 3 页高级题'
   if (/上一页|下一页|翻页|分页|跨页/.test(text)) return '分页与答案保持'
   if (/公开配置|发布产物|表单配置|表单地址|表单名称|页面标题|设计器|题型|已发布列表|发布响应/.test(text)) {
-    return scriptId.includes('publish') ? '表单创建与发布' : '公开表单契约'
+    return normalizedScriptId.includes('publish') ? '表单创建与发布' : '公开表单契约'
   }
   if (/上传|文件/.test(text)) return '文件与媒体'
-  return scriptId.includes('publish') ? '表单创建与发布' : '基础运行流程'
+  return normalizedScriptId.includes('publish') ? '表单创建与发布' : '基础运行流程'
 }
 
 function assertionMessage(value, fallback) {

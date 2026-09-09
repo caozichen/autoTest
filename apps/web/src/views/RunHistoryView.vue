@@ -2,8 +2,10 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   CircleCheck,
+  CircleClose,
   Clock,
   DataAnalysis,
+  RefreshLeft,
   RefreshRight,
   Search,
   VideoPause,
@@ -41,6 +43,8 @@ const statusMap: Record<RunRecordStatus, { label: string; type: 'success' | 'war
   interrupted: { label: '已中断', type: 'info' },
 }
 
+type SummaryStatus = Extract<RunRecordStatus, 'passed' | 'partial' | 'failed'>
+
 const environments = computed(() => {
   const map = new Map(records.value.map((record) => [record.environment.id, record.environment]))
   return [...map.values()]
@@ -48,21 +52,24 @@ const environments = computed(() => {
 
 const summary = computed(() => {
   if (records.value.length === 0) {
-    return { total: null, scriptCount: null, passed: null, attention: null, averagePassRate: null }
+    return { total: null, scriptCount: null, passed: null, partial: null, failed: null }
   }
-  const finished = records.value.filter((record) => record.status !== 'running')
   const scriptCount = records.value.reduce((total, record) => total + record.counts.total, 0)
-  const averagePassRate = finished.length
-    ? Math.round(finished.reduce((total, record) => total + record.analysis.passRate, 0) / finished.length * 10) / 10
-    : null
   return {
     total: records.value.length,
     scriptCount,
     passed: records.value.filter((record) => record.status === 'passed').length,
-    attention: records.value.filter((record) => ['failed', 'partial', 'interrupted'].includes(record.status)).length,
-    averagePassRate,
+    partial: records.value.filter((record) => record.status === 'partial').length,
+    failed: records.value.filter((record) => record.status === 'failed').length,
   }
 })
+
+const hasActiveFilters = computed(() => (
+  keyword.value !== ''
+  || statusFilter.value !== 'all'
+  || environmentFilter.value !== 'all'
+  || currentPage.value !== 1
+))
 
 const filteredRecords = computed(() => {
   const search = keyword.value.trim().toLowerCase()
@@ -89,6 +96,18 @@ const pagedRecords = computed(() => {
 watch([keyword, statusFilter, environmentFilter], () => {
   currentPage.value = 1
 })
+
+function selectSummaryStatus(status: SummaryStatus): void {
+  statusFilter.value = statusFilter.value === status ? 'all' : status
+  currentPage.value = 1
+}
+
+function resetFilters(): void {
+  keyword.value = ''
+  statusFilter.value = 'all'
+  environmentFilter.value = 'all'
+  currentPage.value = 1
+}
 
 function shouldReplaceRecord(current: RunRecord, incoming: RunRecord): boolean {
   if (incoming.revision !== current.revision) return incoming.revision > current.revision
@@ -268,10 +287,44 @@ onBeforeUnmount(() => {
     </header>
 
     <section class="metric-strip" aria-label="运行记录统计">
-      <div><span class="metric-strip__icon is-total"><el-icon><Clock /></el-icon></span><p><span>运行批次</span><strong>{{ summary.total ?? '暂无数据' }}</strong></p></div>
-      <div><span class="metric-strip__icon is-script"><el-icon><DataAnalysis /></el-icon></span><p><span>累计脚本</span><strong>{{ summary.scriptCount ?? '暂无数据' }}</strong></p></div>
-      <div><span class="metric-strip__icon is-passed"><el-icon><CircleCheck /></el-icon></span><p><span>全部通过</span><strong>{{ summary.passed ?? '暂无数据' }}</strong></p></div>
-      <div><span class="metric-strip__icon is-attention"><el-icon><Warning /></el-icon></span><p><span>需关注</span><strong>{{ summary.attention ?? '暂无数据' }}</strong><small>{{ summary.averagePassRate === null ? '平均通过率 暂无数据' : `平均通过率 ${summary.averagePassRate}%` }}</small></p></div>
+      <div class="metric-strip__item is-total">
+        <span class="metric-strip__icon"><el-icon><Clock /></el-icon></span>
+        <span class="metric-strip__copy"><span>运行批次</span><strong>{{ summary.total ?? '暂无数据' }}</strong></span>
+      </div>
+      <div class="metric-strip__item is-script">
+        <span class="metric-strip__icon"><el-icon><DataAnalysis /></el-icon></span>
+        <span class="metric-strip__copy"><span>累计脚本</span><strong>{{ summary.scriptCount ?? '暂无数据' }}</strong></span>
+      </div>
+      <button
+        class="metric-strip__item metric-strip__item--interactive is-passed"
+        :class="{ 'is-active': statusFilter === 'passed' }"
+        type="button"
+        :aria-pressed="statusFilter === 'passed'"
+        @click="selectSummaryStatus('passed')"
+      >
+        <span class="metric-strip__icon"><el-icon><CircleCheck /></el-icon></span>
+        <span class="metric-strip__copy"><span>全部通过</span><strong>{{ summary.passed ?? '暂无数据' }}</strong></span>
+      </button>
+      <button
+        class="metric-strip__item metric-strip__item--interactive is-partial"
+        :class="{ 'is-active': statusFilter === 'partial' }"
+        type="button"
+        :aria-pressed="statusFilter === 'partial'"
+        @click="selectSummaryStatus('partial')"
+      >
+        <span class="metric-strip__icon"><el-icon><Warning /></el-icon></span>
+        <span class="metric-strip__copy"><span>部分通过</span><strong>{{ summary.partial ?? '暂无数据' }}</strong></span>
+      </button>
+      <button
+        class="metric-strip__item metric-strip__item--interactive is-failed"
+        :class="{ 'is-active': statusFilter === 'failed' }"
+        type="button"
+        :aria-pressed="statusFilter === 'failed'"
+        @click="selectSummaryStatus('failed')"
+      >
+        <span class="metric-strip__icon"><el-icon><CircleClose /></el-icon></span>
+        <span class="metric-strip__copy"><span>执行失败</span><strong>{{ summary.failed ?? '暂无数据' }}</strong></span>
+      </button>
     </section>
 
     <section class="record-panel">
@@ -287,7 +340,16 @@ onBeforeUnmount(() => {
             <el-option v-for="environment in environments" :key="environment.id" :label="`${environment.name} · ${environment.code}`" :value="environment.id" />
           </el-select>
         </div>
-        <span class="toolbar__result" aria-live="polite">{{ filteredRecords.length }} 个批次</span>
+        <div class="toolbar__actions">
+          <span class="toolbar__result" aria-live="polite">{{ filteredRecords.length }} 个批次</span>
+          <el-button
+            class="reset-button"
+            :icon="RefreshLeft"
+            :disabled="!hasActiveFilters"
+            aria-label="重置筛选条件"
+            @click="resetFilters"
+          >重置</el-button>
+        </div>
       </div>
 
       <el-table v-loading="loading" :data="pagedRecords" row-key="id" class="record-table" empty-text="暂无数据">
@@ -312,26 +374,27 @@ onBeforeUnmount(() => {
             <div class="environment-cell"><strong>{{ scope.row.environment.name }}</strong><code>{{ scope.row.environment.code }} · {{ scope.row.environment.apiBaseUrl }}</code></div>
           </template>
         </el-table-column>
-        <el-table-column label="脚本结果" min-width="220">
+        <el-table-column label="脚本结果" min-width="280">
           <template #default="scope">
             <div class="result-cell">
               <strong>{{ scope.row.counts.passed }} / {{ scope.row.counts.total }}</strong>
               <div
                 class="mini-distribution"
                 role="img"
-                :aria-label="`通过 ${scope.row.counts.passed}，失败 ${scope.row.counts.failed}，未执行 ${scope.row.counts.skipped}，待完成 ${pendingRunScriptCount(scope.row.counts)}`"
+                :aria-label="`通过 ${scope.row.counts.passed}，部分通过 ${scope.row.counts.partial}，执行失败 ${scope.row.counts.failed}，未执行 ${scope.row.counts.skipped}，待完成 ${pendingRunScriptCount(scope.row.counts)}`"
               >
                 <span v-if="scope.row.counts.passed" aria-hidden="true" class="is-passed" :style="{ flex: scope.row.counts.passed }" />
+                <span v-if="scope.row.counts.partial" aria-hidden="true" class="is-partial" :style="{ flex: scope.row.counts.partial }" />
                 <span v-if="scope.row.counts.failed" aria-hidden="true" class="is-failed" :style="{ flex: scope.row.counts.failed }" />
                 <span v-if="scope.row.counts.skipped" aria-hidden="true" class="is-skipped" :style="{ flex: scope.row.counts.skipped }" />
                 <span v-if="pendingRunScriptCount(scope.row.counts)" aria-hidden="true" class="is-pending" :style="{ flex: pendingRunScriptCount(scope.row.counts) }" />
               </div>
-              <span>失败 {{ scope.row.counts.failed }} · 未执行 {{ scope.row.counts.skipped }} · 通过率 {{ scope.row.analysis.passRate }}%</span>
+              <span>部分通过 {{ scope.row.counts.partial }} · 执行失败 {{ scope.row.counts.failed }} · 未执行 {{ scope.row.counts.skipped }} · 通过率 {{ scope.row.analysis.passRate }}%</span>
             </div>
           </template>
         </el-table-column>
         <el-table-column label="状态" width="132">
-          <template #default="scope"><el-tag :type="statusMap[scope.row.status as RunRecordStatus].type" effect="light">{{ statusMap[scope.row.status as RunRecordStatus].label }}</el-tag></template>
+          <template #default="scope"><el-tag :type="statusMap[scope.row.status as RunRecordStatus].type" :class="{ 'status-tag--partial': scope.row.status === 'partial' }" effect="light">{{ statusMap[scope.row.status as RunRecordStatus].label }}</el-tag></template>
         </el-table-column>
         <el-table-column label="耗时" width="130">
           <template #default="scope"><span class="duration-cell">{{ formatDuration(scope.row.durationMs) }}</span></template>
@@ -443,27 +506,28 @@ onBeforeUnmount(() => {
 
 .metric-strip {
   display: grid;
+  gap: 1px;
   margin-bottom: 16px;
   overflow: hidden;
   border: 1px solid var(--color-border, #e5ebf3);
   border-radius: var(--radius-card, 6px);
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  background: var(--color-surface, #fff);
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  background: var(--color-border-light, #eef2f7);
   box-shadow: var(--shadow-card, 0 2px 10px rgb(31 42 68 / 5%));
 }
 
-.metric-strip > div {
+.metric-strip__item {
   display: flex;
   min-width: 0;
   min-height: 88px;
   align-items: center;
   gap: 12px;
   padding: 14px 18px;
-  border-right: 1px solid var(--color-border-light, #eef2f7);
-}
-
-.metric-strip > div:last-child {
-  border-right: 0;
+  color: inherit;
+  border: 0;
+  background: var(--color-surface, #fff);
+  font: inherit;
+  text-align: left;
 }
 
 .metric-strip__icon {
@@ -473,41 +537,75 @@ onBeforeUnmount(() => {
   flex: 0 0 40px;
   place-items: center;
   border-radius: 6px;
+  color: var(--metric-color);
+  background: var(--metric-soft);
   font-size: 18px;
 }
 
-.metric-strip__icon.is-total {
-  color: var(--color-primary, #2563eb);
-  background: var(--color-primary-soft, #eff6ff);
+.metric-strip__item.is-total {
+  --metric-color: var(--color-primary, #2563eb);
+  --metric-soft: var(--color-primary-soft, #eff6ff);
 }
 
-.metric-strip__icon.is-script {
-  color: #0891b2;
-  background: #ecfeff;
+.metric-strip__item.is-script {
+  --metric-color: #0891b2;
+  --metric-soft: #ecfeff;
 }
 
-.metric-strip__icon.is-passed {
-  color: var(--color-success, #16a34a);
-  background: #f0fdf4;
+.metric-strip__item.is-passed {
+  --metric-color: var(--color-success, #16a34a);
+  --metric-soft: #f0fdf4;
 }
 
-.metric-strip__icon.is-attention {
-  color: var(--color-warning, #d97706);
-  background: #fffbeb;
+.metric-strip__item.is-partial {
+  --metric-color: var(--color-partial-ink, #1f2a44);
+  --metric-soft: var(--color-partial-soft, #fffbe6);
 }
 
-.metric-strip p,
+.metric-strip__item.is-partial .metric-strip__icon {
+  color: var(--color-partial-ink, #1f2a44);
+  background: var(--color-partial, #FFD700);
+}
+
+.metric-strip__item.is-failed {
+  --metric-color: var(--color-danger, #dc2626);
+  --metric-soft: #fef2f2;
+}
+
+.metric-strip__item--interactive {
+  cursor: pointer;
+  transition: color 150ms ease, background 150ms ease;
+}
+
+.metric-strip__item--interactive.is-active {
+  color: var(--metric-color);
+  background: var(--metric-soft);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .metric-strip__item--interactive:not(.is-active):hover {
+    background: var(--color-bg-subtle, #f8fafc);
+  }
+}
+
+.metric-strip__item--interactive:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: 2px solid var(--metric-color);
+  outline-offset: -3px;
+}
+
 .metric-strip span,
-.metric-strip strong,
-.metric-strip small {
+.metric-strip strong {
   margin: 0;
 }
 
-.metric-strip p {
+.metric-strip__copy {
+  display: block;
   min-width: 0;
 }
 
-.metric-strip p > span {
+.metric-strip__copy > span {
   display: block;
   color: var(--color-text-secondary, #64748b);
   font-size: 12px;
@@ -523,13 +621,6 @@ onBeforeUnmount(() => {
   line-height: 28px;
 }
 
-.metric-strip small {
-  display: block;
-  color: var(--color-text-muted, #94a3b8);
-  font-size: 11px;
-  line-height: 16px;
-}
-
 .record-panel {
   overflow: hidden;
   border: 1px solid var(--color-border, #e5ebf3);
@@ -540,6 +631,7 @@ onBeforeUnmount(() => {
 
 .toolbar,
 .toolbar__filters,
+.toolbar__actions,
 .table-footer {
   display: flex;
   align-items: center;
@@ -574,10 +666,25 @@ onBeforeUnmount(() => {
   width: 210px;
 }
 
+.toolbar__actions {
+  flex: 0 0 auto;
+  gap: 12px;
+}
+
 .toolbar__result {
   color: var(--color-text-muted, #94a3b8);
   font-size: 12px;
   white-space: nowrap;
+}
+
+.reset-button {
+  min-width: 76px;
+}
+
+.toolbar :deep(.reset-button.el-button) {
+  height: 34px;
+  border-radius: 5px;
+  font-size: 13px;
 }
 
 .toolbar :deep(.el-input__wrapper),
@@ -697,6 +804,7 @@ onBeforeUnmount(() => {
   grid-column: 1 / -1;
   color: var(--color-text-muted, #94a3b8);
   font-size: 11px;
+  line-height: 17px;
 }
 
 .mini-distribution {
@@ -709,6 +817,10 @@ onBeforeUnmount(() => {
 
 .mini-distribution .is-passed {
   background: var(--color-success, #16a34a);
+}
+
+.mini-distribution .is-partial {
+  background: var(--color-partial, #FFD700);
 }
 
 .mini-distribution .is-failed {
@@ -815,10 +927,9 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 1180px) {
-  .metric-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .metric-strip > div { border-bottom: 1px solid var(--color-border-light, #eef2f7); }
-  .metric-strip > div:nth-child(2n) { border-right: 0; }
-  .metric-strip > div:nth-last-child(-n + 2) { border-bottom: 0; }
+  .metric-strip { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+  .metric-strip__item { grid-column: span 2; }
+  .metric-strip__item:nth-last-child(-n + 2) { grid-column: span 3; }
 }
 
 @media (max-width: 900px) {
@@ -828,10 +939,13 @@ onBeforeUnmount(() => {
 @media (max-width: 640px) {
   .page-heading { align-items: stretch; flex-direction: column; gap: 12px; }
   .page-heading .el-button { width: 100%; }
-  .metric-strip { grid-template-columns: 1fr; }
-  .metric-strip > div, .metric-strip > div:nth-child(2n), .metric-strip > div:nth-last-child(-n + 2) { border-right: 0; border-bottom: 1px solid var(--color-border-light, #eef2f7); }
-  .metric-strip > div:last-child { border-bottom: 0; }
+  .metric-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .metric-strip__item, .metric-strip__item:nth-last-child(-n + 2) { grid-column: span 1; }
+  .metric-strip__item:last-child { grid-column: 1 / -1; }
+  .metric-strip__item { min-height: 78px; padding: 12px; }
+  .metric-strip__icon { width: 36px; height: 36px; flex-basis: 36px; }
   .toolbar__filters { flex-basis: auto; }
   .search-input, .status-select, .environment-select { width: 100%; min-width: 0; flex: 1 1 100%; }
+  .toolbar__actions { width: 100%; justify-content: space-between; }
 }
 </style>

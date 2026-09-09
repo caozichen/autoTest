@@ -9,6 +9,7 @@ import {
   type ScriptResourceResponse,
   type ScriptRunContext,
   type ScriptRunResult,
+  type ScriptRunStatus,
 } from '@/domain/script'
 import type { ScriptAssertionResult } from '@/domain/assertion'
 import { runtimeConfig } from '@/config/runtime'
@@ -32,7 +33,7 @@ import type {
 import { HttpScriptConfigRepository } from './http-script-config.repository'
 import type { ScriptConfig, ScriptConfigRepository } from './script-config-repository'
 
-const CANCEL_REQUEST_TIMEOUT_MS = 5_000
+export const CANCEL_REQUEST_TIMEOUT_MS = 20_000
 const LIVE_REQUEST_TIMEOUT_MS = 5_000
 const RUN_REQUEST_GRACE_MS = 30_000
 const RUN_REGISTRATION_GRACE_MS = 3_000
@@ -140,6 +141,7 @@ function failedRunResult(error: unknown): ScriptRunResult {
   const message = error instanceof Error ? error.message : 'Runner 请求失败'
   return {
     ok: false,
+    status: 'failed',
     durationMs: 0,
     error: message,
     logs: [{ timestamp: new Date().toISOString(), level: 'error', message }],
@@ -152,6 +154,7 @@ function interruptedRunResult(current?: ScriptRunResult): ScriptRunResult {
   return {
     ...current,
     ok: false,
+    status: 'interrupted',
     cancelled: true,
     durationMs: current?.durationMs ?? 0,
     error: message,
@@ -174,13 +177,13 @@ interface RunnerResponse {
   artifacts?: unknown
   cancelled?: boolean
   timedOut?: boolean
-  status?: 'running' | 'passed' | 'failed' | 'interrupted'
+  status?: ScriptRunStatus
   result?: Record<string, unknown>
   error?: string
 }
 
 interface RunnerLiveResponse extends RunnerResponse {
-  status: 'running' | 'passed' | 'failed' | 'interrupted'
+  status: ScriptRunStatus
 }
 
 interface RunnerCancelResponse {
@@ -284,7 +287,10 @@ async function fetchJsonWithTimeout<T>(
 function isTerminalRunnerStatus(
   status: RunnerLiveResponse['status'],
 ): status is Exclude<RunnerLiveResponse['status'], 'running'> {
-  return status === 'passed' || status === 'failed' || status === 'interrupted'
+  return status === 'passed'
+    || status === 'partial'
+    || status === 'failed'
+    || status === 'interrupted'
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -345,8 +351,21 @@ function normalizeScriptArtifact(value: unknown): ScriptArtifact | null {
 
 function normalizeRunnerResponse(value: RunnerResponse): ScriptRunResult {
   const cancelled = value.cancelled === true || value.status === 'interrupted'
+  const status: ScriptRunStatus = cancelled
+    ? 'interrupted'
+    : value.timedOut === true
+      ? 'failed'
+      : value.status === 'running'
+        || value.status === 'passed'
+        || value.status === 'partial'
+        || value.status === 'failed'
+        ? value.status
+        : value.ok === true
+          ? 'passed'
+          : value.continuePipeline === true ? 'partial' : 'failed'
   return {
     ok: value.ok === true,
+    status,
     ...(value.continuePipeline === true ? { continuePipeline: true } : {}),
     ...(cancelled ? { cancelled: true } : {}),
     ...(value.timedOut === true ? { timedOut: true } : {}),
@@ -640,7 +659,7 @@ export class LocalScriptService implements ScriptService {
       script.status = 'running'
       script.lastRunAt = '刚刚'
       script.lastDuration = null
-      script.lastRunResult = { ok: false, durationMs: 0, logs: [] }
+      script.lastRunResult = { ok: false, status: 'running', durationMs: 0, logs: [] }
       const execution: ActiveExecution = {
         runId: null,
         executionId: context.executionId ?? '',
@@ -877,7 +896,13 @@ export class LocalScriptService implements ScriptService {
         })
       }
       script.lastRunResult = result
-      script.status = result.cancelled ? 'interrupted' : result.ok ? 'passed' : 'failed'
+      script.status = result.cancelled || result.status === 'interrupted'
+        ? 'interrupted'
+        : result.timedOut
+          ? 'failed'
+          : result.status === 'partial'
+            ? 'partial'
+            : result.ok ? 'passed' : 'failed'
       script.lastDuration = formatDuration(result.durationMs)
       const notification = this.notifyProgress(onProgress, script)
       if (notification) await notification

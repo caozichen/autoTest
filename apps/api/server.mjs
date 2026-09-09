@@ -1,10 +1,12 @@
 import { createServer } from 'node:http'
+import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { constants as fileSystemConstants } from 'node:fs'
 import * as fileSystem from 'node:fs/promises'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { promisify } from 'node:util'
 
 import { DEFAULT_ARTIFACT_ROOT_DIRECTORY } from './artifact-writer.mjs'
 import { RunRecordFileStore, RunRecordStoreError } from './run-record-store.mjs'
@@ -14,6 +16,7 @@ import {
   FileScriptConfigRepository,
   ScriptConfigStoreError,
 } from './script-config-repository.mjs'
+import { retainScriptRejectionGuard } from './script-rejection-boundary.mjs'
 import { executeRegisteredScript, validateRegisteredRunRequest } from './script-runner.mjs'
 
 const DEFAULT_HOST = '127.0.0.1'
@@ -26,7 +29,7 @@ const allowedOrigins = new Set([
 ])
 const RUN_SNAPSHOT_TTL_MS = 5 * 60 * 1000
 const DEFAULT_CANCELLATION_REASON = '用户强制停止运行'
-const DEFAULT_CANCELLATION_WAIT_TIMEOUT_MS = 3_500
+export const DEFAULT_CANCELLATION_WAIT_TIMEOUT_MS = 16_000
 const DEFAULT_ARTIFACT_PERSISTENCE_TIMEOUT_MS = 10_000
 const DEFAULT_RUN_RECORD_DIRECTORY = fileURLToPath(new URL('../../data/run-records/', import.meta.url))
 const DEFAULT_REQUEST_LIMIT_BYTES = 1024 * 1024
@@ -36,6 +39,8 @@ const EXECUTION_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$/
 const ARTIFACT_SCOPE_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$/
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f-\u009f]/
 const SCREENSHOT_MIME_TYPES = new Set(['image/png', 'image/jpeg'])
+const SCREENSHOT_REVEAL_TIMEOUT_MS = 10_000
+const execFileAsync = promisify(execFile)
 
 class RequestBodyTooLargeError extends Error {
   constructor(limitBytes) {
@@ -53,6 +58,38 @@ class InvalidJsonBodyError extends Error {
     this.statusCode = 400
     this.code = 'INVALID_JSON_BODY'
   }
+}
+
+class ScreenshotRevealError extends Error {
+  constructor(message, { statusCode = 500, code = 'SCREENSHOT_REVEAL_FAILED' } = {}) {
+    super(message)
+    this.name = 'ScreenshotRevealError'
+    this.statusCode = statusCode
+    this.code = code
+  }
+}
+
+export async function revealFileInFolder(
+  absolutePath,
+  { platform = process.platform, execute = execFileAsync } = {},
+) {
+  if (platform === 'darwin') {
+    await execute('/usr/bin/open', ['-R', absolutePath], {
+      timeout: SCREENSHOT_REVEAL_TIMEOUT_MS,
+    })
+    return
+  }
+  if (platform === 'win32') {
+    await execute('explorer.exe', [`/select,${absolutePath}`], {
+      timeout: SCREENSHOT_REVEAL_TIMEOUT_MS,
+      windowsHide: true,
+    })
+    return
+  }
+  throw new ScreenshotRevealError('当前操作系统暂不支持在文件夹中选中截图', {
+    statusCode: 501,
+    code: 'SCREENSHOT_REVEAL_UNSUPPORTED',
+  })
 }
 
 function requestPath(requestUrl) {
@@ -171,6 +208,30 @@ function decodeScriptConfigPathSegment(value) {
   }
 }
 
+function parseScreenshotRequest(request, routeMatch) {
+  const recordId = decodePathSegment(routeMatch[1])
+  const stepId = assertSafeArtifactScopeId(
+    decodePathSegment(routeMatch[2], '脚本 ID'),
+    '脚本 ID',
+  )
+  const attemptId = assertSafeArtifactScopeId(
+    decodePathSegment(routeMatch[3], '运行尝试 ID'),
+    '运行尝试 ID',
+  )
+  const screenshotPaths = new URL(request.url || '/', 'http://runner.local')
+    .searchParams
+    .getAll('path')
+  if (screenshotPaths.length !== 1) {
+    throw new RunRecordStoreError('截图请求必须包含唯一的 path 参数')
+  }
+  return {
+    recordId,
+    stepId,
+    attemptId,
+    relativePath: normalizeArtifactRelativePath(screenshotPaths[0]),
+  }
+}
+
 function sendRunRecordError(response, error, origin) {
   const statusCode = Number.isInteger(error?.statusCode) ? error.statusCode : 500
   const message = statusCode >= 500
@@ -210,6 +271,7 @@ function parseCancellationReason(payload) {
 export function createRunnerServer({
   executeScript,
   validateRequest,
+  revealFile = revealFileInFolder,
   runSnapshotTtlMs = RUN_SNAPSHOT_TTL_MS,
   cancellationWaitTimeoutMs = DEFAULT_CANCELLATION_WAIT_TIMEOUT_MS,
   artifactPersistenceTimeoutMs = DEFAULT_ARTIFACT_PERSISTENCE_TIMEOUT_MS,
@@ -388,7 +450,7 @@ export function createRunnerServer({
       const openedInfo = await handle.stat()
       if (!openedInfo.isFile() || openedInfo.size !== artifact.sizeBytes) throw screenshotNotFound()
 
-      return { artifact, handle, sizeBytes: openedInfo.size }
+      return { artifact, handle, absolutePath: realCandidatePath, sizeBytes: openedInfo.size }
     } catch (error) {
       await handle?.close().catch(() => undefined)
       if (error instanceof RunRecordStoreError) throw error
@@ -446,7 +508,9 @@ export function createRunnerServer({
         onLog: (log) => run.logs.push(log),
         signal: run.abortController.signal,
       })
-      const cancelled = rawResult?.cancelled || run.abortController.signal.aborted
+      const explicitlyFailed = rawResult?.status === 'failed' || rawResult?.timedOut === true
+      const cancelled = rawResult?.cancelled === true
+        || (!explicitlyFailed && run.abortController.signal.aborted)
       const result = cancelled
         ? {
             ...rawResult,
@@ -458,7 +522,13 @@ export function createRunnerServer({
           }
         : rawResult
       run.result = result
-      run.status = cancelled ? 'interrupted' : result?.ok ? 'passed' : 'failed'
+      run.status = cancelled
+        ? 'interrupted'
+        : result?.timedOut === true
+          ? 'failed'
+          : ['passed', 'partial', 'failed'].includes(result?.status)
+            ? result.status
+            : result?.ok ? 'passed' : 'failed'
       const artifactWarning = await persistRunArtifacts(run, result)
       if (artifactWarning && Array.isArray(run.result?.logs) && run.result.logs !== run.logs) {
         run.result = { ...run.result, logs: [...run.result.logs, artifactWarning] }
@@ -489,7 +559,7 @@ export function createRunnerServer({
     }
   }
 
-  return createServer(async (request, response) => {
+  const server = createServer(async (request, response) => {
   const origin = request.headers.origin || ''
   if (origin && !allowedOrigins.has(origin)) {
     sendJson(response, 403, { error: 'Runner 仅允许本地 AutoTest 页面调用' })
@@ -619,28 +689,55 @@ export function createRunnerServer({
     return
   }
 
+  const screenshotRevealMatch = pathname.match(
+    /^\/run-records\/([^/]+)\/screenshots\/([^/]+)\/([^/]+)\/reveal$/,
+  )
+  if (screenshotRevealMatch && request.method === 'POST') {
+    let openedScreenshot
+    try {
+      const { recordId, stepId, attemptId, relativePath } = parseScreenshotRequest(
+        request,
+        screenshotRevealMatch,
+      )
+      openedScreenshot = await openRegisteredScreenshot(
+        recordId,
+        stepId,
+        attemptId,
+        relativePath,
+      )
+      try {
+        await revealFile(openedScreenshot.absolutePath)
+      } catch (error) {
+        if (error instanceof ScreenshotRevealError) throw error
+        throw new ScreenshotRevealError('无法在文件夹中显示截图，请确认系统文件管理器可用')
+      }
+      sendJson(response, 200, { ok: true }, origin)
+    } catch (error) {
+      if (error instanceof ScreenshotRevealError) {
+        sendJson(response, error.statusCode, {
+          ok: false,
+          error: error.message,
+          code: error.code,
+        }, origin)
+      } else {
+        sendRunRecordError(response, error, origin)
+      }
+    } finally {
+      await openedScreenshot?.handle.close().catch(() => undefined)
+    }
+    return
+  }
+
   const screenshotMatch = pathname.match(
     /^\/run-records\/([^/]+)\/screenshots\/([^/]+)\/([^/]+)$/,
   )
   if (screenshotMatch && request.method === 'GET') {
     let openedScreenshot
     try {
-      const recordId = decodePathSegment(screenshotMatch[1])
-      const stepId = assertSafeArtifactScopeId(
-        decodePathSegment(screenshotMatch[2], '脚本 ID'),
-        '脚本 ID',
+      const { recordId, stepId, attemptId, relativePath } = parseScreenshotRequest(
+        request,
+        screenshotMatch,
       )
-      const attemptId = assertSafeArtifactScopeId(
-        decodePathSegment(screenshotMatch[3], '运行尝试 ID'),
-        '运行尝试 ID',
-      )
-      const screenshotPaths = new URL(request.url || '/', 'http://runner.local')
-        .searchParams
-        .getAll('path')
-      if (screenshotPaths.length !== 1) {
-        throw new RunRecordStoreError('截图请求必须包含唯一的 path 参数')
-      }
-      const relativePath = normalizeArtifactRelativePath(screenshotPaths[0])
       openedScreenshot = await openRegisteredScreenshot(
         recordId,
         stepId,
@@ -896,6 +993,15 @@ export function createRunnerServer({
 
   sendJson(response, 404, { error: '接口不存在' }, origin)
   })
+  let releaseRejectionGuard = null
+  server.once('listening', () => {
+    releaseRejectionGuard = retainScriptRejectionGuard()
+  })
+  server.once('close', () => {
+    releaseRejectionGuard?.()
+    releaseRejectionGuard = null
+  })
+  return server
 }
 
 const isMainModule = process.argv[1]

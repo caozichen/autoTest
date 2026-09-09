@@ -1,6 +1,7 @@
 import type { ScriptAssertionResult } from './assertion'
 
-export type ScriptStatus = 'ready' | 'running' | 'passed' | 'failed' | 'interrupted' | 'disabled'
+export type ScriptRunStatus = 'running' | 'passed' | 'partial' | 'failed' | 'interrupted'
+export type ScriptStatus = 'ready' | ScriptRunStatus | 'disabled'
 export type ScriptLogLevel = 'info' | 'success' | 'warning' | 'error'
 
 export const DEFAULT_SCRIPT_TIMEOUT_MS = 300_000
@@ -96,6 +97,7 @@ export interface ScriptArtifact {
 
 export interface ScriptRunResult {
   ok: boolean
+  status?: ScriptRunStatus
   continuePipeline?: boolean
   cancelled?: boolean
   timedOut?: boolean

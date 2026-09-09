@@ -37,7 +37,10 @@ export class LocalDashboardService implements DashboardService {
       this.runRecords.list(),
       this.isRunnerOnline(),
     ])
-    const completedScripts = records.reduce((total, record) => total + record.counts.passed + record.counts.failed, 0)
+    const completedScripts = records.reduce(
+      (total, record) => total + record.counts.passed + record.counts.partial + record.counts.failed,
+      0,
+    )
     const passedScripts = records.reduce((total, record) => total + record.counts.passed, 0)
     const queuedScripts = records
       .filter((record) => record.status === 'running')
@@ -73,9 +76,9 @@ export class LocalDashboardService implements DashboardService {
           id: 'failed',
           label: '待处理失败',
           value: hasRecords
-            ? records.filter((record) => ['failed', 'partial', 'interrupted'].includes(record.status)).length
+            ? records.filter((record) => record.status === 'failed' || record.status === 'interrupted').length
             : null,
-          delta: hasRecords ? '失败、部分通过或中断批次' : '暂无运行记录',
+          delta: hasRecords ? '执行失败或中断批次' : '暂无运行记录',
           tone: 'red',
         },
       ],
@@ -105,7 +108,7 @@ export class LocalDashboardService implements DashboardService {
     const now = this.now()
     const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6).getTime()
     const end = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).getTime()
-    const points = new Map<string, { timestamp: number; passed: number; failed: number }>()
+    const points = new Map<string, { timestamp: number; passed: number; partial: number; failed: number }>()
 
     for (const record of records) {
       const date = new Date(record.startedAt)
@@ -115,9 +118,11 @@ export class LocalDashboardService implements DashboardService {
       const point = points.get(key) ?? {
         timestamp: new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime(),
         passed: 0,
+        partial: 0,
         failed: 0,
       }
       point.passed += record.counts.passed
+      point.partial += record.counts.partial
       point.failed += record.counts.failed
       points.set(key, point)
     }
@@ -129,6 +134,7 @@ export class LocalDashboardService implements DashboardService {
         return {
           date: `${String(date.getMonth() + 1).padStart(2, '0')}/${String(date.getDate()).padStart(2, '0')}`,
           passed: point.passed,
+          partial: point.partial,
           failed: point.failed,
         }
       })
