@@ -17,8 +17,8 @@ import type { AutomationPipelineService } from './automation-pipelines/automatio
 import { LocalAutomationPipelineService } from './automation-pipelines/local-automation-pipeline.service'
 import type { RunnerControlService } from './system/runner-control-service'
 import { LocalRunnerControlService } from './system/local-runner-control.service'
+import { HttpAutomationPipelineExecutionService } from './automation-pipelines/http-automation-pipeline-execution-service'
 import {
-  LocalAutomationPipelineExecutionService,
   type AutomationPipelineExecutionService,
 } from './automation-pipelines/automation-pipeline-execution-service'
 
@@ -43,7 +43,7 @@ const automationPipelines = new LocalAutomationPipelineService()
 const environmentLogin = new FetchEnvironmentLoginService()
 const environmentSessions = new LocalEnvironmentSessionService()
 const runtimeVariables = new SessionRuntimeVariableService()
-const automationPipelineExecution = new LocalAutomationPipelineExecutionService({
+const automationPipelineExecution = new HttpAutomationPipelineExecutionService({
   environments,
   environmentLogin,
   environmentSessions,

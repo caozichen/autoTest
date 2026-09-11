@@ -25,11 +25,23 @@ export interface AutomationPipelineStopResult {
   cleanupTimedOutRunIds?: string[]
 }
 
+export interface PipelineExecutionSnapshot {
+  id: string
+  pipelineId: string
+  pipelineName?: string
+  environment?: RunRecord['environment']
+  phase?: string
+  currentScriptId?: string | null
+  scriptIds: string[]
+}
+
 export interface AutomationPipelineExecutionService {
   run(pipeline: AutomationPipeline, environmentId?: string): Promise<RunRecord>
-  stop(pipelineId: string): Promise<AutomationPipelineStopResult>
+  stop(pipelineId: string, environmentId?: string): Promise<AutomationPipelineStopResult>
   stopByRecordId(recordId: string): Promise<AutomationPipelineStopResult>
-  isRunning(pipelineId: string): boolean
+  isRunning(pipelineId: string, environmentId?: string): boolean
+  refresh?(): Promise<void>
+  getActiveExecutions?(): PipelineExecutionSnapshot[]
 }
 
 export interface AutomationPipelineExecutionDependencies {

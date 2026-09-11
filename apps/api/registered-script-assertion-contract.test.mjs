@@ -32,17 +32,12 @@ test('registered scripts reserve direct Playwright assertions for flow blockers'
       [],
       `${config.id} 的接口和业务码检查必须记录断言并继续`,
     )
-    assert.doesNotMatch(
-      source,
-      /import\s*\{\s*expect\s*\}\s*from\s*['"]@playwright\/test['"]/,
-      `${config.id} 的业务断言必须使用 recorded-expect`,
-    )
-    if (source.includes("from '@playwright/test'")) {
-      assert.match(
-        source,
-        /import\s*\{\s*expect\s+as\s+flowExpect\s*\}\s*from\s*'@playwright\/test'/,
-        `${config.id} 的原生断言必须明确标记为流程阻塞保护`,
-      )
+    // The timeout wrapper exposes raw Playwright expect too. Importing other
+    // Playwright APIs (e.g. request) does not imply a direct assertion import.
+    for (const match of source.matchAll(/import\s*\{([^}]+)\}\s*from\s*['"](@playwright\/test|\.\/support\/environment-timeouts\.mjs)['"]/g)) {
+      const assertionImport = match[1].split(',').map(item => item.trim()).find(item => /^expect\b/.test(item))
+      if (assertionImport) assert.equal(assertionImport, 'expect as flowExpect',
+        `${config.id} 的原生断言必须明确标记为流程阻塞保护`)
     }
     if (/\bexpect\s*\(/.test(source)) {
       assert.match(

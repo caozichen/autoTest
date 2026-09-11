@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 
 import { DEFAULT_ARTIFACT_ROOT_DIRECTORY } from './artifact-writer.mjs'
+import { PipelineRunner, MAX_CONCURRENT_PIPELINES, sameExecutionEnvironment } from './pipeline-runner.mjs'
 import { redactRunRecordResult } from './run-record-result.mjs'
 import { RunRecordFileStore, RunRecordStoreError } from './run-record-store.mjs'
 import {
@@ -98,6 +99,9 @@ function requestPath(requestUrl) {
 }
 
 function liveRunSnapshot(run) {
+  if (run.pipelineManaged) {
+    return redactRunRecordResult(liveRunSnapshot({ ...run, pipelineManaged: false }), {}, run.secretValues)
+  }
   const interrupted = run.status === 'interrupted'
   return {
     runId: run.runId,
@@ -279,13 +283,15 @@ export function createRunnerServer({
   artifactRootDirectory = DEFAULT_ARTIFACT_ROOT_DIRECTORY,
   runRecordDirectory = DEFAULT_RUN_RECORD_DIRECTORY,
   runRecordStore,
-  recordMaintenanceIntervalMs = 10_000,
+  recordMaintenanceIntervalMs = 1_000,
   recordRecoveryGraceMs = 120_000,
+  pipelineLogin,
   scriptConfigDirectory = DEFAULT_SCRIPT_CONFIG_DIRECTORY,
   scriptsDirectory = DEFAULT_SCRIPTS_DIRECTORY,
   scriptConfigRepository,
 } = {}) {
   const activeRuns = new Map()
+  let pipelineRunner
   const pendingRunCancellations = new Map()
   const pendingExecutionCancellations = new Map()
   const artifactPersistenceDeadlineMs = Number.isFinite(artifactPersistenceTimeoutMs)
@@ -297,10 +303,10 @@ export function createRunnerServer({
   }
   const trustedArtifactRoot = resolve(artifactRootDirectory)
   const storedRunRecords = runRecordStore ?? new RunRecordFileStore({ directory: runRecordDirectory })
-  storedRunRecords.setRunnerActivityProvider?.(() => [...activeRuns.values()].map((run) => ({
-    executionId: run.executionId,
-    settled: run.settled && (!run.result || run.historyPersisted),
-  })), { graceMs: recordRecoveryGraceMs })
+  storedRunRecords.setRunnerActivityProvider?.(() => [
+    ...[...activeRuns.values()].map((run) => ({ executionId: run.executionId, settled: run.settled && (!run.result || run.historyPersisted) })),
+    ...(pipelineRunner?.list() ?? []).map(execution => ({ executionId: execution.id, settled: false })),
+  ], { graceMs: recordRecoveryGraceMs })
   const storedScriptConfigs = scriptConfigRepository ?? new FileScriptConfigRepository({
     directory: scriptConfigDirectory,
     scriptsDirectory,
@@ -315,6 +321,39 @@ export function createRunnerServer({
     scriptConfigRepository: storedScriptConfigs,
     scriptsDirectory,
   }))
+
+  pipelineRunner = new PipelineRunner({
+    records: storedRunRecords, configs: storedScriptConfigs, executeStep: executePipelineStep,
+    pendingCancellation: id => pendingExecutionCancellations.get(id),
+    scriptBusy: (scriptId, environment) => [...activeRuns.values()].some(run => run.scriptId === scriptId && !run.settled && sameExecutionEnvironment(run.environment, environment)),
+    ...(pipelineLogin ? { login: pipelineLogin } : {}),
+  })
+
+  function runEnvironment(context, payload) {
+    return { id: payload.context?.environmentId, apiBaseUrl: context.apiBaseUrl ?? payload.context?.apiBaseUrl }
+  }
+
+  async function executePipelineStep(payload, signal, secrets) {
+    const context = await runValidator(payload)
+    if (signal.aborted) return { ok: false, status: 'interrupted', cancelled: true, durationMs: 0, logs: [] }
+    const run = {
+      runId: payload.runId, executionId: payload.executionId, scriptId: context.scriptId, environment: runEnvironment(context, payload),
+      status: 'running', startedAt: performance.now(), logs: [], result: null,
+      abortController: new AbortController(), cancellationReason: null, completion: null,
+      cleanupTimer: null, cleanupWaitWarningLogged: false, settled: false, historyPersisted: true,
+      pipelineManaged: true, secretValues: secrets,
+    }
+    const abort = () => { run.cancellationReason = String(signal.reason || DEFAULT_CANCELLATION_REASON); run.abortController.abort(signal.reason) }
+    signal.addEventListener('abort', abort, { once: true })
+    activeRuns.set(run.runId, run)
+    try {
+      run.completion = executeLiveRun(run, payload)
+      await run.completion
+      return run.result
+    } finally {
+      signal.removeEventListener('abort', abort)
+    }
+  }
 
   function appendRunLog(run, level, message) {
     const log = {
@@ -503,7 +542,7 @@ export function createRunnerServer({
       }),
     ])
     clearTimeout(timer)
-    if (!completed && !run.cleanupWaitWarningLogged) {
+    if (!completed && run.logs && !run.cleanupWaitWarningLogged) {
       run.cleanupWaitWarningLogged = true
       appendRunLog(
         run,
@@ -603,8 +642,8 @@ export function createRunnerServer({
         responseBody: cancelled ? run.result : { ok: false, error: message },
       }
     } finally {
-      run.historyResult = redactRunRecordResult(run.result, payload.context)
-      await persistRunResult(run)
+      run.historyResult = redactRunRecordResult(run.result, payload.context, run.secretValues)
+      if (!run.pipelineManaged) await persistRunResult(run)
       run.settled = true
       scheduleRunCleanup(run)
     }
@@ -704,6 +743,30 @@ export function createRunnerServer({
       response.end()
     } catch (error) {
       sendScriptConfigError(response, error, origin)
+    }
+    return
+  }
+
+  if (pathname === '/pipeline-executions' && request.method === 'GET') {
+    try {
+    const executions = pipelineRunner.list()
+    const records = await storedRunRecords.listActiveRunnerPipelines?.() ?? []
+    for (const record of records) {
+      if (record.status === 'running' && record.execution?.kind === 'pipeline' && !executions.some(item => item.id === record.id)) {
+        executions.push({ id: record.id, pipelineId: record.execution.pipelineId, environment: record.environment, pipelineName: record.name.replace(/^自动化配置 · /, ''), phase: 'recovering', currentScriptId: null, scriptIds: record.scripts.map(script => script.id) })
+      }
+    }
+    sendJson(response, 200, { executions, maxConcurrentPipelines: MAX_CONCURRENT_PIPELINES }, origin)
+    } catch (error) { sendRunRecordError(response, error, origin) }
+    return
+  }
+  if (pathname === '/pipeline-executions' && request.method === 'POST') {
+    try {
+      const submitted = await readJson(request)
+      const result = await pipelineRunner.start(submitted)
+      sendJson(response, result.accepted ? 202 : 200, result, origin)
+    } catch (error) {
+      sendJson(response, error.statusCode ?? 400, { ok: false, error: error.message }, origin)
     }
     return
   }
@@ -894,7 +957,7 @@ export function createRunnerServer({
       }, origin)
     } catch (error) {
       const message = error instanceof Error ? error.message : '停止运行任务失败'
-      sendJson(response, 400, { ok: false, error: message }, origin)
+      sendJson(response, error.statusCode ?? 400, { ok: false, error: message }, origin)
     }
     return
   }
@@ -906,16 +969,29 @@ export function createRunnerServer({
       if (!EXECUTION_ID_PATTERN.test(executionId)) throw new Error('批次执行 ID 格式无效')
       const reason = parseCancellationReason(await readJson(request))
       reserveExecutionCancellation(executionId, reason)
+      const coordinator = pipelineRunner.active.get(executionId)
+      let pipelineFound = pipelineRunner.cancel(executionId, reason)
+      if (!pipelineFound) {
+        const record = await storedRunRecords.get?.(executionId)
+        if (record?.execution?.kind === 'pipeline') {
+          pipelineFound = true
+          await storedRunRecords.finishRunnerPipeline(executionId, { status: 'interrupted', error: reason })
+        }
+      }
       const runs = [...activeRuns.values()].filter((run) => (
         run.executionId === executionId && run.status === 'running'
       ))
       const interruptedRuns = interruptRuns(runs, reason)
-      const completionStates = await Promise.all(interruptedRuns.map(waitForRunCompletion))
+      const [completionStates] = await Promise.all([
+        Promise.all(interruptedRuns.map(waitForRunCompletion)),
+        coordinator?.completion ? waitForRunCompletion(coordinator) : Promise.resolve(true),
+      ])
       sendJson(response, 200, {
         ok: true,
         status: 'interrupted',
         executionId,
         pendingRegistration: true,
+        pipelineFound,
         cancelledRunIds: interruptedRuns.map((item) => item.runId),
         cleanupTimedOutRunIds: interruptedRuns
           .filter((_, index) => !completionStates[index])
@@ -924,7 +1000,7 @@ export function createRunnerServer({
       }, origin)
     } catch (error) {
       const message = error instanceof Error ? error.message : '停止运行批次失败'
-      sendJson(response, 400, { ok: false, error: message }, origin)
+      sendJson(response, error.statusCode ?? 400, { ok: false, error: message }, origin)
     }
     return
   }
@@ -933,11 +1009,18 @@ export function createRunnerServer({
   if (request.method === 'POST' && scriptCancellationMatch) {
     try {
       const scriptId = decodeURIComponent(scriptCancellationMatch[1])
-      const reason = parseCancellationReason(await readJson(request))
+      const payload = await readJson(request)
+      const reason = parseCancellationReason(payload)
+      const executionId = payload?.executionId
+      if (executionId !== undefined && !EXECUTION_ID_PATTERN.test(executionId)) throw new Error('批次执行 ID 格式无效')
+      const coordinators = pipelineRunner.list().filter(execution => execution.scriptIds.includes(scriptId) && (!executionId || execution.id === executionId))
       const runs = [...activeRuns.values()].filter((run) => (
-        run.scriptId === scriptId && run.status === 'running'
+        run.scriptId === scriptId && run.status === 'running' && (!executionId || run.executionId === executionId)
       ))
-      if (runs.length === 0) {
+      const batches = new Set([...coordinators.map(execution => execution.id), ...runs.map(run => run.executionId)])
+      if (batches.size > 1) throw Object.assign(new Error('该脚本有多个运行批次，请指定批次执行 ID 停止'), { statusCode: 409 })
+      for (const execution of coordinators) pipelineRunner.cancel(execution.id, reason)
+      if (runs.length === 0 && coordinators.length === 0) {
         sendJson(response, 404, {
           ok: false,
           error: '该脚本没有正在运行的任务',
@@ -958,7 +1041,7 @@ export function createRunnerServer({
       }, origin)
     } catch (error) {
       const message = error instanceof Error ? error.message : '停止脚本运行失败'
-      sendJson(response, 400, { ok: false, error: message }, origin)
+      sendJson(response, error.statusCode ?? 400, { ok: false, error: message }, origin)
     }
     return
   }
@@ -994,28 +1077,36 @@ export function createRunnerServer({
       }
       const payload = { ...submittedPayload, runId }
       const context = await runValidator(payload)
-      const executionId = context.executionId ?? runId
-      const pendingCancellation = takeRunCancellation(runId)
-        ?? pendingExecutionCancellations.get(executionId)
-      const abortController = new AbortController()
-      liveRun = {
-        runId,
-        scriptId: context.scriptId,
-        executionId,
-        status: pendingCancellation ? 'interrupted' : 'running',
-        startedAt: performance.now(),
-        logs: [],
-        result: null,
-        abortController,
-        cancellationReason: pendingCancellation?.reason ?? null,
-        completion: null,
-        cleanupTimer: null,
-        cleanupWaitWarningLogged: false,
-        settled: false,
-        historyPersisted: false,
-        failBatchOnError: payload.failBatchOnError === true,
-      }
-      activeRuns.set(runId, liveRun)
+      const environment = runEnvironment(context, payload)
+      const { pendingCancellation, abortController } = await pipelineRunner.withAdmission(async () => {
+        if (activeRuns.has(runId)) throw new Error('运行任务 ID 已存在')
+        const records = await storedRunRecords.listActiveRunnerPipelines?.() ?? []
+        if (pipelineRunner.ownsScript(context.scriptId, environment) || records.some(record => record.status === 'running' && record.execution?.kind === 'pipeline' && sameExecutionEnvironment(record.environment, environment) && record.scripts.some(script => script.id === context.scriptId))) throw Object.assign(new Error('该脚本已被当前环境运行中的流水线占用'), { statusCode: 409 })
+        const executionId = context.executionId ?? runId
+        const pendingCancellation = takeRunCancellation(runId)
+          ?? pendingExecutionCancellations.get(executionId)
+        const abortController = new AbortController()
+        liveRun = {
+          runId,
+          scriptId: context.scriptId,
+          environment,
+          executionId,
+          status: pendingCancellation ? 'interrupted' : 'running',
+          startedAt: performance.now(),
+          logs: [],
+          result: null,
+          abortController,
+          cancellationReason: pendingCancellation?.reason ?? null,
+          completion: null,
+          cleanupTimer: null,
+          cleanupWaitWarningLogged: false,
+          settled: false,
+          historyPersisted: false,
+          failBatchOnError: payload.failBatchOnError === true,
+        }
+        activeRuns.set(runId, liveRun)
+        return { pendingCancellation, abortController }
+      })
       if (pendingCancellation) {
         appendRunLog(
           liveRun,
@@ -1043,7 +1134,7 @@ export function createRunnerServer({
       sendJson(response, outcome.statusCode, outcome.responseBody, origin)
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Runner 请求处理失败'
-      sendJson(response, 400, { ok: false, error: message }, origin)
+      sendJson(response, error.statusCode ?? 400, { ok: false, error: message }, origin)
     }
     return
   }
@@ -1059,6 +1150,13 @@ export function createRunnerServer({
     try {
       for (const run of activeRuns.values()) {
         if (run.settled && run.result && !run.historyPersisted) await persistRunResult(run)
+      }
+      await pipelineRunner.maintain()
+      for (const run of activeRuns.values()) {
+        if (run.pipelineManaged && !run.settled) {
+          await storedRunRecords.updateRunnerProgress?.(run.executionId, run.scriptId,
+            redactRunRecordResult({ logs: run.logs, durationMs: Math.round(performance.now() - run.startedAt) }, {}, run.secretValues))
+        }
       }
       await storedRunRecords.maintainRunnerRecords?.()
     } catch (error) {

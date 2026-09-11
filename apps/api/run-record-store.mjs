@@ -292,6 +292,7 @@ export function runRecordSummary(record) {
     durationMs: record.durationMs,
     ...(record.failureStage ? { failureStage: record.failureStage } : {}),
     ...(record.error ? { error: record.error } : {}),
+    ...(record.execution ? { execution: structuredClone(record.execution) } : {}),
     counts: structuredClone(record.counts),
     scripts: record.scripts.map(runScriptSummary),
     logs: [],
@@ -390,6 +391,14 @@ export class RunRecordFileStore {
     this.mutationTail = Promise.resolve()
   }
 
+  async listActiveRunnerPipelines() {
+    // Read committed in-memory state without queuing behind a slow result write.
+    // The coordinator's live reservation covers admissions and pending writes.
+    await this.ensureReady()
+    return [...this.records.values()].filter(record => record.status === 'running' && record.execution?.kind === 'pipeline')
+      .map(runRecordSummary)
+  }
+
   async list() {
     return this.mutate(async () => {
       await this.recoverStaleRecords()
@@ -441,6 +450,9 @@ export class RunRecordFileStore {
           statusCode: 404,
           code: 'RUN_RECORD_NOT_FOUND',
         })
+      }
+      if (current.execution?.kind === 'pipeline') {
+        throw new RunRecordStoreError('该批次由 Runner 管理，请通过执行控制接口操作', { statusCode: 409, code: 'RUNNER_OWNED_RECORD' })
       }
       if (current.revision !== expectedRevision || current.updatedAt !== expectedUpdatedAt) {
         throw new RunRecordStoreError('运行记录已在其它页面更新，请刷新后重试', {
@@ -524,11 +536,11 @@ export class RunRecordFileStore {
 
   // Results are already redacted by the server. Keep the batch open for frontend
   // variable extraction/validation; reconciliation finalizes it only after a grace period.
-  async saveRunnerStepResult(recordId, scriptId, result) {
+  async saveRunnerStepResult(recordId, scriptId, result, { replace = false } = {}) {
     return this.mutate(async () => {
       const source = this.records.get(recordId)
       if (!source || source.status !== 'running') return null
-      if (source.runnerTracking?.completedScriptIds?.includes(scriptId)) return structuredClone(source)
+      if (!replace && source.runnerTracking?.completedScriptIds?.includes(scriptId)) return structuredClone(source)
       const record = structuredClone(source)
       const script = record.scripts.find((item) => item.id === scriptId)
       if (!script) return null
@@ -559,6 +571,63 @@ export class RunRecordFileStore {
       record.counts = recoveredCounts(record.scripts)
       record.analysis = recoveredAnalysis(record.scripts, record.logs)
       await this.writeRecord(validateRunRecord(record))
+      return structuredClone(record)
+    })
+  }
+
+  async appendRunnerLog(id, { level = 'info', scope = 'runner', message }) {
+    return this.mutate(async () => {
+      const source = this.records.get(id)
+      if (!source || source.status !== 'running') return
+      const record = structuredClone(source)
+      record.logs.push({ id: this.logIdFactory(), timestamp: this.now().toISOString(), level, scope, message })
+      record.updatedAt = this.now().toISOString()
+      record.revision += 1
+      record.analysis = recoveredAnalysis(record.scripts, record.logs)
+      await this.writeRecord(record)
+    })
+  }
+
+  async updateRunnerProgress(id, scriptId, result) {
+    return this.mutate(async () => {
+      const source = this.records.get(id)
+      if (!source || source.status !== 'running') return
+      const record = structuredClone(source)
+      const script = record.scripts.find(item => item.id === scriptId)
+      if (!script || !['queued', 'running'].includes(script.status)) return
+      if (script.logs.length === result.logs.length && result.durationMs - (script.durationMs ?? 0) < 5000) return
+      script.status = 'running'
+      script.durationMs = result.durationMs
+      script.logs = result.logs.map(log => ({ ...log, id: this.logIdFactory(), scope: 'script',
+        scriptRecordId: script.recordId, scriptName: script.name }))
+      record.logs = [...record.logs.filter(log => log.scope !== 'script'), ...record.scripts.flatMap(item => item.logs)]
+      record.updatedAt = this.now().toISOString()
+      record.revision += 1
+      record.durationMs = durationBetween(record.startedAt, record.updatedAt)
+      record.counts = recoveredCounts(record.scripts)
+      record.analysis = recoveredAnalysis(record.scripts, record.logs)
+      await this.writeRecord(record)
+    })
+  }
+
+  async finishRunnerPipeline(id, { status, error, stage = 'runner' } = {}) {
+    return this.mutate(async () => {
+      const source = this.records.get(id)
+      if (!source || source.status !== 'running') return source ? structuredClone(source) : null
+      const record = structuredClone(source)
+      record.status = status ?? recoveredTerminalStatus(record.scripts)
+      if (error) { record.error = error; record.failureStage = stage }
+      record.scripts = record.scripts.map(script => ['queued', 'running'].includes(script.status)
+        ? { ...script, status: 'skipped', error: error || '前序步骤失败，未执行' } : script)
+      record.finishedAt = this.now().toISOString()
+      record.updatedAt = record.finishedAt
+      record.durationMs = durationBetween(record.startedAt, record.finishedAt)
+      record.revision += 1
+      record.counts = recoveredCounts(record.scripts)
+      record.logs.push({ id: this.logIdFactory(), timestamp: record.finishedAt, level: record.status === 'passed' ? 'success' : 'warning',
+        scope: 'runner', message: error || 'Runner 已完成全部流水线步骤并保存结果' })
+      record.analysis = recoveredAnalysis(record.scripts, record.logs)
+      await this.writeRecord(record)
       return structuredClone(record)
     })
   }
@@ -679,7 +748,7 @@ export class RunRecordFileStore {
         continue
       }
       const lastUpdate = Math.max(Date.parse(source.updatedAt), Date.parse(source.runnerTracking?.lastSeenAt ?? source.updatedAt))
-      const runnerManaged = this.runnerActivityProvider && (source.runnerTracking
+      const runnerManaged = this.runnerActivityProvider && (source.execution?.kind === 'pipeline' || source.runnerTracking
         || source.scripts.some((script) => script.status === 'running'))
       const deadline = runnerManaged
         ? Math.max(lastUpdate, this.runnerStartedAt) + this.runnerRecoveryGraceMs

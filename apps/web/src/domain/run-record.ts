@@ -75,6 +75,7 @@ export interface RunRecordAnalysis {
 }
 
 export interface RunRecord {
+  execution?: { kind: 'pipeline'; pipelineId: string; fingerprint: string }
   schemaVersion: 1
   revision: number
   id: string

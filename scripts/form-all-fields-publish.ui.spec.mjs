@@ -1,6 +1,7 @@
 import { clickWhenReady, observeUiReadiness, waitForUiReady } from './support/ui-readiness.mjs'
 import { expect as flowExpect, scaleTimeout } from './support/environment-timeouts.mjs'
-import { access, mkdir, writeFile } from 'node:fs/promises'
+import { access, mkdir, rename, rm, writeFile } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { deflateSync } from 'node:zlib'
@@ -106,7 +107,12 @@ async function ensureHeaderImage(headerImagePath) {
   }
 
   await mkdir(dirname(DEFAULT_HEADER_IMAGE_PATH), { recursive: true })
-  await writeFile(DEFAULT_HEADER_IMAGE_PATH, createDefaultHeaderImage())
+  // Concurrent cold starts must never upload a partially written shared fixture.
+  const temporaryPath = `${DEFAULT_HEADER_IMAGE_PATH}.${randomUUID()}.tmp`
+  try {
+    await writeFile(temporaryPath, createDefaultHeaderImage())
+    await rename(temporaryPath, DEFAULT_HEADER_IMAGE_PATH)
+  } finally { await rm(temporaryPath, { force: true }) }
   return DEFAULT_HEADER_IMAGE_PATH
 }
 

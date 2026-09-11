@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   Connection,
@@ -20,6 +20,7 @@ import type { AutomationPipeline, AutomationPipelineDraft } from '@/domain/autom
 import type { TestEnvironment } from '@/domain/environment'
 import type { AutomationScript } from '@/domain/script'
 import { services } from '@/services/container'
+import type { PipelineExecutionSnapshot } from '@/services/automation-pipelines/automation-pipeline-execution-service'
 
 const router = useRouter()
 const pipelines = ref<AutomationPipeline[]>([])
@@ -30,9 +31,21 @@ const searchKeyword = ref('')
 const selectedEnvironmentId = ref('')
 const currentPage = ref(1)
 const pageSize = 8
+let refreshTimer: number | undefined
+let refreshingExecution = false
 const editorVisible = ref(false)
 const editingPipeline = ref<AutomationPipeline | null>(null)
-const runningPipelineIds = ref(new Set<string>())
+const activeExecutions = ref<PipelineExecutionSnapshot[]>([])
+const runningPipelineIds = computed(() => new Set(activeExecutions.value
+  .filter(execution => !execution.environment?.id || execution.environment.id === selectedEnvironmentId.value)
+  .map(execution => execution.pipelineId)))
+function syncExecutions(): void {
+  activeExecutions.value = services.automationPipelineExecution.getActiveExecutions?.() ?? []
+}
+function selectedExecution(pipelineId: string): PipelineExecutionSnapshot | undefined {
+  return activeExecutions.value.find(execution => execution.pipelineId === pipelineId
+    && (!execution.environment?.id || execution.environment.id === selectedEnvironmentId.value))
+}
 const stoppingPipelineIds = ref(new Set<string>())
 
 const scriptById = computed(() => new Map(scripts.value.map((script) => [script.id, script])))
@@ -87,15 +100,14 @@ async function loadData(showSuccess = false): Promise<void> {
       services.scripts.list(),
       services.environments.list(),
     ])
+    await services.automationPipelineExecution.refresh?.()
     pipelines.value = nextPipelines
     scripts.value = nextScripts
     environments.value = nextEnvironments
     if (!selectedEnvironment.value) {
       selectedEnvironmentId.value = nextEnvironments.find((environment) => environment.active && environment.enabled)?.id ?? ''
     }
-    runningPipelineIds.value = new Set(nextPipelines
-      .filter((pipeline) => services.automationPipelineExecution.isRunning(pipeline.id))
-      .map((pipeline) => pipeline.id))
+    syncExecutions()
     const lastPage = Math.max(1, Math.ceil(filteredPipelines.value.length / pageSize))
     currentPage.value = Math.min(currentPage.value, lastPage)
     if (showSuccess) ElMessage.success('自动化配置已刷新')
@@ -164,6 +176,7 @@ function runPipeline(pipeline: AutomationPipeline): void {
   }
   if (runningPipelineIds.value.has(pipeline.id)) return
 
+  const executionLabel = `${pipeline.name} · ${selectedEnvironment.value.name}`
   let task: ReturnType<typeof services.automationPipelineExecution.run>
   try {
     task = services.automationPipelineExecution.run(pipeline, selectedEnvironment.value.id)
@@ -172,79 +185,60 @@ function runPipeline(pipeline: AutomationPipeline): void {
     return
   }
 
-  runningPipelineIds.value = new Set([...runningPipelineIds.value, pipeline.id])
-  ElMessage.success(`“${pipeline.name}”已开始运行`)
+  syncExecutions()
+  ElMessage.success(`“${executionLabel}”已开始运行`)
   void task
     .then(async (record) => {
       await loadData()
       if (record.status === 'passed') {
-        ElMessage.success(`“${pipeline.name}”已按顺序运行完成`)
+        ElMessage.success(`“${executionLabel}”已按顺序运行完成`)
       } else if (record.status === 'partial') {
         ElMessage({
           type: 'warning',
-          message: `“${pipeline.name}”部分通过，请查看未通过断言`,
+          message: `“${executionLabel}”部分通过，请查看未通过断言`,
           customClass: 'status-message--partial',
         })
       } else if (record.status === 'interrupted') {
-        ElMessage.warning(`“${pipeline.name}”已停止`)
+        ElMessage.warning(`“${executionLabel}”已停止`)
       } else {
-        ElMessage.error(`“${pipeline.name}”执行失败，请查看运行记录`)
+        ElMessage.error(`“${executionLabel}”执行失败，请查看运行记录`)
       }
     })
     .catch((error) => {
       ElMessage.error(error instanceof Error ? error.message : '自动化配置运行失败')
     })
-    .finally(() => {
-      const next = new Set(runningPipelineIds.value)
-      next.delete(pipeline.id)
-      runningPipelineIds.value = next
-    })
+    .finally(syncExecutions)
 }
 
-async function forceStopPipeline(pipeline: AutomationPipeline): Promise<void> {
-  if (stoppingPipelineIds.value.has(pipeline.id)) return
-  stoppingPipelineIds.value = new Set([...stoppingPipelineIds.value, pipeline.id])
+async function confirmStopExecution(execution: PipelineExecutionSnapshot): Promise<void> {
+  if (stoppingPipelineIds.value.has(execution.id)) return
+  const label = `${execution.pipelineName ?? execution.pipelineId} · ${execution.environment?.name ?? '未知环境'}`
   try {
-    const result = await services.automationPipelineExecution.stop(pipeline.id)
-    if (result.stopped) {
-      if (result.cleanupTimedOutRunIds?.length) {
-        ElMessage.warning(
-          `“${pipeline.name}”已中断，但 ${result.cleanupTimedOutRunIds.length} 个任务的浏览器清理超时，请检查 Runner 日志`,
-        )
-      } else {
-        ElMessage.success(`“${pipeline.name}”已提交强制停止请求`)
-      }
-    } else {
-      ElMessage.warning(`“${pipeline.name}”当前没有正在运行的任务`)
-      const nextRunning = new Set(runningPipelineIds.value)
-      nextRunning.delete(pipeline.id)
-      runningPipelineIds.value = nextRunning
-    }
+    await ElMessageBox.confirm(
+      `将停止“${label}”批次，未执行步骤不会继续运行。确定强制停止吗？`,
+      '强制停止自动化配置',
+      { confirmButtonText: '强制停止', cancelButtonText: '取消', confirmButtonClass: 'el-button--danger', type: 'warning' },
+    )
+  } catch { return }
+  stoppingPipelineIds.value = new Set([...stoppingPipelineIds.value, execution.id])
+  try {
+    const result = await services.automationPipelineExecution.stopByRecordId(execution.id)
+    if (result.cleanupTimedOutRunIds?.length) ElMessage.warning(`“${label}”已提交停止请求，部分浏览器仍在清理`)
+    else if (result.stopped) ElMessage.success(`“${label}”已提交强制停止请求`)
+    else ElMessage.warning(`“${label}”当前没有正在运行的任务`)
+    await services.automationPipelineExecution.refresh?.()
+    syncExecutions()
   } catch (error) {
     ElMessage.error(error instanceof Error ? `强制停止失败：${error.message}` : '强制停止失败')
   } finally {
     const next = new Set(stoppingPipelineIds.value)
-    next.delete(pipeline.id)
+    next.delete(execution.id)
     stoppingPipelineIds.value = next
   }
 }
-
-async function confirmForceStop(pipeline: AutomationPipeline): Promise<void> {
-  try {
-    await ElMessageBox.confirm(
-      '当前自动化配置将立即中断，未执行步骤不会继续运行。确定强制停止吗？',
-      '强制停止自动化配置',
-      {
-        confirmButtonText: '强制停止',
-        cancelButtonText: '取消',
-        confirmButtonClass: 'el-button--danger',
-        type: 'warning',
-      },
-    )
-  } catch {
-    return
-  }
-  await forceStopPipeline(pipeline)
+function confirmForceStop(pipeline: AutomationPipeline): void {
+  const execution = selectedExecution(pipeline.id)
+  if (execution) void confirmStopExecution(execution)
 }
 
 function mappingCount(pipeline: AutomationPipeline): number {
@@ -256,7 +250,19 @@ function formatUpdatedAt(value: string): string {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN', { hour12: false })
 }
 
-onMounted(() => loadData())
+onMounted(() => {
+  void loadData()
+  refreshTimer = window.setInterval(async () => {
+    if (refreshingExecution) return
+    refreshingExecution = true
+    try {
+      await services.automationPipelineExecution.refresh?.()
+      syncExecutions()
+    } catch { /* Keep the last known locks during a temporary connection failure. */ }
+    finally { refreshingExecution = false }
+  }, 1_000)
+})
+onBeforeUnmount(() => { if (refreshTimer !== undefined) window.clearInterval(refreshTimer) })
 </script>
 
 <template>
@@ -289,7 +295,7 @@ onMounted(() => loadData())
       <span class="execution-environment__icon"><el-icon :size="20"><Setting /></el-icon></span>
       <div class="execution-environment__label">
         <strong>运行环境</strong>
-        <span>选择本次执行环境，所有步骤使用同一环境</span>
+        <span>不同环境可同时运行，最多三个批次；每个批次内按顺序执行</span>
       </div>
       <el-select
         v-model="selectedEnvironmentId"
@@ -310,6 +316,17 @@ onMounted(() => loadData())
       </div>
       <span v-else class="execution-environment__warning">未选择环境，暂不能运行配置</span>
       <el-button text :icon="Setting" @click="router.push('/environments')">管理环境</el-button>
+    </section>
+
+    <section v-if="activeExecutions.length" class="active-executions" aria-label="后台运行批次">
+      <strong>后台运行批次（{{ activeExecutions.length }} / 3）</strong>
+      <div v-for="execution in activeExecutions" :key="execution.id" class="active-execution">
+        <span>{{ execution.pipelineName ?? execution.pipelineId }}</span>
+        <el-tag>{{ execution.environment?.name || '环境加载中' }} · {{ execution.environment?.code }}</el-tag>
+        <span>{{ execution.currentScriptId ? (scriptById.get(execution.currentScriptId)?.name ?? execution.currentScriptId) : ({ login: '登录中', saving: '保存结果中', recovering: '恢复状态中', submitting: '提交中' }[execution.phase ?? ''] ?? '执行中') }}</span>
+        <el-button text @click="router.push('/runs')">运行记录</el-button>
+        <el-button text type="danger" :loading="stoppingPipelineIds.has(execution.id)" @click="confirmStopExecution(execution)">停止此批次</el-button>
+      </div>
     </section>
 
     <section class="automation-panel">
@@ -376,7 +393,7 @@ onMounted(() => loadData())
           </template>
         </el-table-column>
 
-        <el-table-column label="状态" width="130">
+        <el-table-column label="当前环境状态" width="130">
           <template #default="scope">
             <el-tooltip v-if="issuesFor(scope.row).length" :content="issuesFor(scope.row).join('；')" placement="top">
               <el-tag type="danger" effect="light">配置异常</el-tag>
@@ -410,8 +427,8 @@ onMounted(() => loadData())
                     text
                     type="danger"
                     :icon="VideoPause"
-                    :loading="stoppingPipelineIds.has(scope.row.id)"
-                    :disabled="!runningPipelineIds.has(scope.row.id) || stoppingPipelineIds.has(scope.row.id)"
+                    :loading="stoppingPipelineIds.has(selectedExecution(scope.row.id)?.id ?? '')"
+                    :disabled="!runningPipelineIds.has(scope.row.id) || stoppingPipelineIds.has(selectedExecution(scope.row.id)?.id ?? '')"
                     aria-label="强制停止自动化配置"
                     @click="confirmForceStop(scope.row)"
                   />
@@ -457,6 +474,9 @@ onMounted(() => loadData())
 </template>
 
 <style scoped>
+.active-executions { margin: 16px 0; padding: 16px; background: var(--color-bg-card, white); border-radius: 12px; }
+.active-execution { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 10px; }
+
 .execution-environment {
   display: flex;
   min-height: 84px;

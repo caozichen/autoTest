@@ -1046,6 +1046,7 @@ export function attachNetworkObserver(target, {
     ready,
     setPhase,
     stop,
+    waitForIdle: ({ timeoutMs = responseDrainTimeoutMs } = {}) => waitUntilIdle(Math.max(0, Number(timeoutMs) || 0)),
     get phase() {
       return phase
     },

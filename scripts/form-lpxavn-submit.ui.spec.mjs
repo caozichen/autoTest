@@ -1540,6 +1540,11 @@ export async function run({
       pageFieldKeys: PAGE_FIELD_KEYS,
       logger,
     })
+    // Finish the old document's API bodies and images before intentionally
+    // replacing it. A quick reload can otherwise strand Chrome network events.
+    const initialNetworkComplete = await networkObserver.waitForIdle({ timeoutMs: scaleTimeout(NAVIGATION_TIMEOUT_MS) })
+    flowExpect(initialNetworkComplete, '空表校验后，公开页接口或资源必须加载完成后才能重新加载及继续提报').toBe(true)
+    logger('info', '公开页接口和资源已加载完成，准备重新加载以清除空表校验状态')
     networkObserver.setPhase('第 1 页重新加载')
     await page.reload({ waitUntil: 'domcontentloaded' })
     await assertCurrentPage(page, 1, PAGE_FIELD_KEYS[0], PAGE_FIELD_LABELS[0], PAGE_CARD_COUNTS[0], logger)

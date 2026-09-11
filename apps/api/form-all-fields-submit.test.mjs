@@ -174,6 +174,9 @@ test('registered production entry uses formId for public GET, validation, submis
   const observedRequests = []
   let submittedPayload = null
   let siteBaseUrl = ''
+  let documents = 0
+  let initialLoadsFinished = 0
+  let loadsFinishedBeforeReload = null
 
   const server = createServer(async (request, response) => {
     const requestUrl = new URL(request.url || '/', 'http://fixture.local')
@@ -185,13 +188,27 @@ test('registered production entry uses formId for public GET, validation, submis
 
     try {
       if (request.method === 'GET' && requestUrl.pathname === '/form/' && requestUrl.searchParams.get('id') === formId) {
+        documents++
+        if (documents === 2) loadsFinishedBeforeReload = initialLoadsFinished
         response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
-        response.end(createFullRunFormHtml({
+        let html = createFullRunFormHtml({
           origin: siteBaseUrl,
           formId,
           title: fixture.data.form.title,
           fieldKeys: linkedContract.fieldKeys,
-        }))
+        })
+        if (documents === 1) html = html.replace('</body>', '<img src="/slow-initial.png"><script>fetch("/api/area/tree")</script></body>')
+        response.end(html)
+        return
+      }
+      if (requestUrl.pathname === '/slow-initial.png' || requestUrl.pathname === '/api/area/tree') {
+        const isImage = requestUrl.pathname.endsWith('.png')
+        response.writeHead(200, { 'Content-Type': isImage ? 'image/png' : 'application/json' })
+        response.flushHeaders()
+        setTimeout(() => {
+          initialLoadsFinished++
+          response.end(isImage ? ONE_PIXEL_PNG : '{"code":0,"data":[]}')
+        }, 2500)
         return
       }
       if (request.method === 'GET' && requestUrl.pathname === `/f/form/${formId}`) {
@@ -265,6 +282,7 @@ test('registered production entry uses formId for public GET, validation, submis
         .map(({ module, name, error }) => `[${module}] ${name}: ${error ?? '无错误详情'}`),
     ].filter(Boolean).join('\n'),
   )
+  assert.equal(loadsFinishedBeforeReload, 2, '主动刷新前必须完成旧文档的地区树正文和图片加载')
   assert.equal(result.result.scriptId, SCRIPT_ID)
   assert.equal(result.result.status, 'submitted')
   assert.equal(result.result.formId, formId)

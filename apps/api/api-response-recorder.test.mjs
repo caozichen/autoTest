@@ -673,6 +673,43 @@ test('can discard only unfinished requests during browser teardown', async () =>
   assert.equal(result.resources.length, 0)
 })
 
+test('waiting before navigation drains API bodies and images without sealing subsequent evidence', async () => {
+  const context = new FakeNetworkTarget()
+  const observer = attachNetworkObserver(context)
+  const request = fakeRequest({ url: 'https://example.test/api/area/tree' })
+  const image = fakeRequest({ url: 'https://example.test/initial.png', resourceType: 'image' })
+  const response = fakeResponse(request)
+  let finishBody
+  response.text = () => new Promise(resolve => { finishBody = resolve })
+  finish(context, request, response)
+  context.emit('request', image)
+  await new Promise(resolve => setImmediate(resolve))
+  let completed = false
+  const waiting = observer.waitForIdle({ timeoutMs: 1000 }).then(value => { completed = value; return value })
+  finishBody('{"code":0,"data":[]}')
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(completed, false)
+  const imageResponse = fakeResponse(image, { headers: { 'content-type': 'image/png' } })
+  context.emit('response', imageResponse); context.emit('requestfinished', image)
+  assert.equal(await waiting, true)
+  assert.equal(observer.stopped, false)
+  const nextRequest = fakeRequest({ url: 'https://example.test/api/after-reload' })
+  finish(context, nextRequest, fakeResponse(nextRequest))
+  const result = await observer.stop()
+  assert.equal(result.api.length, 2); assert.equal(result.resources.length, 1)
+  assert.ok([...result.api, ...result.resources].every(entry => entry.ok))
+})
+
+test('a navigation wait timeout retains the unfinished request as a failure', async () => {
+  const context = new FakeNetworkTarget()
+  const observer = attachNetworkObserver(context, { responseDrainTimeoutMs: 1 })
+  context.emit('request', fakeRequest())
+  assert.equal(await observer.waitForIdle({ timeoutMs: 1 }), false)
+  const result = await observer.stop()
+  assert.equal(result.api[0].ok, false)
+  assert.equal(result.api[0].failureKind, 'timeout')
+})
+
 test('shouldRecord and subscriber exceptions never escape network event handlers', async () => {
   const context = new FakeNetworkTarget()
   const observer = attachNetworkObserver(context, {

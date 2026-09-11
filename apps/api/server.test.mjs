@@ -423,7 +423,7 @@ test('rejects invalid execution cancellation IDs without creating a reservation'
   assert.match(result.error, /批次执行 ID 格式无效/)
 })
 
-test('force stops every active run for a script and returns 404 when none exist', async (t) => {
+test('script stop rejects ambiguous batches, stops an exact batch and returns 404 when none exist', async (t) => {
   const { baseUrl, signals } = await startTestServer(t)
   const runIds = ['run-script-001', 'run-script-002']
   const runResponses = runIds.map((runId) => fetch(`${baseUrl}/runs`, {
@@ -438,9 +438,17 @@ test('force stops every active run for a script and returns 404 when none exist'
     { method: 'POST' },
   )
   const cancellation = await cancelResponse.json()
-  assert.equal(cancelResponse.status, 200)
-  assert.deepEqual(new Set(cancellation.cancelledRunIds), new Set(runIds))
-  assert.equal(signals.every((signal) => signal.aborted), true)
+  assert.equal(cancelResponse.status, 409)
+  assert.match(cancellation.error, /多个运行批次/)
+  assert.equal(signals.some(signal => signal.aborted), false)
+  for (const runId of runIds) {
+    const response = await fetch(`${baseUrl}/scripts/form-all-fields-publish/cancel`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ executionId: runId }),
+    })
+    assert.equal(response.status, 200)
+    assert.deepEqual((await response.json()).cancelledRunIds, [runId])
+  }
+  assert.equal(signals.every(signal => signal.aborted), true)
   await Promise.all(runResponses)
 
   const noMatchResponse = await fetch(

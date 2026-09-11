@@ -25,7 +25,6 @@ import type { AutomationScript, ScriptDraft, ScriptStatus } from '@/domain/scrip
 import { services } from '@/services/container'
 import { authenticateEnvironment, authenticationSuccessMessage } from '@/services/environments/authenticate-environment'
 import { createRunScriptProgressDraft } from '@/services/run-records/script-run-progress'
-import { collectBatchStopScriptIds } from '@/services/scripts/script-batch-stop-plan'
 import { buildScriptRunContext } from '@/services/scripts/script-run-context'
 import { restoreLatestScriptRuns } from '@/services/scripts/script-run-history'
 import { applyScriptResponseVariables } from '@/services/scripts/script-response-variables'
@@ -46,10 +45,18 @@ const editingScript = ref<AutomationScript | null>(null)
 const editorRuntimeVariables = ref<RuntimeVariable[]>([])
 const resultVisible = ref(false)
 const resultScript = ref<AutomationScript | null>(null)
+const resultRecordId = ref<string | null>(null)
+const executionPickerVisible = ref(false)
+const executionPickerMode = ref<'stop' | 'logs'>('stop')
+const executionPickerScript = ref<AutomationScript | null>(null)
+const executionChoices = ref<RunRecord[]>([])
 const runningScriptIds = ref<Set<string>>(new Set())
 const stoppingScriptIds = ref<Set<string>>(new Set())
 const router = useRouter()
 let liveRefreshTimer: number | null = null
+let historyRefreshTimer: number | undefined
+let historyRefreshing = false
+let localBatchCount = 0
 let runHistoryRecords: RunRecord[] = []
 
 const statusOptions: Array<{ label: string; value: 'all' | ScriptStatus }> = [
@@ -102,7 +109,7 @@ async function refreshScriptsFromHistory(): Promise<void> {
   const restoredScripts = restoreLatestScriptRuns(latestScripts, records)
   scripts.value = restoredScripts
   setRunningScripts(records)
-  if (resultScript.value) {
+  if (resultScript.value && !resultRecordId.value) {
     resultScript.value = restoredScripts.find((script) => script.id === resultScript.value?.id)
       ?? resultScript.value
   }
@@ -173,7 +180,7 @@ async function refreshLiveScripts(): Promise<void> {
     preserveRuntimeState: true,
   })
   scripts.value = restoredScripts
-  if (resultScript.value) {
+  if (resultScript.value && !resultRecordId.value) {
     resultScript.value = restoredScripts.find((script) => script.id === resultScript.value?.id)
       ?? resultScript.value
   }
@@ -262,72 +269,51 @@ async function removeScript(script: AutomationScript): Promise<void> {
   }
 }
 
-async function forceStop(script: AutomationScript): Promise<void> {
-  if (!isScriptRunning(script) || stoppingScriptIds.value.has(script.id)) return
-  let stopScriptIds = [script.id]
-  let stopRequestsSucceeded = false
+async function forceStop(script: AutomationScript, selectedRecord?: RunRecord): Promise<void> {
+  if (stoppingScriptIds.value.has(script.id)) return
   stoppingScriptIds.value = new Set([...stoppingScriptIds.value, script.id])
   try {
-    const records = await services.runRecords.list()
-    const batchScriptIds = collectBatchStopScriptIds(records, script.id)
-    if (batchScriptIds.length > 0) stopScriptIds = batchScriptIds
-    stoppingScriptIds.value = new Set([...stoppingScriptIds.value, ...stopScriptIds])
-
-    const stopSettled = await Promise.allSettled(
-      stopScriptIds.map((scriptId) => services.scripts.stop(scriptId)),
-    )
-    const failedStops = stopSettled.flatMap((result, index) => (
-      result.status === 'rejected'
-        ? [{ scriptId: stopScriptIds[index], reason: result.reason }]
-        : []
-    ))
-    if (failedStops.length > 0) {
-      const firstFailure = failedStops[0]
-      const reason = firstFailure?.reason instanceof Error
-        ? firstFailure.reason.message
-        : String(firstFailure?.reason ?? '未知错误')
-      throw new Error(`${failedStops.length} 个脚本停止失败（${firstFailure?.scriptId ?? script.id}：${reason}）`)
-    }
-
-    stopRequestsSucceeded = true
-    const stopResults = stopSettled.flatMap((result) => (
-      result.status === 'fulfilled' ? [result.value] : []
-    ))
-    const interruptedRecords = await services.runRecords.interruptByScriptId(script.id)
-    await refreshScriptsAfterStop()
-    const cleanupTimedOutRunIds = new Set(
-      stopResults.flatMap((result) => result.cleanupTimedOutRunIds ?? []),
-    )
-    if (cleanupTimedOutRunIds.size > 0) {
-      ElMessage.warning(
-        `运行批次已中断，但 ${cleanupTimedOutRunIds.size} 个任务的浏览器清理超时，请检查 Runner 日志`,
-      )
-    } else if (stopResults.some((result) => result.runnerFound)) {
-      ElMessage.success(stopScriptIds.length > 1
-        ? `批次内 ${stopScriptIds.length} 个脚本已强制停止，运行批次已标记为中断`
-        : '脚本已强制停止，运行批次已标记为中断')
-    } else if (interruptedRecords.length > 0) {
-      ElMessage.success('Runner 中未发现活动任务，本地运行批次已解除锁定')
+    const records = (await services.runRecords.list()).filter(record => record.status === 'running' && record.scripts.some(step => step.id === script.id))
+    if (!selectedRecord && records.length > 1) throw new Error('该脚本有多个运行批次，请重新选择')
+    const record = selectedRecord ? records.find(item => item.id === selectedRecord.id) : records[0]
+    if (selectedRecord && !record) { ElMessage.info('所选批次已结束'); return }
+    let result: { cleanupTimedOutRunIds?: string[] }
+    if (record?.execution?.kind === 'pipeline') {
+      result = await services.automationPipelineExecution.stopByRecordId(record.id)
+    } else if (record) {
+      result = await services.scripts.stopExecution(record.id)
+      await services.runRecords.interrupt(record.id, '用户已强制停止运行批次')
     } else {
-      ElMessage.warning('未发现活动任务，页面运行状态已解除')
+      result = await services.scripts.stop(script.id)
     }
-  } catch (error) {
     await refreshScriptsAfterStop()
-    const message = error instanceof Error ? error.message : '未知错误'
-    ElMessage.error(stopRequestsSucceeded
-      ? `脚本停止请求已完成，但运行批次状态更新失败：${message}；批次仍保持运行锁定`
-      : `强制停止失败：${message}；批次仍保持运行锁定`)
+    if (result.cleanupTimedOutRunIds?.length) ElMessage.warning('已提交停止请求，部分浏览器仍在清理，请查看运行记录')
+    else ElMessage.success('已提交所选批次的停止请求')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? `强制停止失败：${error.message}` : '强制停止失败')
+    await refreshScriptsAfterStop()
   } finally {
     const next = new Set(stoppingScriptIds.value)
-    for (const scriptId of stopScriptIds) next.delete(scriptId)
+    next.delete(script.id)
     stoppingScriptIds.value = next
   }
 }
 
-async function confirmForceStop(script: AutomationScript): Promise<void> {
+async function confirmForceStop(script: AutomationScript, selectedRecord?: RunRecord): Promise<void> {
+  try {
+    const records = (await services.runRecords.list()).filter(record => record.status === 'running' && record.scripts.some(step => step.id === script.id))
+    if (!selectedRecord && records.length > 1) {
+      showExecutionPicker(script, records, 'stop')
+      return
+    }
+    selectedRecord ??= records[0]
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '运行批次加载失败')
+    return
+  }
   try {
     await ElMessageBox.confirm(
-      '当前运行将立即中断，确定强制停止此脚本吗？',
+      selectedRecord ? `将停止“${selectedRecord.environment.name} · ${selectedRecord.displayId}”批次，确定继续吗？` : '当前运行将立即中断，确定强制停止此脚本吗？',
       '强制停止脚本',
       {
         confirmButtonText: '强制停止',
@@ -339,7 +325,7 @@ async function confirmForceStop(script: AutomationScript): Promise<void> {
   } catch {
     return
   }
-  await forceStop(script)
+  await forceStop(script, selectedRecord)
 }
 
 async function runScripts(targets: AutomationScript[]): Promise<void> {
@@ -367,6 +353,7 @@ async function runScripts(targets: AutomationScript[]): Promise<void> {
     return
   }
 
+  localBatchCount += 1
   const lockedIds = runnable.map((script) => script.id)
   runningScriptIds.value = new Set([...runningScriptIds.value, ...lockedIds])
 
@@ -524,12 +511,60 @@ async function runScripts(targets: AutomationScript[]): Promise<void> {
       })
     }
     services.runtimeVariables.clear()
+    localBatchCount -= 1
   }
 }
 
-function openResult(script: AutomationScript): void {
-  resultScript.value = script
+function latestRecordForScript(scriptId: string): RunRecord | undefined {
+  return [...runHistoryRecords].sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt))
+    .find(record => record.scripts.some(step => step.id === scriptId && step.status !== 'queued'))
+}
+
+async function refreshPipelineResult(script: AutomationScript): Promise<void> {
+  const recordId = resultRecordId.value
+  const latest = recordId ? runHistoryRecords.find(record => record.id === recordId) : latestRecordForScript(script.id)
+  if (!latest || (latest.execution?.kind !== 'pipeline' && !recordId)) return
+  const detail = await services.runRecords.get(latest.id)
+  const step = detail?.scripts.find(item => item.id === script.id)
+  if (!step || resultScript.value?.id !== script.id || !resultVisible.value || resultRecordId.value !== recordId) return
+  const status = step.status === 'skipped' ? 'interrupted' : step.status === 'queued' ? 'running' : step.status
+  resultScript.value = { ...script, name: `${scripts.value.find(item => item.id === script.id)?.name ?? script.name} · ${detail!.environment.name}`, lastRunResult: { ok: status === 'passed', status, durationMs: step.durationMs ?? 0,
+    logs: step.logs, assertions: step.assertions, apiResponses: step.apiResponses, resourceResponses: step.resourceResponses,
+    networkSummary: step.networkSummary, artifacts: step.artifacts, output: step.output, error: step.error } }
+}
+
+function showExecutionPicker(script: AutomationScript, records: RunRecord[], mode: 'stop' | 'logs'): void {
+  executionPickerScript.value = script
+  executionChoices.value = records
+  executionPickerMode.value = mode
+  executionPickerVisible.value = true
+}
+function chooseExecution(record: RunRecord): void {
+  const script = executionPickerScript.value
+  if (!script) return
+  executionPickerVisible.value = false
+  if (executionPickerMode.value === 'stop') void confirmForceStop(script, record)
+  else showResult(script, record)
+}
+function showResult(script: AutomationScript, record?: RunRecord): void {
+  resultRecordId.value = record?.id ?? null
+  resultScript.value = { ...script, ...(record ? { lastRunResult: undefined } : {}) }
   resultVisible.value = true
+  void refreshPipelineResult(script).catch(error => ElMessage.error(error instanceof Error ? error.message : '运行日志加载失败'))
+}
+function openResult(script: AutomationScript): void {
+  const latestByEnvironment = new Map<string, RunRecord>()
+  for (const record of [...runHistoryRecords].sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt))) {
+    if (!record.scripts.some(step => step.id === script.id && step.status !== 'queued')) continue
+    if (!latestByEnvironment.has(record.environment.id)) latestByEnvironment.set(record.environment.id, record)
+  }
+  const choices = [...latestByEnvironment.values()]
+  if (choices.length > 1) showExecutionPicker(script, choices, 'logs')
+  else showResult(script, choices[0])
+}
+function runningEnvironments(scriptId: string): string {
+  return [...new Set(runHistoryRecords.filter(record => record.status === 'running' && record.scripts.some(step => step.id === scriptId))
+    .map(record => record.environment.code))].join(' / ')
 }
 
 function handleSelectionChange(rows: AutomationScript[]): void {
@@ -538,9 +573,21 @@ function handleSelectionChange(rows: AutomationScript[]): void {
 
 onMounted(async () => {
   await Promise.all([loadScripts(), loadEnvironments()])
+  historyRefreshTimer = window.setInterval(async () => {
+    if (historyRefreshing || localBatchCount > 0) return
+    historyRefreshing = true
+    try {
+      await refreshScriptsFromHistory()
+      if (resultVisible.value && resultScript.value) await refreshPipelineResult(resultScript.value)
+    } catch { /* Retain the last known state while Runner is temporarily offline. */ }
+    finally { historyRefreshing = false }
+  }, 1000)
 })
 
-onBeforeUnmount(stopLiveRefresh)
+onBeforeUnmount(() => {
+  stopLiveRefresh()
+  if (historyRefreshTimer !== undefined) window.clearInterval(historyRefreshTimer)
+})
 </script>
 
 <template>
@@ -657,11 +704,12 @@ onBeforeUnmount(stopLiveRefresh)
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="132">
+        <el-table-column label="状态" min-width="160">
           <template #default="scope">
             <el-tag :type="statusMap[displayStatus(scope.row)].type" :class="{ 'status-tag--partial': displayStatus(scope.row) === 'partial' }" size="small" effect="light">
               {{ statusMap[displayStatus(scope.row)].label }}
             </el-tag>
+            <div class="running-environments">{{ runningEnvironments(scope.row.id) }}</div>
           </template>
         </el-table-column>
         <el-table-column label="创建时间" width="180">
@@ -696,7 +744,7 @@ onBeforeUnmount(stopLiveRefresh)
                   text
                   :icon="Document"
                   aria-label="查看运行日志"
-                  :disabled="!scope.row.lastRunResult"
+                  :disabled="!scope.row.lastRunResult && latestRecordForScript(scope.row.id)?.execution?.kind !== 'pipeline'"
                   @click="openResult(scope.row)"
                 />
               </el-tooltip>
@@ -738,11 +786,22 @@ onBeforeUnmount(stopLiveRefresh)
       :variables="editorVariableOptions"
       @save="saveScript"
     />
+    <el-dialog v-model="executionPickerVisible" :title="executionPickerMode === 'stop' ? '选择要停止的批次' : '选择要查看的环境结果'" width="720px">
+      <el-table :data="executionChoices" row-key="id">
+        <el-table-column label="环境" min-width="170"><template #default="scope">{{ scope.row.environment.name }} · {{ scope.row.environment.code }}</template></el-table-column>
+        <el-table-column label="批次" prop="displayId" min-width="190" />
+        <el-table-column label="运行名称" prop="name" min-width="160" />
+        <el-table-column label="操作" width="120"><template #default="scope">
+          <el-button :type="executionPickerMode === 'stop' ? 'danger' : 'primary'" text @click="chooseExecution(scope.row)">{{ executionPickerMode === 'stop' ? '停止此批次' : '查看日志' }}</el-button>
+        </template></el-table-column>
+      </el-table>
+    </el-dialog>
     <ScriptRunResultDialog v-model="resultVisible" :script="resultScript" />
   </div>
 </template>
 
 <style scoped>
+.running-environments { margin-top: 6px; font-size: 12px; color: var(--color-text-secondary); }
 .script-page {
   min-width: 0;
 }
