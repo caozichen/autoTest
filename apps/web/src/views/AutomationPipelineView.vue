@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import {
   Connection,
   Delete,
+  Document,
   EditPen,
   Operation,
   Plus,
@@ -45,6 +46,10 @@ function syncExecutions(): void {
 function selectedExecution(pipelineId: string): PipelineExecutionSnapshot | undefined {
   return activeExecutions.value.find(execution => execution.pipelineId === pipelineId
     && (!execution.environment?.id || execution.environment.id === selectedEnvironmentId.value))
+}
+function executionStepLabel(execution: PipelineExecutionSnapshot): string {
+  if (execution.currentScriptId) return scriptById.value.get(execution.currentScriptId)?.name ?? execution.currentScriptId
+  return { login: '登录中', saving: '保存结果中', recovering: '恢复状态中', submitting: '提交中' }[execution.phase ?? ''] ?? '执行中'
 }
 const stoppingPipelineIds = ref(new Set<string>())
 
@@ -319,13 +324,34 @@ onBeforeUnmount(() => { if (refreshTimer !== undefined) window.clearInterval(ref
     </section>
 
     <section v-if="activeExecutions.length" class="active-executions" aria-label="后台运行批次">
-      <strong>后台运行批次（{{ activeExecutions.length }} / 3）</strong>
-      <div v-for="execution in activeExecutions" :key="execution.id" class="active-execution">
-        <span>{{ execution.pipelineName ?? execution.pipelineId }}</span>
-        <el-tag>{{ execution.environment?.name || '环境加载中' }} · {{ execution.environment?.code }}</el-tag>
-        <span>{{ execution.currentScriptId ? (scriptById.get(execution.currentScriptId)?.name ?? execution.currentScriptId) : ({ login: '登录中', saving: '保存结果中', recovering: '恢复状态中', submitting: '提交中' }[execution.phase ?? ''] ?? '执行中') }}</span>
-        <el-button text @click="router.push('/runs')">运行记录</el-button>
-        <el-button text type="danger" :loading="stoppingPipelineIds.has(execution.id)" @click="confirmStopExecution(execution)">停止此批次</el-button>
+      <header class="active-executions__heading">
+        <span class="active-executions__icon"><el-icon :size="18"><Operation /></el-icon></span>
+        <h2>后台运行批次</h2>
+        <el-tag size="small" effect="light">{{ activeExecutions.length }} / 3</el-tag>
+      </header>
+      <div class="active-executions__table" role="table" aria-label="正在运行的批次">
+        <div class="active-executions__columns" role="row">
+          <span role="columnheader">配置名称</span>
+          <span role="columnheader">运行环境</span>
+          <span role="columnheader">当前步骤</span>
+          <span role="columnheader">操作</span>
+        </div>
+        <div v-for="execution in activeExecutions" :key="execution.id" class="active-execution" role="row">
+          <div class="active-execution__name" role="cell" :title="execution.pipelineName ?? execution.pipelineId">
+            {{ execution.pipelineName ?? execution.pipelineId }}
+          </div>
+          <div class="active-execution__environment" role="cell">
+            <el-tag size="small" effect="plain">{{ execution.environment?.name || '环境加载中' }} · {{ execution.environment?.code }}</el-tag>
+          </div>
+          <div class="active-execution__step" role="cell">
+            <span class="active-execution__status-dot" aria-hidden="true"></span>
+            <span class="active-execution__step-name" :title="executionStepLabel(execution)">{{ executionStepLabel(execution) }}</span>
+          </div>
+          <div class="active-execution__actions" role="cell">
+            <el-button size="small" type="primary" plain :icon="Document" @click="router.push('/runs')">运行记录</el-button>
+            <el-button size="small" type="danger" plain :icon="VideoPause" :loading="stoppingPipelineIds.has(execution.id)" @click="confirmStopExecution(execution)">停止此批次</el-button>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -474,8 +500,134 @@ onBeforeUnmount(() => { if (refreshTimer !== undefined) window.clearInterval(ref
 </template>
 
 <style scoped>
-.active-executions { margin: 16px 0; padding: 16px; background: var(--color-bg-card, white); border-radius: 12px; }
-.active-execution { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 10px; }
+.active-executions {
+  container: active-batches / inline-size;
+  overflow: hidden;
+  margin-bottom: 16px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-card);
+}
+
+.active-executions__heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--color-border-light);
+}
+
+.active-executions__icon {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  color: var(--color-primary);
+  border-radius: 5px;
+  background: var(--color-primary-soft);
+}
+
+.active-executions__heading h2 {
+  margin: 0;
+  font-size: var(--font-md);
+  font-weight: 650;
+}
+
+.active-executions__columns,
+.active-execution {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) minmax(210px, 1fr) minmax(170px, 1.2fr) 240px;
+  align-items: center;
+  gap: 20px;
+  padding: 12px 20px;
+}
+
+.active-executions__columns {
+  color: var(--color-text-secondary);
+  background: var(--color-bg-subtle);
+  font-size: var(--font-xs);
+  font-weight: 600;
+}
+
+.active-executions__columns > :last-child { text-align: right; }
+
+.active-execution {
+  min-height: 68px;
+  border-top: 1px solid var(--color-border-light);
+}
+
+.active-execution > div { min-width: 0; }
+
+.active-execution__name,
+.active-execution__step-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.active-execution__name { font-weight: 600; }
+
+.active-execution__environment :deep(.el-tag) { max-width: 100%; }
+.active-execution__environment :deep(.el-tag__content) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.active-execution__step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--color-text-secondary);
+  font-size: var(--font-sm);
+}
+
+.active-execution__status-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 50%;
+  background: var(--color-primary);
+}
+
+.active-execution__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.active-execution__actions :deep(.el-button) {
+  height: 32px;
+  margin: 0;
+  padding: 8px 12px;
+  font-size: var(--font-sm);
+}
+
+@container active-batches (max-width: 940px) {
+  .active-executions__columns { display: none; }
+  .active-execution {
+    grid-template-columns: minmax(0, 1fr) 240px;
+    grid-template-areas: 'name environment' 'step actions';
+    gap: 12px 20px;
+    padding-block: 16px;
+  }
+  .active-executions__columns + .active-execution { border-top: 0; }
+  .active-execution__name { grid-area: name; }
+  .active-execution__environment { grid-area: environment; justify-self: end; }
+  .active-execution__step { grid-area: step; }
+  .active-execution__actions { grid-area: actions; }
+}
+
+@container active-batches (max-width: 540px) {
+  .active-executions__heading { padding-inline: 16px; }
+  .active-execution {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: 'name' 'environment' 'step' 'actions';
+    padding-inline: 16px;
+  }
+  .active-execution__environment { justify-self: start; }
+  .active-execution__actions { justify-content: flex-start; flex-wrap: wrap; }
+}
 
 .execution-environment {
   display: flex;
