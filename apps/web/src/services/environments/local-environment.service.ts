@@ -156,6 +156,7 @@ function normalizeEnvironment(value: unknown, applyLingxiDefaults: boolean): Tes
     active: value.active,
     auth: {
       mode,
+      ...(value.auth.strategy === 'reuse-session' ? { strategy: 'reuse-session' as const } : {}),
       method,
       timeoutMs: typeof value.auth.timeoutMs === 'number' && value.auth.timeoutMs >= 5_000
         ? Math.min(value.auth.timeoutMs, 120_000)
@@ -225,6 +226,7 @@ function migrateEnvironments(environments: TestEnvironment[], replaceExistingTes
 
 function sanitizeDraft(draft: EnvironmentDraft): EnvironmentDraft {
   const sanitized = structuredClone(draft)
+  if (sanitized.auth.strategy === 'reuse-session') return sanitized
   const requestBody = parseEnvironmentRequestBody(sanitized.auth.requestBody)
   sanitized.auth.requestBody = formatEnvironmentRequestBody(requestBody)
   if (sanitized.auth.mode === 'mobile-code') {

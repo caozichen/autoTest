@@ -11,6 +11,7 @@ import type {
 } from '@/domain/script'
 import type { EnvironmentLoginService } from '@/services/environments/environment-login-service'
 import type { EnvironmentService } from '@/services/environments/environment-service'
+import { LocalEnvironmentSessionService } from '@/services/environments/local-environment-session.service'
 import { LocalRunRecordService } from '@/services/run-records/local-run-record.service'
 import { SessionRuntimeVariableService } from '@/services/runtime-variables/session-runtime-variable.service'
 import type { ScriptService } from '@/services/scripts/script-service'
@@ -100,6 +101,7 @@ function script(
     status: result
       ? result.status === 'partial' ? 'partial' : result.ok ? 'passed' : 'failed'
       : 'ready',
+    createdAt: '2026-08-12T10:00:00.000Z',
     updatedAt: '2026-08-12 10:00',
     lastRunAt: null,
     lastDuration: null,
@@ -306,6 +308,24 @@ async function startStoredPipelineRecord(fixture: ReturnType<typeof executionFix
 }
 
 describe('LocalAutomationPipelineExecutionService', () => {
+  it('uses the selected environment instead of a stale binding without mutating the configuration', async () => {
+    const fixture = executionFixture({ create: success({}), publish: success({}), verify: success({}) })
+    const target = { ...pipeline(), environmentId: 'deleted-legacy-environment', steps: [{ scriptId: 'create', parameterMappings: [] }] }
+    const task = fixture.service.run(target, 'env-testing')
+    const record = await task
+    expect(record.status).toBe('passed')
+    expect(record.environment.id).toBe('env-testing')
+    expect(fixture.contexts[0]?.context.environmentId).toBe('env-testing')
+    expect(target.environmentId).toBe('deleted-legacy-environment')
+  })
+
+  it('rejects an empty execution selection even when a legacy binding exists', async () => {
+    const fixture = executionFixture({})
+    await expect(fixture.service.run(pipeline(), '')).rejects.toThrow('运行环境')
+    expect(fixture.scripts.run).not.toHaveBeenCalled()
+    expect(fixture.environmentLogin.login).not.toHaveBeenCalled()
+  })
+
   it('logs in once, runs steps in order and injects mapped output variables', async () => {
     const createResult = success({ data: { form: { id: 123, code: 'FORM-001', contract: { fieldKeys: { username: 'username_dynamic' } } } } })
     createResult.artifacts = [formArtifact]
@@ -336,6 +356,55 @@ describe('LocalAutomationPipelineExecutionService', () => {
     })
     expect(record.scripts[0]?.artifacts).toEqual([formArtifact])
     expect(fixture.runtimeVariables.list()).toEqual([])
+  })
+
+  it('passes the current submission identity and contact assertions to a list-check step', async () => {
+    const submissionAssertions = {
+      title: '自动化测试全题型表单-1788864085474',
+      primaryContactName: '自动化测试用户1234',
+      groupContactName: '题组联系人1235',
+    }
+    const fixture = executionFixture({
+      create: success({
+        formId: '4J02PQ',
+        submissionId: 'vyY5Z5',
+        submissionAssertions,
+      }),
+      verify: success({ matched: true }),
+    })
+    const submissionPipeline: AutomationPipeline = {
+      id: 'submission-list-pipeline',
+      name: '填写后检查提报列表',
+      description: '',
+      environmentId: 'env-testing',
+      steps: [
+        { scriptId: 'create', parameterMappings: [] },
+        {
+          scriptId: 'verify',
+          parameterMappings: [
+            { sourceScriptId: 'create', sourcePath: 'formId', targetKey: 'FORM_ID' },
+            { sourceScriptId: 'create', sourcePath: 'submissionId', targetKey: 'SUBMISSION_ID' },
+            {
+              sourceScriptId: 'create',
+              sourcePath: 'submissionAssertions',
+              targetKey: 'SUBMISSION_ASSERTIONS',
+            },
+          ],
+        },
+      ],
+      createdAt: '2026-09-09T06:35:14.000Z',
+      updatedAt: '2026-09-09T06:35:14.000Z',
+    }
+
+    const record = await fixture.service.run(submissionPipeline)
+
+    expect(record.status).toBe('passed')
+    expect(fixture.contexts.map(({ id }) => id)).toEqual(['create', 'verify'])
+    expect(fixture.contexts[1]?.context.variables).toMatchObject({
+      FORM_ID: '4J02PQ',
+      SUBMISSION_ID: 'vyY5Z5',
+      SUBMISSION_ASSERTIONS: JSON.stringify(submissionAssertions),
+    })
   })
 
   it('persists a running script snapshot before the pipeline step completes', async () => {
@@ -959,5 +1028,48 @@ describe('LocalAutomationPipelineExecutionService', () => {
       runnerFound: false,
       cancelledRunIds: [],
     })
+  })
+})
+
+
+describe('pipeline reusable authentication', () => {
+  it('runs with an imported session, skips login, and redacts the token from records', async () => {
+    const env = environment()
+    env.auth.strategy = 'reuse-session'
+    const environmentSessions = new LocalEnvironmentSessionService(new MemoryStorage())
+    environmentSessions.save(env, { token: 'Bearer imported-secret-token', accountLabel: 'QA' })
+    const contexts: Array<{ id: string; context: ScriptRunContext }> = []
+    const scripts = fakeScriptService({ create: failed('server rejected imported-secret-token') }, contexts)
+    const environmentLogin = loginService()
+    const service = new LocalAutomationPipelineExecutionService({
+      environments: environmentService(env), environmentLogin, environmentSessions,
+      scripts,
+      runtimeVariables: new SessionRuntimeVariableService(new MemoryStorage()),
+      runRecords: new LocalRunRecordService(new MemoryStorage()),
+    })
+    const result = await service.run({ ...pipeline(), steps: [{ scriptId: 'create', parameterMappings: [] }] })
+    expect(environmentLogin.login).not.toHaveBeenCalled()
+    expect(contexts[0]?.context.extraHTTPHeaders.Authorization).toBe('Bearer imported-secret-token')
+    expect(JSON.stringify(result)).not.toContain('imported-secret-token')
+    expect(JSON.stringify(result)).toContain('已加载保存的登录态')
+  })
+
+  it('stops before executing scripts when the environment has no imported session', async () => {
+    const env = environment()
+    env.auth.strategy = 'reuse-session'
+    const environmentLogin = loginService()
+    const scripts = fakeScriptService({}, [])
+    const service = new LocalAutomationPipelineExecutionService({
+      environments: environmentService(env), environmentLogin,
+      environmentSessions: new LocalEnvironmentSessionService(new MemoryStorage()),
+      scripts,
+      runtimeVariables: new SessionRuntimeVariableService(new MemoryStorage()),
+      runRecords: new LocalRunRecordService(new MemoryStorage()),
+    })
+    const result = await service.run(pipeline())
+    expect(environmentLogin.login).not.toHaveBeenCalled()
+    expect(scripts.run).not.toHaveBeenCalled()
+    expect(result.status).toBe('failed')
+    expect(JSON.stringify(result)).toContain('没有匹配的登录态')
   })
 })

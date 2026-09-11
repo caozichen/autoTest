@@ -1,3 +1,5 @@
+import { withEnvironmentTimeouts } from '../../scripts/support/environment-timeouts.mjs'
+import { publicOriginForSite } from '../../shared/form-environment.mjs'
 import { randomUUID } from 'node:crypto'
 
 import { runWithAssertionRecorder } from '../../scripts/support/recorded-expect.mjs'
@@ -95,22 +97,12 @@ function normalizeFirstPartyOrigins(rawOrigins) {
   )))]
 }
 
-function inferredPublicOrigin(siteBaseUrl) {
-  const url = new URL(siteBaseUrl)
-  if (url.hostname.includes('.admin.')) {
-    url.hostname = url.hostname.replace('.admin.', '.')
-  } else if (url.hostname.includes('.b.lingxi-hk.localtest')) {
-    url.hostname = url.hostname.replace('.b.lingxi-hk.localtest', '.f.lingxi-hk.localtest')
-  }
-  return url.origin
-}
-
 function firstPartyOriginsForContext(context) {
   return new Set([
     ...context.firstPartyOrigins,
     new URL(context.siteBaseUrl).origin,
     new URL(context.apiBaseUrl).origin,
-    inferredPublicOrigin(context.siteBaseUrl),
+    publicOriginForSite(context.siteBaseUrl),
   ])
 }
 
@@ -188,6 +180,14 @@ async function runnableScriptConfig(scriptId, {
   return { config, scriptUrl }
 }
 
+export function registeredRunContext(payload, config) {
+  // Validate the saved standard before applying the execution-only environment multiplier.
+  const context = validateRunRequest({ ...payload, timeoutMs: config.timeoutMs })
+  const environmentCode = typeof payload.context?.environmentCode === 'string' ? payload.context.environmentCode : ''
+  const timeoutMultiplier = /hk/i.test(environmentCode) ? 3 : 1
+  return { ...context, environmentCode, timeoutMs: context.timeoutMs * timeoutMultiplier }
+}
+
 export async function validateRegisteredRunRequest(payload, options = {}) {
   if (!payload || typeof payload !== 'object') throw new Error('运行参数不能为空')
   try {
@@ -196,7 +196,7 @@ export async function validateRegisteredRunRequest(payload, options = {}) {
     throw new Error('脚本未登记，Runner 拒绝执行')
   }
   const { config } = await runnableScriptConfig(payload.scriptId, options)
-  return validateRunRequest({ ...payload, timeoutMs: config.timeoutMs })
+  return registeredRunContext(payload, config)
 }
 
 export function sanitizeErrorMessage(error, secrets = []) {
@@ -612,7 +612,7 @@ export async function executeRegisteredScript(payload, {
     scriptConfigRepository,
     scriptsDirectory,
   })
-  const context = validateRunRequest({ ...payload, timeoutMs: config.timeoutMs })
+  const context = registeredRunContext(payload, config)
   const secrets = [context.extraHTTPHeaders.Authorization]
   const attemptId = payload.runId ?? randomUUID()
   const artifactWriter = artifactWriterFactory({
@@ -827,7 +827,7 @@ export async function executeRegisteredScript(payload, {
       scriptRunPromise = Promise.resolve().then(() => runWithAssertionRecorder(
         context.scriptId,
         recordAssertion,
-        () => scriptModule.run({
+        () => withEnvironmentTimeouts(context.environmentCode, () => scriptModule.run({
           ...context,
           scriptName: config.name,
           artifactWriter,
@@ -835,7 +835,7 @@ export async function executeRegisteredScript(payload, {
           signal: executionController.signal,
           recordApiResponse,
           recordResourceResponse,
-        }),
+        })),
       ))
       return waitWithAbort(scriptRunPromise, abortGate)
     }, {

@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 
 import { DEFAULT_ARTIFACT_ROOT_DIRECTORY } from './artifact-writer.mjs'
+import { redactRunRecordResult } from './run-record-result.mjs'
 import { RunRecordFileStore, RunRecordStoreError } from './run-record-store.mjs'
 import {
   DEFAULT_SCRIPT_CONFIG_DIRECTORY,
@@ -278,6 +279,8 @@ export function createRunnerServer({
   artifactRootDirectory = DEFAULT_ARTIFACT_ROOT_DIRECTORY,
   runRecordDirectory = DEFAULT_RUN_RECORD_DIRECTORY,
   runRecordStore,
+  recordMaintenanceIntervalMs = 10_000,
+  recordRecoveryGraceMs = 120_000,
   scriptConfigDirectory = DEFAULT_SCRIPT_CONFIG_DIRECTORY,
   scriptsDirectory = DEFAULT_SCRIPTS_DIRECTORY,
   scriptConfigRepository,
@@ -294,6 +297,10 @@ export function createRunnerServer({
   }
   const trustedArtifactRoot = resolve(artifactRootDirectory)
   const storedRunRecords = runRecordStore ?? new RunRecordFileStore({ directory: runRecordDirectory })
+  storedRunRecords.setRunnerActivityProvider?.(() => [...activeRuns.values()].map((run) => ({
+    executionId: run.executionId,
+    settled: run.settled && (!run.result || run.historyPersisted),
+  })), { graceMs: recordRecoveryGraceMs })
   const storedScriptConfigs = scriptConfigRepository ?? new FileScriptConfigRepository({
     directory: scriptConfigDirectory,
     scriptsDirectory,
@@ -462,6 +469,11 @@ export function createRunnerServer({
   function scheduleRunCleanup(run) {
     if (run.cleanupTimer) return
     run.cleanupTimer = setTimeout(() => {
+      if (run.result && !run.historyPersisted) {
+        run.cleanupTimer = null
+        scheduleRunCleanup(run)
+        return
+      }
       if (activeRuns.get(run.runId) === run) activeRuns.delete(run.runId)
     }, runSnapshotTtlMs)
     run.cleanupTimer.unref()
@@ -502,8 +514,44 @@ export function createRunnerServer({
     return completed
   }
 
+  async function persistRunResult(run) {
+    if (!run.result || run.historyPersisted) return
+    if (!run.historyPersistence) {
+      run.historyPersistence = Promise.resolve().then(async () => {
+        if (run.failBatchOnError && run.status === 'failed') {
+          await storedRunRecords.failPipelineStep?.(run.executionId, run.scriptId, run.historyResult)
+        }
+        await storedRunRecords.saveRunnerStepResult?.(run.executionId, run.scriptId, run.historyResult)
+        run.historyPersisted = true
+      }).catch((error) => {
+        run.historyPersistence = null
+        if (!run.historyWarningLogged) {
+          run.historyWarningLogged = true
+          appendRunLog(run, 'warning', `脚本结果写入历史记录失败，将重试保存：${error.message}`)
+        }
+      })
+    }
+    // A slow disk must not hide the terminal snapshot or indefinitely delay stop.
+    // Keep one pending write per run; maintenance retries failures, never execution.
+    let timer
+    await Promise.race([run.historyPersistence, new Promise((resolveTimeout) => {
+      timer = setTimeout(() => {
+        if (!run.historyWarningLogged) {
+          run.historyWarningLogged = true
+          appendRunLog(run, 'warning', '脚本已结束，历史记录仍在等待写入')
+        }
+        resolveTimeout()
+      }, artifactPersistenceDeadlineMs)
+      timer.unref?.()
+    })])
+    clearTimeout(timer)
+  }
+
   async function executeLiveRun(run, payload) {
     try {
+      void storedRunRecords.startRunnerStep?.(run.executionId, run.scriptId).catch((error) => {
+        appendRunLog(run, 'warning', `执行登记写入失败：${error.message}`)
+      })
       const rawResult = await scriptExecutor(payload, {
         onLog: (log) => run.logs.push(log),
         signal: run.abortController.signal,
@@ -555,6 +603,9 @@ export function createRunnerServer({
         responseBody: cancelled ? run.result : { ok: false, error: message },
       }
     } finally {
+      run.historyResult = redactRunRecordResult(run.result, payload.context)
+      await persistRunResult(run)
+      run.settled = true
       scheduleRunCleanup(run)
     }
   }
@@ -960,6 +1011,9 @@ export function createRunnerServer({
         completion: null,
         cleanupTimer: null,
         cleanupWaitWarningLogged: false,
+        settled: false,
+        historyPersisted: false,
+        failBatchOnError: payload.failBatchOnError === true,
       }
       activeRuns.set(runId, liveRun)
       if (pendingCancellation) {
@@ -977,6 +1031,9 @@ export function createRunnerServer({
           logs: liveRun.logs,
           error: pendingCancellation.reason,
         }
+        liveRun.historyResult = redactRunRecordResult(liveRun.result, payload.context)
+        await persistRunResult(liveRun)
+        liveRun.settled = true
         scheduleRunCleanup(liveRun)
         sendJson(response, 200, liveRun.result, origin)
         return
@@ -994,10 +1051,30 @@ export function createRunnerServer({
   sendJson(response, 404, { error: '接口不存在' }, origin)
   })
   let releaseRejectionGuard = null
+  let maintenanceTimer = null
+  let maintenanceRunning = false
+  async function maintainRecords() {
+    if (maintenanceRunning) return
+    maintenanceRunning = true
+    try {
+      for (const run of activeRuns.values()) {
+        if (run.settled && run.result && !run.historyPersisted) await persistRunResult(run)
+      }
+      await storedRunRecords.maintainRunnerRecords?.()
+    } catch (error) {
+      console.warn(`[runner] 运行记录状态维护失败：${error.message}`)
+    } finally {
+      maintenanceRunning = false
+    }
+  }
   server.once('listening', () => {
     releaseRejectionGuard = retainScriptRejectionGuard()
+    maintenanceTimer = setInterval(() => void maintainRecords(), recordMaintenanceIntervalMs)
+    maintenanceTimer.unref()
   })
   server.once('close', () => {
+    clearInterval(maintenanceTimer)
+    for (const run of activeRuns.values()) clearTimeout(run.cleanupTimer)
     releaseRejectionGuard?.()
     releaseRejectionGuard = null
   })

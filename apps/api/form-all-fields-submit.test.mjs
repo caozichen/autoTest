@@ -20,7 +20,7 @@ import {
   run,
 } from '../../scripts/form-all-fields-submit.ui.spec.mjs'
 
-const SCRIPT_NAME = '已发布全题型表单填写并提交'
+const SCRIPT_NAME = '检查并编辑提报信息'
 
 async function listen(server) {
   await new Promise((resolveListen, reject) => {
@@ -97,7 +97,7 @@ test('production run delegates to the dynamic contract flow and attributes failu
   }, { artifactRootDirectory: artifactRoot })
 
   assert.equal(result.ok, false)
-  assert.match(result.error, /locator\.click: Timeout 30000ms exceeded/)
+  assert.match(result.error, /locator\.click: Timeout \d+ms exceeded/)
   assert.match(result.error, /fb-runtime-pagination-buttons/)
 
   const missingFormAssertion = result.assertions.find(({ name }) => (
@@ -268,6 +268,24 @@ test('registered production entry uses formId for public GET, validation, submis
   assert.equal(result.result.scriptId, SCRIPT_ID)
   assert.equal(result.result.status, 'submitted')
   assert.equal(result.result.formId, formId)
+  assert.equal(result.result.submissionId, 'full-run-submission-001')
+  assert.equal(result.result.submissionAssertions.title, fixture.data.form.title)
+  assert.match(result.result.submissionAssertions.primaryContactName, /^自动化测试用户\d{4}$/)
+  assert.match(result.result.submissionAssertions.groupContactName, /^题组联系人\d{4}$/)
+  assert.match(result.result.submissionAssertions.fields['姓名[1]'], /^自动化测试用户\d{4}$/)
+  assert.match(result.result.submissionAssertions.fields['姓名[2]'], /^题组联系人\d{4}$/)
+  assert.equal(
+    result.result.submissionAssertions.primaryContactName,
+    result.result.submissionAssertions.fields['姓名[1]'],
+  )
+  assert.equal(
+    result.result.submissionAssertions.groupContactName,
+    result.result.submissionAssertions.fields['姓名[2]'],
+  )
+  assert.notEqual(
+    result.result.submissionAssertions.fields['姓名[1]'],
+    result.result.submissionAssertions.fields['姓名[2]'],
+  )
   assert.equal(result.result.pageCount, 3)
   assert.equal(result.result.linkedContractUsed, true)
   assert.equal(result.result.pageValidationRequestCount, 3)

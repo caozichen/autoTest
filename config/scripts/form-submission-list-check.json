@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "revision": 0,
+  "id": "form-submission-list-check",
+  "name": "检查提报列表",
+  "description": "打开指定表单的后台提报页面，以本次提交 ID 和联系人姓名核验提报详情列表；启用全部基础字段与检索字段，逐项验证全模糊搜索，并检查联系人列表、联系人搜索、顶部名称和联系人标签以及全部接口与静态资源健康。",
+  "directory": "scripts",
+  "entryFile": "form-submission-list-check.ui.spec.mjs",
+  "timeoutMs": 600000,
+  "enabled": true,
+  "requestPath": "/form-activity/submission/preview?id={{FORM_ID}}",
+  "inputParameters": [
+    {
+      "id": "submission-list-form-id",
+      "key": "FORM_ID",
+      "value": "4J02PQ",
+      "description": "待检查提报列表所属的表单 ID；流水线中应映射本次填写脚本输出的 formId。"
+    },
+    {
+      "id": "submission-list-submission-id",
+      "key": "SUBMISSION_ID",
+      "value": "vyY5Z5",
+      "description": "待定位的提报 ID；流水线中应映射本次填写脚本输出的 submissionId。"
+    },
+    {
+      "id": "submission-list-assertions",
+      "key": "SUBMISSION_ASSERTIONS",
+      "value": "{}",
+      "description": "本次提报断言 JSON，支持 title、primaryContactName 和 groupContactName。"
+    }
+  ],
+  "responseVariableBindings": [],
+  "tags": [
+    "Playwright",
+    "UI",
+    "Headless Chrome",
+    "后台提报",
+    "列表检索",
+    "联系人",
+    "P0"
+  ],
+  "createdAt": "2026-09-09T06:35:14.000Z",
+  "updatedAt": "2026-09-09T06:35:14.000Z"
+}

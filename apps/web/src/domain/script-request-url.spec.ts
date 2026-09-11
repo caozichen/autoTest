@@ -13,10 +13,12 @@ import {
 } from './script-request-url'
 
 describe('script request URL', () => {
-  it('enables linked URL configuration for submission, reply editing, and translation scripts', () => {
+  it('enables linked URL configuration for submission, list checking, reply creation, editing, and translation scripts', () => {
     expect(supportsScriptRequestPath('form-lpxavn-submit')).toBe(true)
     expect(supportsScriptRequestPath('form-all-fields-submit')).toBe(true)
     expect(supportsScriptRequestPath('form-submission-reply-edit')).toBe(true)
+    expect(supportsScriptRequestPath('form-submission-reply-create')).toBe(true)
+    expect(supportsScriptRequestPath('form-submission-list-check')).toBe(true)
     expect(supportsScriptRequestPath('form-multilingual-translation-publish')).toBe(true)
     expect(supportsScriptRequestPath('form-all-fields-publish')).toBe(false)
     expect(defaultRequestPathForScript('form-lpxavn-submit')).toBe('/form/?id={{FORM_ID}}')
@@ -24,12 +26,21 @@ describe('script request URL', () => {
     expect(defaultRequestPathForScript('form-submission-reply-edit')).toBe(
       '/form-activity/submission/preview/reply/{{SUBMISSION_ID}}?fid={{FORM_ID}}',
     )
+    expect(defaultRequestPathForScript('form-submission-reply-create')).toBe(
+      '/form-activity/submission/preview/reply/create?fid={{FORM_ID}}',
+    )
+    expect(defaultRequestPathForScript('form-submission-list-check')).toBe(
+      '/form-activity/submission/preview?id={{FORM_ID}}',
+    )
     expect(defaultRequestPathForScript('form-multilingual-translation-publish')).toBe(
       '/form-activity/translation?id={{FORM_ID}}',
     )
   })
 
   it('derives the public form domain from the selected environment', () => {
+    expect(publicOriginForEnvironment('https://prodtest.admin.lingxi360.com/')).toBe('https://prodtest.form.lingxi360.com')
+    expect(publicOriginForEnvironment('https://jxdr.admin.lingxi360.com/form-activity/list')).toBe('https://jxdr.form.lingxi360.com')
+    expect(publicOriginForEnvironment('https://prodtest.admin.lxi.hk/')).toBe('https://prodtest.lxi.hk')
     expect(publicOriginForEnvironment('https://lx.admin.lingxi.tech/')).toBe('https://lx.lingxi.tech')
     expect(publicOriginForEnvironment('https://jxdr.b.lingxi-hk.localtest/base')).toBe(
       'https://jxdr.f.lingxi-hk.localtest',
@@ -37,11 +48,33 @@ describe('script request URL', () => {
     expect(publicOriginForEnvironment('https://public.example.test/base')).toBe('https://public.example.test')
   })
 
-  it('uses the admin origin for submission reply editing and multilingual translation', () => {
+  it.each([
+    ['https://prodtest.admin.lingxi360.com', 'https://prodtest.form.lingxi360.com'],
+    ['https://prodtest.admin.lxi.hk', 'https://prodtest.lxi.hk'],
+    ['https://lx.admin.lingxi.tech', 'https://lx.lingxi.tech'],
+  ])('uses public and admin routes consistently for all five scripts in %s', (adminOrigin, publicOrigin) => {
+    for (const scriptId of ['form-lpxavn-submit', 'form-all-fields-submit']) {
+      expect(buildScriptRequestUrl(scriptId, adminOrigin, defaultRequestPathForScript(scriptId), { FORM_ID: 'linked' }))
+        .toBe(`${publicOrigin}/form/?id=linked`)
+    }
+    for (const scriptId of ['form-submission-reply-create', 'form-submission-list-check', 'form-multilingual-translation-publish']) {
+      const url = new URL(buildScriptRequestUrl(scriptId, adminOrigin, defaultRequestPathForScript(scriptId), { FORM_ID: 'linked' }))
+      expect(url.origin).toBe(adminOrigin)
+      expect(url.searchParams.get(scriptId === 'form-submission-reply-create' ? 'fid' : 'id')).toBe('linked')
+    }
+  })
+
+  it('uses the admin origin for submission list checking, reply creation, editing, and multilingual translation', () => {
     const siteBaseUrl = 'https://lx.admin.lingxi.tech/console'
     expect(requestOriginForScript('form-lpxavn-submit', siteBaseUrl)).toBe('https://lx.lingxi.tech')
     expect(requestOriginForScript('form-all-fields-submit', siteBaseUrl)).toBe('https://lx.lingxi.tech')
     expect(requestOriginForScript('form-submission-reply-edit', siteBaseUrl)).toBe(
+      'https://lx.admin.lingxi.tech',
+    )
+    expect(requestOriginForScript('form-submission-reply-create', siteBaseUrl)).toBe(
+      'https://lx.admin.lingxi.tech',
+    )
+    expect(requestOriginForScript('form-submission-list-check', siteBaseUrl)).toBe(
       'https://lx.admin.lingxi.tech',
     )
     expect(requestOriginForScript('form-multilingual-translation-publish', siteBaseUrl)).toBe(
@@ -54,6 +87,22 @@ describe('script request URL', () => {
       { SUBMISSION_ID: 'lpXAWZ', FORM_ID: 'lg2bkk' },
     )).toBe(
       'https://lx.admin.lingxi.tech/form-activity/submission/preview/reply/lpXAWZ?fid=lg2bkk',
+    )
+    expect(buildScriptRequestUrl(
+      'form-submission-reply-create',
+      siteBaseUrl,
+      '/form-activity/submission/preview/reply/create?fid={{FORM_ID}}',
+      { FORM_ID: 'q3r72J' },
+    )).toBe(
+      'https://lx.admin.lingxi.tech/form-activity/submission/preview/reply/create?fid=q3r72J',
+    )
+    expect(buildScriptRequestUrl(
+      'form-submission-list-check',
+      siteBaseUrl,
+      '/form-activity/submission/preview?id={{FORM_ID}}',
+      { FORM_ID: '4J02PQ' },
+    )).toBe(
+      'https://lx.admin.lingxi.tech/form-activity/submission/preview?id=4J02PQ',
     )
     expect(buildScriptRequestUrl(
       'form-multilingual-translation-publish',

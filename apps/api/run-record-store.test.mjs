@@ -609,3 +609,108 @@ test('preserves partial results when recovering stale records and includes them 
     failureGroups: [],
   })
 })
+
+test('persists a fatal pipeline result without a frontend and does not overwrite a terminal record', async t => {
+  const directory = await temporaryRecordDirectory(t)
+  const store = createTestStore(directory)
+  const record = recordFixture({ status: 'running' })
+  record.scripts[0].status = 'running'
+  record.scripts.push({ ...structuredClone(record.scripts[0]), id: 'script-next', recordId: 'record-0001:script-next', status: 'queued', artifacts: [] })
+  await store.create(record)
+  const result = { status: 'failed', timedOut: true, durationMs: 600000, error: '读取响应体超时', logs: [], assertions: [{ sequence: 1, name: '失败证据', status: 'failed' }] }
+  const finished = await store.failPipelineStep(record.id, 'script-001', result)
+  assert.equal(finished.status, 'failed')
+  assert.deepEqual(finished.scripts.map(s => s.status), ['failed', 'skipped'])
+  assert.equal(finished.scripts[0].assertions.length, 1)
+  assert.ok(finished.finishedAt)
+  assert.deepEqual(await createTestStore(directory).get(record.id), finished)
+  assert.deepEqual(await store.failPipelineStep(record.id, 'script-001', result), finished)
+})
+
+test('Runner presence protects a silent long-running script and persists its heartbeat', async t => {
+  const directory = await temporaryRecordDirectory(t)
+  let now = new Date(firstTime)
+  const store = createTestStore(directory, { now: () => now })
+  const record = recordFixture()
+  await store.create(record)
+  store.setRunnerActivityProvider(() => [{ executionId: record.id, settled: false }])
+  await store.startRunnerStep(record.id, 'script-001')
+  now = new Date(now.getTime() + 5 * 60 * 60 * 1000)
+  const active = await store.get(record.id)
+  assert.equal(active.status, 'running')
+  assert.equal(active.scripts[0].status, 'running')
+  assert.equal(active.runnerTracking.lastSeenAt, now.toISOString())
+  assert.equal((await createTestStore(directory, { now: () => now }).get(record.id)).status, 'running')
+})
+
+test('saved results survive refresh/restart and the grace period allows frontend finalization', async t => {
+  const directory = await temporaryRecordDirectory(t)
+  let now = new Date(firstTime)
+  const store = createTestStore(directory, { now: () => now })
+  const record = recordFixture()
+  await store.create(record)
+  store.setRunnerActivityProvider(() => [])
+  await store.startRunnerStep(record.id, 'script-001')
+  const saved = await store.saveRunnerStepResult(record.id, 'script-001', {
+    status: 'partial', ok: false, durationMs: 1200, logs: [],
+    assertions: [{ sequence: 1, name: '未通过断言', status: 'failed' }],
+    result: { formId: 'created-form' },
+  })
+  assert.equal(saved.status, 'running')
+  assert.equal(saved.counts.partial, 1)
+  assert.equal(saved.scripts[0].output.formId, 'created-form')
+  assert.deepEqual(await store.saveRunnerStepResult(record.id, 'script-001', { status: 'passed' }), saved)
+  const restarted = createTestStore(directory, { now: () => now })
+  restarted.setRunnerActivityProvider(() => [])
+  now = new Date(now.getTime() + 119_000)
+  assert.equal((await restarted.get(record.id)).status, 'running')
+  now = new Date(now.getTime() + 2_000)
+  const recovered = await restarted.get(record.id)
+  assert.equal(recovered.status, 'partial')
+  assert.equal(recovered.counts.partial, 1)
+  assert.equal(recovered.scripts[0].assertions[0].status, 'failed')
+  assert.ok(recovered.finishedAt)
+})
+
+test('lost executions are interrupted without changing completed steps or rerunning pending work', async t => {
+  const directory = await temporaryRecordDirectory(t)
+  let now = new Date(firstTime)
+  const store = createTestStore(directory, { now: () => now })
+  const record = recordFixture()
+  record.scripts.push({ ...structuredClone(record.scripts[0]), id: 'script-002', recordId: `${record.id}:script-002`, artifacts: [] })
+  await store.create(record)
+  store.setRunnerActivityProvider(() => [])
+  await store.startRunnerStep(record.id, 'script-001')
+  await store.saveRunnerStepResult(record.id, 'script-001', { status: 'passed', ok: true, durationMs: 12, logs: [] })
+  await store.startRunnerStep(record.id, 'script-002')
+  now = new Date(now.getTime() + 121_000)
+  const stopped = await store.get(record.id)
+  assert.equal(stopped.status, 'interrupted')
+  assert.deepEqual(stopped.scripts.map(s => s.status), ['passed', 'skipped'])
+  assert.match(stopped.scripts[1].error, /结果未确认/)
+  assert.match(stopped.error, /人工核对/)
+  assert.deepEqual(await store.saveRunnerStepResult(record.id, 'script-002', { status: 'passed' }), null)
+  assert.equal((await store.get(record.id)).status, 'interrupted')
+})
+
+test('frontend progress cannot regress Runner results but can report variable-validation failure', async t => {
+  const store = createTestStore(await temporaryRecordDirectory(t))
+  const record = recordFixture()
+  await store.create(record)
+  const saved = await store.saveRunnerStepResult(record.id, 'script-001', { status: 'passed', ok: true, logs: [], durationMs: 50 })
+  const progress = structuredClone(saved)
+  delete progress.runnerTracking
+  progress.revision += 1
+  progress.scripts[0].status = 'running'
+  const updated = await store.update(record.id, progress, { expectedRevision: saved.revision, expectedUpdatedAt: saved.updatedAt })
+  assert.equal(updated.scripts[0].status, 'passed')
+  assert.deepEqual(updated.runnerTracking.completedScriptIds, ['script-001'])
+  const failure = structuredClone(updated)
+  failure.revision += 1
+  failure.status = 'failed'
+  failure.scripts[0].status = 'failed'
+  failure.scripts[0].error = '必需变量未提取'
+  const failed = await store.update(record.id, failure, { expectedRevision: updated.revision, expectedUpdatedAt: updated.updatedAt })
+  assert.equal(failed.status, 'failed')
+  assert.equal(failed.scripts[0].error, '必需变量未提取')
+})

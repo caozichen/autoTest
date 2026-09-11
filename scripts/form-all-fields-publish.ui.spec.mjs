@@ -1,3 +1,5 @@
+import { clickWhenReady, observeUiReadiness, waitForUiReady } from './support/ui-readiness.mjs'
+import { expect as flowExpect, scaleTimeout } from './support/environment-timeouts.mjs'
 import { access, mkdir, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -249,7 +251,7 @@ async function ensurePropertySwitchChecked(page, label, assertionLabel = label) 
   const switchControl = editor.getByRole('switch')
   await expect(switchControl, `${assertionLabel}开关应可见`).toBeVisible()
   if (!await isSwitchChecked(switchControl)) {
-    await switchControl.click()
+    await clickWhenReady(switchControl)
   }
   await expect.poll(
     () => isSwitchChecked(switchControl),
@@ -332,7 +334,7 @@ function waitForExactResponse(page, method, pathnameSuffix) {
   return page.waitForResponse((response) => {
     const url = new URL(response.url())
     return response.request().method() === method && url.pathname.endsWith(pathnameSuffix)
-  }, { timeout: ACTION_TIMEOUT_MS })
+  }, { timeout: scaleTimeout(ACTION_TIMEOUT_MS) })
 }
 
 async function fetchFormDetail(page, apiBaseUrl, formId, authorization) {
@@ -398,14 +400,14 @@ async function fillRichTextList(page, editor) {
   const boldButton = root.getByRole('button', { name: /^(加粗|粗體)/ })
   const bulletButton = root.getByRole('button', { name: /^(无序列表|無序列表)/ })
   await expect(editor, '表单内容富文本编辑器应可见').toBeVisible()
-  await editor.click()
+  await clickWhenReady(editor)
   await editor.press('Control+A')
   await editor.press('Backspace')
-  await boldButton.click()
+  await clickWhenReady(boldButton)
   await editor.type(FORM_CONTENT_HEADING)
-  await boldButton.click()
+  await clickWhenReady(boldButton)
   await editor.press('Enter')
-  await bulletButton.click()
+  await clickWhenReady(bulletButton)
   await editor.type(FORM_CONTENT_ITEMS[0])
   await editor.press('Enter')
   await editor.type(FORM_CONTENT_ITEMS[1])
@@ -421,13 +423,13 @@ async function chooseCalendarDate(page, target, displayedMonth) {
   const monthOffset = (target.year - displayedMonth.year) * 12 + target.month - displayedMonth.month
   expect(monthOffset, '日期选择只应向当前日期之后导航').toBeGreaterThanOrEqual(0)
   for (let index = 0; index < monthOffset; index += 1) {
-    await overlay.locator('button:has(svg.lucide-chevron-right)').click()
+    await clickWhenReady(overlay.locator('button:has(svg.lucide-chevron-right)'))
   }
   const dayButton = overlay
     .locator('.fb-grid-cols-7 button:not(.fb-text-slate-300)')
     .filter({ hasText: new RegExp(`^\\s*${target.day}\\s*$`) })
   await expect(dayButton, `日历中应有可选日期 ${formatLocalDate(target)}`).toHaveCount(1)
-  await dayButton.click()
+  await clickWhenReady(dayButton)
   await expect(overlay, '选择日期后浮层应关闭').toBeHidden()
 }
 
@@ -471,7 +473,7 @@ async function uploadImageThroughBrowser(page, input, imagePath, { includeTheme 
 async function clickFirstVisible(locators, label) {
   for (const locator of locators) {
     if (await locator.first().isVisible().catch(() => false)) {
-      await locator.first().click()
+      await clickWhenReady(locator.first())
       return
     }
   }
@@ -482,11 +484,22 @@ async function waitForApiResponse(page, urlPattern, action, label) {
   const responsePromise = page.waitForResponse((response) => {
     const url = new URL(response.url())
     return url.pathname.includes(urlPattern) && response.request().method() !== 'GET'
-  }, { timeout: ACTION_TIMEOUT_MS })
+  }, { timeout: scaleTimeout(ACTION_TIMEOUT_MS) })
   await action()
   const response = await responsePromise
   const outcome = await inspectBusinessResponse(response, label)
   return { response, ...outcome }
+}
+
+export async function dismissFormOnboarding(page) {
+  // The guide is loaded after navigation; wait for its display-content request
+  // before deciding whether the query controls are accessible.
+  await waitForUiReady(page)
+  const guide = page.getByRole('dialog', { name: /^(产品使用引导|產品使用引導)$/ })
+  if (await guide.isVisible()) {
+    await clickWhenReady(guide.getByRole('button', { name: /^(关闭使用引导|關閉使用引導)$/ }))
+    await expect(guide, '查询列表前应关闭产品使用引导').toBeHidden()
+  }
 }
 
 async function screenshotFailure(page, title, artifactWriter) {
@@ -501,51 +514,114 @@ async function screenshotFailure(page, title, artifactWriter) {
   )
 }
 
-async function chooseContactCollectionInDesigner(page, logger) {
-  const prompt = page.getByRole('dialog').filter({ hasText: /此表单目前设置为不收录联系人|此表單目前設定為不收錄聯絡人/ })
-  if (await prompt.isVisible().catch(() => false)) {
-    logger('info', '联系人题触发全局收录提示，选择开启收录联系人')
-    await clickFirstVisible([
-      prompt.getByRole('button', { name: /是|確認|确定|Yes/i }),
-      prompt.locator('.fb-dialog-btn--primary'),
-    ], '开启收录联系人')
+// Called only immediately after creating the blank form, before any field edits.
+async function waitForDesignerBootstrap(page, logger, timeoutMs = scaleTimeout(NAVIGATION_TIMEOUT_MS)) {
+  const expectedUrl = page.url()
+  const deadline = Date.now() + timeoutMs
+  const palette = page.locator('button[data-component-type="contactGroup"]')
+  const loadFailure = page.getByText(/页面加载失败|頁面載入失敗|頁面加載失敗|Page failed to load/i)
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let state = 'loading'
+    await flowExpect.poll(async () => {
+      if (/\/login(?:[/?#]|$)/.test(page.url())) throw new Error('设计器初始化时登录态已失效')
+      state = await palette.isVisible() ? 'ready' : await loadFailure.first().isVisible() ? 'failed' : 'loading'
+      return state
+    }, { timeout: Math.max(1, deadline - Date.now()), intervals: [100, 200, 300], message: '等待表单设计器题型库加载完成' }).not.toBe('loading')
+    if (state === 'ready') return
+    if (attempt === 1 || page.url() !== expectedUrl || Date.now() >= deadline) {
+      throw new Error('表单设计器页面加载失败，初始化恢复未成功；尚未修改题目')
+    }
+    logger('warning', '设计器报告页面加载失败，重载当前空白表单一次；不会重复创建表单', {
+      pathname: new URL(expectedUrl).pathname,
+    })
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: Math.max(1, deadline - Date.now()) })
+  }
+}
+
+const CONTACT_DIALOG_TIMEOUT_MS = 45_000
+const CONTACT_DIALOG_TEXT = /此表单目前设置为不收录联系人|此表單目前設定為不收錄聯絡人|是否收录联系人|是否收錄聯絡人|联系人信息替换确认|聯絡人資訊替換確認/
+
+const contactPageRequests = new WeakMap()
+function observeContactPageRequests(page) {
+  if (contactPageRequests.has(page)) return contactPageRequests.get(page)
+  const pending = new Set()
+  const state = { pending, lastChange: Date.now() }
+  page.on('request', request => {
+    if (!['xhr', 'fetch'].includes(request.resourceType())) return
+    const path = new URL(request.url()).pathname
+    if (!/\/(?:api\/)?(?:be|base)\//.test(path)) return
+    pending.add(request)
+    state.lastChange = Date.now()
+  })
+  const finish = request => {
+    if (pending.delete(request)) state.lastChange = Date.now()
+  }
+  page.on('requestfinished', finish)
+  page.on('requestfailed', finish)
+  contactPageRequests.set(page, state)
+  return state
+}
+
+async function waitForContactPageReady(page, remaining) {
+  const state = observeContactPageRequests(page)
+  // A quiet window covers late rendering after business responses; it is not a fixed load delay.
+  let lastMarkup = null
+  let stableSince = Date.now()
+  await flowExpect.poll(async () => {
+    const markup = await page.locator('[role="dialog"]:visible').filter({ hasText: CONTACT_DIALOG_TEXT })
+      .evaluateAll(dialogs => dialogs.map(dialog => dialog.outerHTML).join(''))
+    if (markup !== lastMarkup) { lastMarkup = markup; stableSince = Date.now() }
+    const busy = await page.locator('.arco-spin-mask:visible, .arco-btn-loading:visible, [aria-busy="true"]:visible').count()
+    return state.pending.size === 0 && busy === 0
+      && Date.now() - Math.max(state.lastChange, stableSince) >= 800
+  }, { timeout: remaining(), intervals: [100, 200, 300], message: '等待联系人页面业务请求结束、加载遮罩消失和弹窗内容稳定' }).toBe(true)
+}
+
+async function chooseContactCollectionInDesigner(page, logger, timeoutMs = scaleTimeout(CONTACT_DIALOG_TIMEOUT_MS)) {
+  const deadline = Date.now() + timeoutMs
+  const remaining = () => Math.max(1, deadline - Date.now())
+  const dialogs = page.getByRole('dialog')
+  const prompt = dialogs.filter({ hasText: /此表单目前设置为不收录联系人|此表單目前設定為不收錄聯絡人/ })
+  const collectDialog = dialogs.filter({ hasText: /是否收录联系人|是否收錄聯絡人/ })
+  const replaceDialog = dialogs.filter({ hasText: /联系人信息替换确认|聯絡人資訊替換確認/ })
+  const visibleStep = page.locator('[role="dialog"]:visible').filter({ hasText: CONTACT_DIALOG_TEXT })
+
+  observeContactPageRequests(page)
+  logger('info', '等待联系人收录弹窗流程完成', { timeoutMs })
+  // Fields can render before the next dialog. Only the final confirmation completes this flow.
+  while (true) {
+    await visibleStep.first().waitFor({ state: 'visible', timeout: remaining() })
+    await waitForContactPageReady(page, remaining)
+    if (await replaceDialog.isVisible()) {
+      await clickWhenReady(replaceDialog.getByText(/忽略，不替换|忽略，不替換/, { exact: true }), { timeout: remaining() })
+      await waitForContactPageReady(page, remaining)
+      if (!await replaceDialog.isVisible()) continue
+      const confirm = replaceDialog.getByRole('button', { name: /^(确定|確認|确认|OK)$/i })
+      await flowExpect(confirm, '联系人替换确认按钮应完成加载并可点击').toBeEnabled({ timeout: remaining() })
+      logger('info', '联系人弹窗已稳定，点击最终确认')
+      await clickWhenReady(confirm, { timeout: remaining() })
+      await replaceDialog.waitFor({ state: 'hidden', timeout: remaining() })
+      await waitForContactPageReady(page, remaining)
+      if (await visibleStep.count()) continue
+      break
+    }
+    if (await collectDialog.isVisible()) {
+      await clickWhenReady(collectDialog.getByRole('button', { name: /确认收录到联系人|確認收錄到聯絡人/ }), { timeout: remaining() })
+      await collectDialog.waitFor({ state: 'hidden', timeout: remaining() })
+    } else if (await prompt.isVisible()) {
+      logger('info', '联系人题触发全局收录提示，选择开启收录联系人')
+      await clickWhenReady(prompt.getByRole('button', { name: /^(是|確認|确定|Yes)$/i }), { timeout: remaining() })
+      await prompt.waitFor({ state: 'hidden', timeout: remaining() })
+    }
+    if (Date.now() >= deadline) throw new Error('联系人收录弹窗加载超时，尚未完成“忽略，不替换”确认')
   }
 
-  const collectDialog = page.getByRole('dialog').filter({ hasText: /是否收录联系人|是否收錄聯絡人/ })
-  const collectDialogVisible = await collectDialog
-    .waitFor({ state: 'visible', timeout: 5_000 })
-    .then(() => true)
-    .catch(() => false)
-  if (collectDialogVisible) {
-    await clickFirstVisible([
-      collectDialog.getByRole('button', { name: /确认收录到联系人|確認收錄到聯絡人/ }),
-    ], '确认收录到联系人')
-  }
-
-  const replaceDialog = page.getByRole('dialog').filter({ hasText: /联系人信息替换确认|聯絡人資訊替換確認/ })
-  const replaceDialogVisible = await replaceDialog
-    .waitFor({ state: 'visible', timeout: collectDialogVisible ? 5_000 : 1_000 })
-    .then(() => true)
-    .catch(() => false)
-  if (replaceDialogVisible) {
-    await replaceDialog.getByText(/忽略，不替换|忽略，不替換/, { exact: true }).click()
-    await clickFirstVisible([
-      replaceDialog.getByRole('button', { name: /确定|確認|OK/i }),
-      replaceDialog.locator('button').last(),
-    ], '确认忽略不替换')
-    await expect(replaceDialog, '联系人收录设置保存后弹窗应关闭').toBeHidden()
-  } else if (collectDialogVisible) {
-    throw new Error('确认收录联系人后未进入“联系人信息替换确认”步骤')
-  }
-
-  await expect(
-    page.locator('.fb-dialog-overlay[data-state="open"]'),
-    '联系人收录设置完成后不应残留遮罩弹窗',
-  ).toHaveCount(0)
+  await visibleStep.first().waitFor({ state: 'hidden', timeout: remaining() })
   await expect.poll(
     () => hasPresetContactFields(page),
-    { message: '联系人收录设置完成后应生成姓名、手机号、邮箱三道预设题' },
+    { message: '联系人收录设置完成后应生成姓名、手机号、邮箱三道预设题', timeout: remaining() },
   ).toBe(true)
+  logger('success', '联系人收录弹窗已确认并关闭，可以继续配置题目')
 }
 
 async function hasPresetContactFields(page) {
@@ -553,11 +629,32 @@ async function hasPresetContactFields(page) {
   return counts.every((count) => count === 1)
 }
 
+async function initializeContactFields(page, logger) {
+  const contactPalette = page.locator('button[data-component-type="contactGroup"]')
+  const initialCollectDialog = page.locator('[role="dialog"]:visible').filter({ hasText: CONTACT_DIALOG_TEXT }).first()
+  const initialDialogVisible = await initialCollectDialog
+    .waitFor({ state: 'visible', timeout: scaleTimeout(10_000) })
+    .then(() => true)
+    .catch(() => false)
+  if (initialDialogVisible) {
+    logger('info', '检测到设计器首次联系人收录弹窗，先完成“忽略，不替换”设置')
+    await chooseContactCollectionInDesigner(page, logger)
+  }
+
+  if (!await hasPresetContactFields(page)) {
+    await expect(page.locator('.fb-dialog-overlay[data-state="open"]'), '点击联系人前页面不应存在遮罩弹窗').toHaveCount(0)
+    await clickWhenReady(contactPalette)
+    await chooseContactCollectionInDesigner(page, logger)
+  } else {
+    logger('info', '首次联系人收录设置已自动生成姓名、手机号、邮箱')
+  }
+}
+
 async function ensureFieldRequired(page, type, logger) {
   const label = FIELD_LABELS[type] || type
   const field = fieldLocator(page, type)
   await expect(field, `${label}题应唯一存在`).toHaveCount(1)
-  await field.click()
+  await clickWhenReady(field)
 
   const requiredEditor = page
     .locator('.fb-edit-aside label')
@@ -566,7 +663,7 @@ async function ensureFieldRequired(page, type, logger) {
   const requiredSwitch = requiredEditor.getByRole('switch')
   await expect(requiredSwitch, `${label}题的必填开关应可见`).toBeVisible()
   if (!await isSwitchChecked(requiredSwitch)) {
-    await requiredSwitch.click()
+    await clickWhenReady(requiredSwitch)
   }
   await expect.poll(
     () => isSwitchChecked(requiredSwitch),
@@ -584,7 +681,7 @@ async function addPaletteField(page, type, logger, { required = true } = {}) {
   await expect(palette, `${label}题型应可用`).toBeEnabled()
   await expect(page.locator('.fb-dialog-overlay[data-state="open"]'), `添加${label}前不应存在遮罩弹窗`).toHaveCount(0)
   logger('info', `添加${label}题`, { type })
-  await palette.click()
+  await clickWhenReady(palette)
   await expect(fields, `${label}题应成功加入表单`).toHaveCount(beforeCount + 1)
   if (required) {
     await ensureFieldRequired(page, type, logger)
@@ -596,7 +693,7 @@ async function addPageBreak(page, expectedPageCount, logger, label) {
   await expect(palette, '题型库应显示分页组件').toBeVisible()
   await expect(palette, '分页组件应可用').toBeEnabled()
   logger('info', `添加分页：${label}`)
-  await palette.click()
+  await clickWhenReady(palette)
   await expect(fieldLocator(page, 'page'), `添加后应形成 ${expectedPageCount} 页`).toHaveCount(expectedPageCount)
   logger('info', `分页断言执行完成：预期共 ${expectedPageCount} 页`)
 }
@@ -637,17 +734,17 @@ async function configureFormIntroduction(page, title, logger) {
 }
 
 async function configureFirstPageFields(page, logger) {
-  await fieldLocator(page, 'username').click()
+  await clickWhenReady(fieldLocator(page, 'username'))
   await ensurePropertySwitchChecked(page, /采集称谓|採集稱謂/, '姓名题“采集称谓”')
 
-  await fieldLocator(page, 'idCard').click()
+  await clickWhenReady(fieldLocator(page, 'idCard'))
   await ensurePropertySwitchChecked(page, /自定义证件类型|自訂證件類型/, '身份证件“自定义证件类型”')
   logger('success', '第 1 页姓名称谓和自定义证件类型已开启')
 }
 
 async function configureSecondPageFields(page, imagePath, today, endDate, logger) {
   const inputField = fieldLocator(page, 'input')
-  await inputField.click()
+  await clickWhenReady(inputField)
   await ensurePropertySwitchChecked(page, /是否字数限制|是否字數限制/, '单行文本字数限制')
   const inputLengthRange = page.locator('.fb-edit-aside .property-editor-range-number')
   await expect(inputLengthRange, '单行文本应显示唯一字数范围设置').toHaveCount(1)
@@ -657,7 +754,7 @@ async function configureSecondPageFields(page, imagePath, today, endDate, logger
   await expect(inputMax, '单行文本最多输入数应为 20').toHaveValue('20')
 
   const radioField = fieldLocator(page, 'radio')
-  await radioField.click()
+  await clickWhenReady(radioField)
   await ensurePropertySwitchChecked(page, /允许用户输入|允許用戶輸入/, '单项选择允许用户输入')
   await ensurePropertySwitchChecked(page, /添加选项图片|新增選項圖片/, '单项选择添加选项图片')
   const optionImageInputs = radioField.locator(
@@ -676,12 +773,12 @@ async function configureSecondPageFields(page, imagePath, today, endDate, logger
   await expect(radioField.locator('img'), '单项选择前两个选项应显示已上传图片').toHaveCount(2)
 
   const checkboxField = fieldLocator(page, 'checkbox')
-  await checkboxField.click()
+  await clickWhenReady(checkboxField)
   const checkboxOptionHandles = checkboxField.locator(
     'button.checkbox-option-handle:not(.fb-text-transparent)',
   )
   for (let attempts = 0; attempts < 3 && await checkboxOptionHandles.count() < 3; attempts += 1) {
-    await checkboxField.getByRole('button', { name: /添加选项|新增選項/, exact: true }).click()
+    await clickWhenReady(checkboxField.getByRole('button', { name: /添加选项|新增選項/, exact: true }))
   }
   await expect(checkboxOptionHandles, '多项选择至少应有 3 个普通选项').toHaveCount(3)
   await ensurePropertySwitchChecked(page, /选择限制|選擇限制/, '多项选择数量限制')
@@ -692,18 +789,18 @@ async function configureSecondPageFields(page, imagePath, today, endDate, logger
   await expect(checkboxRange.getByPlaceholder(/最小值/)).toHaveValue('2')
   await expect(checkboxRange.getByPlaceholder(/最大值/)).toHaveValue('3')
 
-  await fieldLocator(page, 'number').click()
+  await clickWhenReady(fieldLocator(page, 'number'))
   await ensurePropertySwitchChecked(page, /设置限制|設定限制/, '数字设置限制')
 
-  await fieldLocator(page, 'date').click()
+  await clickWhenReady(fieldLocator(page, 'date'))
   await ensurePropertySwitchChecked(page, /日期范围限定|日期範圍限定/, '日期范围限定')
   const dateRows = page.locator('.fb-edit-aside .date-range-limit > div')
   await expect(dateRows, '日期范围应包含开始和结束日期').toHaveCount(2)
   const startRow = dateRows.filter({ hasText: /开始日期|開始日期/ })
   const endRow = dateRows.filter({ hasText: /结束日期|結束日期/ })
-  await startRow.getByRole('button').first().click()
+  await clickWhenReady(startRow.getByRole('button').first())
   await chooseCalendarDate(page, today, today)
-  await endRow.getByRole('button').first().click()
+  await clickWhenReady(endRow.getByRole('button').first())
   await chooseCalendarDate(page, endDate, today)
   await expect(startRow.getByRole('button').first()).toContainText(formatLocalDate(today))
   await expect(endRow.getByRole('button').first()).toContainText(formatLocalDate(endDate))
@@ -717,32 +814,32 @@ async function configureSecondPageFields(page, imagePath, today, endDate, logger
 
 async function configureCascader(page, logger) {
   const cascaderField = fieldLocator(page, 'cascader')
-  await cascaderField.click()
+  await clickWhenReady(cascaderField)
   const multipleButton = page.locator('.fb-edit-aside').getByRole('button', {
     name: /^(多选|多選)$/,
   })
   await expect(multipleButton, '级联选择题型设置应提供“多选”').toHaveCount(1)
-  await multipleButton.click()
+  await clickWhenReady(multipleButton)
 
-  await cascaderField.getByRole('button', { name: /添加选项|新增選項/, exact: true }).click()
+  await clickWhenReady(cascaderField.getByRole('button', { name: /添加选项|新增選項/, exact: true }))
   const dialog = page.getByRole('dialog').filter({ hasText: /选项设置|選項設定/ })
   await expect(dialog, '级联选择应打开选项设置弹窗').toBeVisible()
-  await dialog.getByRole('tab', { name: /^(3级|3級)$/ }).click()
+  await clickWhenReady(dialog.getByRole('tab', { name: /^(3级|3級)$/ }))
   const batchButtons = dialog.getByRole('button', { name: /批量编辑|批量編輯/, exact: true })
   await expect(batchButtons, '三级级联应显示三列批量编辑入口').toHaveCount(3)
 
   for (let level = 0; level < CASCADER_LEVEL_VALUES.length; level += 1) {
-    await batchButtons.nth(level).click()
+    await clickWhenReady(batchButtons.nth(level))
     const batchOverlay = page.locator('div.fb-fixed.fb-inset-0').filter({
       has: page.locator('textarea'),
     }).last()
     await expect(batchOverlay, `第 ${level + 1} 级批量编辑弹层应可见`).toBeVisible()
     await batchOverlay.locator('textarea').fill(CASCADER_LEVEL_VALUES[level])
-    await batchOverlay.getByRole('button', { name: /^(确定|確認)$/ }).click()
+    await clickWhenReady(batchOverlay.getByRole('button', { name: /^(确定|確認)$/ }))
     await expect(batchOverlay, `第 ${level + 1} 级批量编辑弹层应关闭`).toBeHidden()
   }
 
-  await dialog.getByRole('button', { name: /保存设置|儲存設定/, exact: true }).click()
+  await clickWhenReady(dialog.getByRole('button', { name: /保存设置|儲存設定/, exact: true }))
   await expect(dialog, '保存三级级联后设置弹窗应关闭').toBeHidden()
   logger('success', '级联选择已开启多选并配置固定三级数据', {
     path: CASCADER_LEVEL_VALUES.join(' -> '),
@@ -753,7 +850,7 @@ async function handleProxyEnrollmentDialog(page, formId, logger) {
   const dialog = page.getByRole('dialog').filter({
     hasText: /支持在题组创建姓名题型并收录联系人|支持在題組建立姓名題型並收錄聯絡人/,
   })
-  const visible = await dialog.waitFor({ state: 'visible', timeout: 2_000 })
+  const visible = await dialog.waitFor({ state: 'visible', timeout: scaleTimeout(2_000) })
     .then(() => true)
     .catch(() => false)
   if (!visible) return
@@ -761,7 +858,7 @@ async function handleProxyEnrollmentDialog(page, formId, logger) {
   logger('info', '题组联系人触发代为报名确认，保存活动报名类型')
   const updatePromise = waitForExactResponse(page, 'PUT', `/be/form/${formId}/activity/update-props`)
   const detailPromise = waitForExactResponse(page, 'GET', `/be/form/${formId}`)
-  await dialog.getByRole('button', { name: /我已知悉/ }).click()
+  await clickWhenReady(dialog.getByRole('button', { name: /我已知悉/ }))
   await inspectBusinessResponse(await updatePromise, '保存代为报名设置')
   await inspectBusinessResponse(await detailPromise, '刷新代为报名表单详情')
   await expect(dialog, '代为报名确认完成后弹窗应关闭').toBeHidden()
@@ -770,7 +867,7 @@ async function handleProxyEnrollmentDialog(page, formId, logger) {
 async function addContactFieldsToGroup(page, formId, logger) {
   const group = fieldLocator(page, 'fieldGroup')
   await group.scrollIntoViewIfNeeded()
-  await group.click()
+  await clickWhenReady(group)
   const groupKey = requireGroupKey(await group.getAttribute('data-field-key'))
   const groupPanel = group.locator('.field-panel').first()
   await expect(groupPanel, '题组内应有可拖放子画布').toBeVisible()
@@ -790,7 +887,7 @@ async function addContactFieldsToGroup(page, formId, logger) {
     const child = page.locator(
       `.form-field[data-component-type="${type}"][data-container-path="${groupKey}"]`,
     )
-    await child.click()
+    await clickWhenReady(child)
     await ensurePropertySwitchChecked(
       page,
       /是否收录联系人|是否收錄聯絡人/,
@@ -812,7 +909,7 @@ function requireGroupKey(value) {
 
 async function configureLayoutFields(page, logger) {
   const descriptionField = fieldLocator(page, 'description')
-  await descriptionField.click()
+  await clickWhenReady(descriptionField)
   const descriptionTitle = descriptionField.locator('.editable-div[contenteditable="true"]').first()
   await descriptionTitle.fill(DESCRIPTION_FIELD_TITLE)
   await descriptionTitle.blur()
@@ -824,7 +921,7 @@ async function configureLayoutFields(page, logger) {
   await expect(descriptionTitle).toHaveText(DESCRIPTION_FIELD_TITLE)
   await expect(descriptionEditor).toContainText(DESCRIPTION_FIELD_CONTENT)
 
-  await fieldLocator(page, 'divider').click()
+  await clickWhenReady(fieldLocator(page, 'divider'))
   const dividerEditor = propertyLabel(page, /分割线文案|分割線文案/)
   await expect(dividerEditor, '分割线文案设置应唯一存在').toHaveCount(1)
   await dividerEditor.locator('input').fill(DIVIDER_TEXT)
@@ -836,7 +933,7 @@ async function configureLayoutFields(page, logger) {
 async function uploadHeaderImageAndApplyTheme(page, imagePath, logger) {
   const previewButton = page.getByRole('button', { name: /^(预览|預覽)$/ })
   await expect(previewButton, '设计器顶部应显示预览按钮').toBeVisible()
-  await previewButton.click()
+  await clickWhenReady(previewButton)
   await expect(page.getByText(/呈现设置|呈現設定/, { exact: true }), '预览模式应显示呈现设置').toBeVisible()
   const previewSettings = page.locator('.fb-form-fields')
   const headerImageInput = previewSettings.locator('input[type="file"][accept="image/*"]')
@@ -848,7 +945,7 @@ async function uploadHeaderImageAndApplyTheme(page, imagePath, logger) {
 
   const colorDialog = page.getByRole('dialog').filter({ hasText: /智能色系调色盘|智能色系調色盤/ })
   await expect(colorDialog, '头图上传后应显示智能色系调色盘').toBeVisible()
-  await colorDialog.getByRole('button', { name: /应用配色|應用配色/, exact: true }).click()
+  await clickWhenReady(colorDialog.getByRole('button', { name: /应用配色|應用配色/, exact: true }))
   await expect(colorDialog, '应用系统推荐配色后弹窗应关闭').toBeHidden()
   logger('success', '头图上传完成并已应用系统推荐配色', { uploadId })
   return uploadId
@@ -984,33 +1081,37 @@ function assertSavedPayloads({
   return Number(itemsPayload.revision_no)
 }
 
-async function ensureIgnoreStrategyInSettings(page, logger) {
-  logger('info', '进入基础设置并打开“收录联系人设置”')
+async function enterBasicSettings(page) {
   const basicSettingsStep = page
     .locator('.form-activity-step-nav .form-activity-step')
     .filter({ hasText: /基础设置|基礎設定/ })
   await expect(basicSettingsStep, '顶部步骤导航中应有唯一的“基础设置”入口').toHaveCount(1)
   await expect(basicSettingsStep, '“基础设置”步骤应可点击').toBeVisible()
-  await basicSettingsStep.click()
-  await page.waitForURL(/\/form-activity\/settings\?[^#]*id=/, { timeout: NAVIGATION_TIMEOUT_MS })
-  await page.locator('[data-menu-key="collect-contact"]').click()
+  await clickWhenReady(basicSettingsStep)
+  await page.waitForURL(/\/form-activity\/settings\?[^#]*id=/, { timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) })
+}
+
+async function ensureIgnoreStrategyInSettings(page, logger) {
+  logger('info', '进入基础设置并打开“收录联系人设置”')
+  await enterBasicSettings(page)
+  await clickWhenReady(page.locator('[data-menu-key="collect-contact"]'))
 
   const switchControl = page.getByRole('switch', { name: /是否收录联系人开关|是否收錄聯絡人開關/ })
   await expect(switchControl, '联系人收录开关应显示').toBeVisible()
   const state = await switchControl.getAttribute('data-state')
   if (state !== 'checked' && await switchControl.getAttribute('aria-checked') !== 'true') {
-    await switchControl.click()
+    await clickWhenReady(switchControl)
   } else {
-    await page.getByRole('button', { name: /是否收录联系人|是否收錄聯絡人/ }).click()
+    await clickWhenReady(page.getByRole('button', { name: /是否收录联系人|是否收錄聯絡人/ }))
   }
 
   const ignoreRadio = page.getByRole('radio', { name: /忽略，不替换|忽略，不替換/ })
   await expect(ignoreRadio, '应显示“忽略，不替换”策略').toBeVisible()
-  await ignoreRadio.click()
+  await clickWhenReady(ignoreRadio)
   await waitForApiResponse(
     page,
     '/config',
-    () => page.getByRole('button', { name: /确认|確認/, exact: true }).click(),
+    () => clickWhenReady(page.getByRole('button', { name: /确认|確認/, exact: true })),
     '确认联系人收录设置',
   )
 
@@ -1035,7 +1136,11 @@ export async function run({
   logger,
   recordApiResponse,
   recordResourceResponse,
-}) {
+}, {
+  createPath = '/form-activity/index',
+  prepareContactFields = initializeContactFields,
+  configureContactSettings = ensureIgnoreStrategyInSettings,
+} = {}) {
   if (!siteBaseUrl) throw new Error('运行环境必须提供 Web 基址')
   if (!apiBaseUrl) throw new Error('运行环境必须提供 API 基址')
   const authorization = extraHTTPHeaders?.Authorization
@@ -1080,8 +1185,10 @@ export async function run({
     })
     await networkObserver.ready
     page = await context.newPage()
-    page.setDefaultTimeout(ACTION_TIMEOUT_MS)
-    page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS)
+    observeUiReadiness(page)
+    observeContactPageRequests(page)
+    page.setDefaultTimeout(scaleTimeout(ACTION_TIMEOUT_MS))
+    page.setDefaultNavigationTimeout(scaleTimeout(NAVIGATION_TIMEOUT_MS))
 
     let businessRequestCount = 0
     let authenticatedRequestCount = 0
@@ -1104,43 +1211,28 @@ export async function run({
 
     let formId = ''
     networkObserver.setPhase('页面初始化')
-    logger('info', '访问表单活动创建页', { path: '/form-activity/index', title })
-    await page.goto(pageUrl(siteBaseUrl, '/form-activity/index'), { waitUntil: 'domcontentloaded' })
+    logger('info', '访问表单活动创建页', { path: createPath, title })
+    await page.goto(pageUrl(siteBaseUrl, createPath), { waitUntil: 'domcontentloaded' })
     await expect(page, 'Token 生效后不应跳转登录页').not.toHaveURL(/\/login(?:[/?#]|$)/)
 
     networkObserver.setPhase('创建空白表单')
     const createResponse = await waitForApiResponse(
       page,
       '/be/form',
-      () => page.getByText(/从空白表单开始|從空白表單開始/, { exact: true }).click(),
+      () => clickWhenReady(page.getByText(/从空白表单开始|從空白表單開始/, { exact: true })),
       '通过页面创建空白表单',
     )
-    await page.waitForURL(/\/form-activity\/designer\?[^#]*id=/, { timeout: NAVIGATION_TIMEOUT_MS })
+    await page.waitForURL(/\/form-activity\/designer\?[^#]*id=/, { timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) })
     formId = new URL(page.url()).searchParams.get('id') || String(createResponse.body?.data?.id ?? '')
     if (!formId) throw new Error('创建表单后 URL 或响应中未返回表单 id')
     logger('success', '已通过页面进入表单设计器', { formId })
 
     networkObserver.setPhase('设计全题型表单')
+    await waitForDesignerBootstrap(page, logger)
     const contactPalette = page.locator('button[data-component-type="contactGroup"]')
     await expect(contactPalette, '设计器题型库应显示联系人快捷项').toBeVisible()
 
-    const initialCollectDialog = page.getByRole('dialog').filter({ hasText: /是否收录联系人|是否收錄聯絡人/ })
-    const initialDialogVisible = await initialCollectDialog
-      .waitFor({ state: 'visible', timeout: 3_000 })
-      .then(() => true)
-      .catch(() => false)
-    if (initialDialogVisible) {
-      logger('info', '检测到设计器首次联系人收录弹窗，先完成“忽略，不替换”设置')
-      await chooseContactCollectionInDesigner(page, logger)
-    }
-
-    if (!await hasPresetContactFields(page)) {
-      await expect(page.locator('.fb-dialog-overlay[data-state="open"]'), '点击联系人前页面不应存在遮罩弹窗').toHaveCount(0)
-      await contactPalette.click()
-      await chooseContactCollectionInDesigner(page, logger)
-    } else {
-      logger('info', '首次联系人收录设置已自动生成姓名、手机号、邮箱')
-    }
+    await prepareContactFields(page, logger)
 
     for (const type of CONTACT_PRESET_TYPES) {
       await ensureFieldRequired(page, type, logger)
@@ -1185,7 +1277,7 @@ export async function run({
     logger('info', '点击“保存草稿”')
     const itemSavePromise = waitForExactResponse(page, 'PUT', `/be/form/${formId}/items`)
     const configSavePromise = waitForExactResponse(page, 'PUT', `/be/form/${formId}/config`)
-    await page.getByRole('button', { name: /^(保存草稿|儲存草稿|保存|儲存)$/ }).click()
+    await clickWhenReady(page.getByRole('button', { name: /^(保存草稿|儲存草稿|保存|儲存)$/ }))
     const [itemSaveResponse, configSaveResponse] = await Promise.all([
       itemSavePromise,
       configSavePromise,
@@ -1212,7 +1304,7 @@ export async function run({
     })
 
     networkObserver.setPhase('联系人设置')
-    await ensureIgnoreStrategyInSettings(page, logger)
+    await configureContactSettings(page, logger)
 
     networkObserver.setPhase('发布表单')
     logger('info', '点击设置页“发布”按钮')
@@ -1225,7 +1317,7 @@ export async function run({
     }
     await expect(publishButton, '设置页应显示可直接发布按钮').toBeVisible()
     const publishPromise = waitForExactResponse(page, 'POST', `/be/form/${formId}/publish`)
-    await publishButton.click()
+    await clickWhenReady(publishButton)
     const publishResponse = await publishPromise
     const publishOutcome = await inspectBusinessResponse(publishResponse, '发布表单')
     const publishBody = publishOutcome.body
@@ -1234,25 +1326,28 @@ export async function run({
       expect(publishBody?.data?.status, '发布响应状态应为 published').toBe('published')
       expect(Number(publishBody?.data?.revision_no), '发布响应 revision_no 应匹配已保存版本').toBe(savedRevisionNo)
     }
-    await page.waitForURL(/\/form-activity\/list(?:[/?#]|$)/, { timeout: NAVIGATION_TIMEOUT_MS })
+    await page.waitForURL(/\/form-activity\/list(?:[/?#]|$)/, { timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) })
     logger('success', '表单发布成功并已回到列表页')
 
     networkObserver.setPhase('已发布列表验证')
-    const auditTabs = page.locator('.form-activity-audit-tabs')
-    if (await auditTabs.isVisible().catch(() => false)) {
-      await auditTabs.getByText(/已发布|已發佈/, { exact: true }).click()
-    }
     const titleInput = page.getByPlaceholder(/请输入标题|請輸入標題/)
     await expect(titleInput, '列表标题筛选框应可见').toBeVisible()
+    await dismissFormOnboarding(page)
+    const auditTabs = page.locator('.form-activity-audit-tabs')
+    if (await auditTabs.isVisible().catch(() => false)) {
+      await clickWhenReady(auditTabs.getByText(/已发布|已發佈/, { exact: true }))
+    }
     await titleInput.fill(title)
-    const listSearchPromise = page.waitForResponse((response) => {
-      const url = new URL(response.url())
-      return response.request().method() === 'GET'
-        && url.pathname.endsWith('/be/form/list')
-        && url.searchParams.get('filter[title]') === title
-    }, { timeout: ACTION_TIMEOUT_MS })
-    await page.getByRole('button', { name: /查询|查詢|搜索|搜尋/ }).click()
-    const listOutcome = await inspectBusinessResponse(await listSearchPromise, '查询已发布表单列表')
+    const [listSearchResponse] = await Promise.all([
+      page.waitForResponse((response) => {
+        const url = new URL(response.url())
+        return response.request().method() === 'GET'
+          && url.pathname.endsWith('/be/form/list')
+          && url.searchParams.get('filter[title]') === title
+      }, { timeout: scaleTimeout(ACTION_TIMEOUT_MS) }),
+      clickWhenReady(page.getByRole('button', { name: /查询|查詢|搜索|搜尋/ })),
+    ])
+    const listOutcome = await inspectBusinessResponse(listSearchResponse, '查询已发布表单列表')
     const listBody = listOutcome.body
     const publishedRecords = Array.isArray(listBody?.data?.list) ? listBody.data.list : []
     if (listOutcome.bodyValid) {
@@ -1352,6 +1447,8 @@ export {
   CASCADER_LEVEL_VALUES,
   COMMON_FIELD_TYPES,
   CONTACT_FIELD_TYPES,
+  CONTACT_PRESET_TYPES,
+  CONTACT_DIALOG_TEXT,
   DEFAULT_HEADER_IMAGE_PATH,
   DESCRIPTION_FIELD_CONTENT,
   DESCRIPTION_FIELD_TITLE,
@@ -1362,8 +1459,15 @@ export {
   FORM_CONTENT_ITEMS,
   FORM_SUBTITLE,
   REQUIRED_FIELD_TYPES,
+  chooseContactCollectionInDesigner,
+  enterBasicSettings,
+  ensureIgnoreStrategyInSettings,
+  hasPresetContactFields,
+  waitForContactPageReady,
   assertSavedPayloads,
   inspectBusinessResponse,
   requireGroupKey,
   timestampTitle,
 }
+
+export { waitForDesignerBootstrap }

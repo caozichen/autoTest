@@ -5,6 +5,7 @@ import { LocalDashboardService } from './dashboard/local-dashboard.service'
 import type { EnvironmentService } from './environments/environment-service'
 import type { EnvironmentLoginService } from './environments/environment-login-service'
 import { FetchEnvironmentLoginService } from './environments/fetch-environment-login.service'
+import { LocalEnvironmentSessionService, type EnvironmentSessionService } from './environments/local-environment-session.service'
 import { LocalEnvironmentService } from './environments/local-environment.service'
 import { LocalScriptService } from './scripts/local-script.service'
 import type { ScriptService } from './scripts/script-service'
@@ -27,6 +28,7 @@ export interface ServiceContainer {
   automationPipelines: AutomationPipelineService
   dashboard: DashboardService
   environmentLogin: EnvironmentLoginService
+  environmentSessions: EnvironmentSessionService
   environments: EnvironmentService
   runtimeVariables: RuntimeVariableService
   runRecords: RunRecordService
@@ -39,10 +41,12 @@ const environments = new LocalEnvironmentService()
 const runRecords = new HttpRunRecordService()
 const automationPipelines = new LocalAutomationPipelineService()
 const environmentLogin = new FetchEnvironmentLoginService()
+const environmentSessions = new LocalEnvironmentSessionService()
 const runtimeVariables = new SessionRuntimeVariableService()
 const automationPipelineExecution = new LocalAutomationPipelineExecutionService({
   environments,
   environmentLogin,
+  environmentSessions,
   runtimeVariables,
   scripts,
   runRecords,
@@ -54,6 +58,7 @@ export const services: ServiceContainer = Object.freeze({
   automationPipelines,
   dashboard: new LocalDashboardService(scripts, environments, runRecords),
   environmentLogin,
+  environmentSessions,
   environments,
   runtimeVariables,
   runRecords,

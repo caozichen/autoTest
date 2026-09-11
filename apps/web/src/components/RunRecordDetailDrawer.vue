@@ -598,7 +598,7 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
           <strong>{{ statusMap[record.status].label }}</strong>
           <p v-if="record.error">{{ record.error }}</p>
           <p v-else>
-            共执行 {{ record.counts.total }} 个脚本，通过 {{ record.counts.passed }} 个，部分通过 {{ record.counts.partial }} 个，执行失败 {{ record.counts.failed }} 个。
+            共执行 {{ record.counts.total }} 个脚本，执行成功 {{ record.counts.passed }} 个，部分通过 {{ record.counts.partial }} 个，执行失败 {{ record.counts.failed }} 个，未执行 {{ record.counts.skipped }} 个。
           </p>
         </div>
         <strong class="detail-status__rate">{{ record.analysis.passRate }}%</strong>
@@ -622,7 +622,7 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
               <div><h3>批次进度</h3><p>按脚本结果汇总当前批次。</p></div>
               <span>{{ record.counts.passed + record.counts.partial + record.counts.failed + record.counts.skipped }} / {{ record.counts.total }}</span>
             </header>
-            <div class="result-distribution" role="img" :aria-label="`通过 ${record.counts.passed}，部分通过 ${record.counts.partial}，执行失败 ${record.counts.failed}，未执行 ${record.counts.skipped}，待完成 ${pendingRunScriptCount(record.counts)}`">
+            <div class="result-distribution" role="img" :aria-label="`执行成功 ${record.counts.passed}，部分通过 ${record.counts.partial}，执行失败 ${record.counts.failed}，未执行 ${record.counts.skipped}，待完成 ${pendingRunScriptCount(record.counts)}`">
               <span v-if="record.counts.passed" aria-hidden="true" class="result-distribution__passed" :style="{ flex: record.counts.passed }" />
               <span v-if="record.counts.partial" aria-hidden="true" class="result-distribution__partial" :style="{ flex: record.counts.partial }" />
               <span v-if="record.counts.failed" aria-hidden="true" class="result-distribution__failed" :style="{ flex: record.counts.failed }" />
@@ -630,7 +630,7 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
               <span v-if="pendingRunScriptCount(record.counts)" aria-hidden="true" class="result-distribution__pending" :style="{ flex: pendingRunScriptCount(record.counts) }" />
             </div>
             <div class="distribution-legend">
-              <span><i class="is-passed" />通过 {{ record.counts.passed }}</span>
+              <span><i class="is-passed" />执行成功 {{ record.counts.passed }}</span>
               <span><i class="is-partial" />部分通过 {{ record.counts.partial }}</span>
               <span><i class="is-failed" />执行失败 {{ record.counts.failed }}</span>
               <span><i class="is-skipped" />未执行 {{ record.counts.skipped }}</span>

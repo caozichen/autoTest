@@ -1,3 +1,4 @@
+import { scaleTimeout } from './environment-timeouts.mjs'
 import { chromium } from '@playwright/test'
 
 function assertChromeCanLaunch() {
@@ -14,5 +15,5 @@ function assertChromeCanLaunch() {
 
 export function launchGoogleChrome(options = {}) {
   assertChromeCanLaunch()
-  return chromium.launch({ channel: 'chrome', headless: true, ...options })
+  return chromium.launch({ channel: 'chrome', headless: true, timeout: scaleTimeout(60_000), ...options })
 }

@@ -48,6 +48,7 @@ async function startTestServer(t, {
   runSnapshotTtlMs = 60_000,
   cancellationWaitTimeoutMs = 500,
   artifactPersistenceTimeoutMs,
+  recordMaintenanceIntervalMs,
   artifactRootDirectory,
   runRecordDirectory,
   runRecordStore,
@@ -55,6 +56,10 @@ async function startTestServer(t, {
   scriptConfigDirectory,
   scriptsDirectory,
 } = {}) {
+  if (!runRecordStore && !runRecordDirectory) {
+    runRecordDirectory = await mkdtemp(join(tmpdir(), 'autotest-server-records-'))
+    t.after(() => rm(runRecordDirectory, { recursive: true, force: true }))
+  }
   const server = createRunnerServer({
     executeScript: controlled.executeScript,
     validateRequest: (payload) => ({
@@ -64,6 +69,7 @@ async function startTestServer(t, {
     runSnapshotTtlMs,
     cancellationWaitTimeoutMs,
     ...(artifactPersistenceTimeoutMs ? { artifactPersistenceTimeoutMs } : {}),
+    ...(recordMaintenanceIntervalMs ? { recordMaintenanceIntervalMs } : {}),
     ...(artifactRootDirectory ? { artifactRootDirectory } : {}),
     ...(runRecordDirectory ? { runRecordDirectory } : {}),
     ...(runRecordStore ? { runRecordStore } : {}),
@@ -632,7 +638,8 @@ test('persists completed artifacts into run history without a browser-side recor
 
   assert.equal(runResponse.status, 200)
   assert.equal(detailResponse.status, 200)
-  assert.equal(detail.record.revision, 1)
+  assert.ok(detail.record.revision >= 1)
+  assert.equal(detail.record.scripts[0].status, 'passed')
   assert.deepEqual(detail.record.scripts[0].artifacts, [artifact])
 })
 
@@ -1267,4 +1274,114 @@ test('serves persistent script-config CRUD with CAS and DELETE CORS', async (t) 
 
   const unsafeIdResponse = await fetch(`${baseUrl}/script-configs/%2Ftmp`)
   assert.equal(unsafeIdResponse.status, 400)
+})
+
+test('writes a fatal pipeline terminal result without a frontend PATCH', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'autotest-terminal-records-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const store = new RunRecordFileStore({ directory, now: () => new Date('2026-08-31T08:02:00.000Z') })
+  const record = storedRecord('terminal-batch-001')
+  await store.create(record)
+  const { baseUrl } = await startTestServer(t, { runRecordStore: store,
+    controlled: { executeScript: async () => ({ ok: false, status: 'failed', timedOut: true, error: 'timeout', durationMs: 100, logs: [] }) } })
+  const response = await fetch(`${baseUrl}/runs`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+    runId: 'terminal-attempt-001', executionId: record.id, scriptId: record.scripts[0].id, failBatchOnError: true,
+  }) })
+  assert.equal(response.status, 200)
+  assert.equal((await response.json()).timedOut, true)
+  assert.equal((await store.get(record.id)).status, 'failed')
+})
+
+test('Runner saves successful and partial results without any frontend record PATCH', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'autotest-results-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  let now = new Date('2026-08-31T08:02:00.000Z')
+  const store = new RunRecordFileStore({ directory, now: () => now })
+  const record = storedRecord('saved-results-batch')
+  const source = record.scripts[0]
+  record.scripts.push({ ...structuredClone(source), id: 'script-002', recordId: `${record.id}:script-002` })
+  await store.create(record)
+  const { baseUrl } = await startTestServer(t, { runRecordStore: store, controlled: {
+    executeScript: async (payload) => ({ ok: payload.scriptId === 'script-001',
+      status: payload.scriptId === 'script-001' ? 'passed' : 'partial', durationMs: 20, logs: [],
+      result: { formId: 'created-form', token: 'private-token' } }),
+  } })
+  for (const script of record.scripts) {
+    const response = await fetch(`${baseUrl}/runs`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ runId: `attempt-${script.id}`, scriptId: script.id, executionId: record.id, context: {} }) })
+    assert.equal(response.status, 200)
+    await response.json()
+  }
+  const current = await store.get(record.id)
+  assert.equal(current.status, 'running') // Leave time for frontend post-run validation.
+  assert.deepEqual(current.scripts.map(s => s.status), ['passed', 'partial'])
+  assert.equal(current.scripts[0].output.formId, 'created-form')
+  assert.equal(current.scripts[0].output.token, '[REDACTED]')
+  now = new Date(now.getTime() + 121_000)
+  assert.equal((await store.get(record.id)).status, 'partial')
+})
+
+test('a disconnected page cannot lose the final result and long silence never aborts the script', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'autotest-disconnect-results-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  let now = new Date('2026-08-31T08:02:00.000Z')
+  const store = new RunRecordFileStore({ directory, now: () => now })
+  const record = storedRecord('disconnect-results-batch')
+  await store.create(record)
+  let finish
+  let signal
+  const { baseUrl } = await startTestServer(t, { runRecordStore: store, controlled: {
+    executeScript: (_payload, options) => { signal = options.signal; return new Promise(resolve => { finish = resolve }) },
+  } })
+  const url = new URL('/runs', baseUrl)
+  const request = httpRequest({ hostname: url.hostname, port: url.port, path: url.pathname, method: 'POST', headers: { 'Content-Type': 'application/json' } })
+  request.on('error', () => {})
+  request.end(JSON.stringify({ runId: 'disconnected-attempt', executionId: record.id, scriptId: 'script-001', context: {} }))
+  await waitForRun(baseUrl, 'disconnected-attempt')
+  request.destroy()
+  now = new Date(now.getTime() + 5 * 60 * 60 * 1000)
+  assert.equal((await store.get(record.id)).status, 'running')
+  assert.equal(signal.aborted, false)
+  finish({ ok: true, status: 'passed', durationMs: 1000, logs: [] })
+  let saved
+  for (let attempt = 0; attempt < 100; attempt++) {
+    saved = await store.get(record.id)
+    if (saved.counts.passed === 1) break
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+  assert.equal(saved.counts.passed, 1)
+  now = new Date(now.getTime() + 121_000)
+  assert.equal((await store.get(record.id)).status, 'passed')
+})
+
+test('maintenance retries a failed result write without rerunning the script or requiring a page', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'autotest-retry-results-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  let now = new Date('2026-08-31T08:02:00.000Z')
+  const store = new RunRecordFileStore({ directory, now: () => now })
+  const record = storedRecord('retry-results-batch')
+  await store.create(record)
+  const save = store.saveRunnerStepResult.bind(store)
+  let saves = 0
+  let executions = 0
+  store.saveRunnerStepResult = (...args) => {
+    if (++saves === 1) return Promise.reject(new Error('temporary write failure'))
+    return save(...args)
+  }
+  const { baseUrl } = await startTestServer(t, { runRecordStore: store, recordMaintenanceIntervalMs: 10, controlled: {
+    executeScript: async () => { executions++; return { ok: true, status: 'passed', durationMs: 1, logs: [] } },
+  } })
+  await (await fetch(`${baseUrl}/runs`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ runId: 'retry-result-attempt', executionId: record.id, scriptId: 'script-001', context: {} }) })).json()
+  for (let attempt = 0; attempt < 100 && !store.records.get(record.id).runnerTracking?.completedScriptIds?.length; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+  assert.equal(store.records.get(record.id).counts.passed, 1)
+  now = new Date(now.getTime() + 121_000)
+  for (let attempt = 0; attempt < 100 && store.records.get(record.id).status === 'running'; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+  assert.equal(store.records.get(record.id).status, 'passed')
+  assert.equal(executions, 1)
+  assert.equal(saves, 2)
 })

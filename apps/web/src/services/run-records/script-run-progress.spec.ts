@@ -12,6 +12,7 @@ function script(status: AutomationScript['status']): AutomationScript {
     entryFile: 'create-form.mjs',
     tags: [],
     status,
+    createdAt: '2026-08-31T02:00:00.000Z',
     updatedAt: '2026-08-31 10:00',
     lastRunAt: '刚刚',
     lastDuration: '1.2s',

@@ -103,6 +103,7 @@ function configToAutomationScript(
     responseVariableBindings: structuredClone(config.responseVariableBindings ?? []),
     tags: [...config.tags],
     status,
+    createdAt: config.createdAt,
     updatedAt: formatUpdatedAt(config.updatedAt),
     lastRunAt: previous?.lastRunAt ?? null,
     lastDuration: previous?.lastDuration ?? null,
@@ -701,7 +702,7 @@ export class LocalScriptService implements ScriptService {
         } = { active: true, controller: null }
         let lastLiveProgressAt = 0
         let runObserved = false
-        const runDeadlineMs = script.timeoutMs + this.runRequestGraceMs
+        const runDeadlineMs = script.timeoutMs * (/hk/i.test(context.environmentCode ?? '') ? 3 : 1) + this.runRequestGraceMs
         const runDeadlineAt = Date.now() + runDeadlineMs
         const effectiveVariables = {
           ...scriptInputParameterDefaults(script.inputParameters),
@@ -737,8 +738,10 @@ export class LocalScriptService implements ScriptService {
             body: JSON.stringify({
               runId,
               executionId: context.executionId ?? runId,
+              failBatchOnError: context.failBatchOnError === true,
               scriptId: script.id,
               context: {
+                environmentCode: context.environmentCode,
                 siteBaseUrl: context.siteBaseUrl,
                 apiBaseUrl: context.apiBaseUrl,
                 ignoreHTTPSErrors: context.ignoreHTTPSErrors,

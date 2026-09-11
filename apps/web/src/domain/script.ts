@@ -138,6 +138,7 @@ export interface AutomationScript {
   responseVariableBindings?: ScriptResponseVariableBinding[]
   tags: string[]
   status: ScriptStatus
+  createdAt: string
   updatedAt: string
   lastRunAt: string | null
   lastDuration: string | null
@@ -159,7 +160,9 @@ export interface ScriptDraft {
 
 export interface ScriptRunContext {
   environmentId: string
+  environmentCode?: string
   executionId?: string
+  failBatchOnError?: boolean
   siteBaseUrl: string
   apiBaseUrl: string
   ignoreHTTPSErrors: boolean

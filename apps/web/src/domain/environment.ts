@@ -11,6 +11,7 @@ export type EnvironmentLoginMode = 'password' | 'mobile-code'
 export type EnvironmentLoginMethod = 'POST' | 'PUT' | 'PATCH'
 
 export interface EnvironmentAuthConfig {
+  strategy?: 'login' | 'reuse-session'
   mode: EnvironmentLoginMode
   method: EnvironmentLoginMethod
   timeoutMs: number

@@ -68,7 +68,7 @@ function sanitizeDraft(draft: AutomationPipelineDraft): AutomationPipelineDraft 
   const sanitized: AutomationPipelineDraft = {
     name: draft.name.trim(),
     description: draft.description.trim(),
-    environmentId: draft.environmentId.trim(),
+    ...(draft.environmentId?.trim() ? { environmentId: draft.environmentId.trim() } : {}),
     steps: draft.steps.map((step) => ({
       scriptId: step.scriptId.trim(),
       parameterMappings: step.parameterMappings.map((mapping) => ({
@@ -79,7 +79,6 @@ function sanitizeDraft(draft: AutomationPipelineDraft): AutomationPipelineDraft 
     })),
   }
   if (!sanitized.name) throw new Error('流水线名称不能为空')
-  if (!sanitized.environmentId) throw new Error('流水线必须选择运行环境')
   validateSteps(sanitized.steps)
   return sanitized
 }
@@ -90,7 +89,7 @@ function normalizePipeline(value: unknown): AutomationPipeline | null {
     typeof value.id !== 'string' ||
     typeof value.name !== 'string' ||
     typeof value.description !== 'string' ||
-    typeof value.environmentId !== 'string' ||
+    (value.environmentId !== undefined && typeof value.environmentId !== 'string') ||
     typeof value.createdAt !== 'string' ||
     typeof value.updatedAt !== 'string' ||
     !Number.isFinite(new Date(value.createdAt).getTime()) ||
@@ -99,9 +98,9 @@ function normalizePipeline(value: unknown): AutomationPipeline | null {
 
   const id = value.id.trim()
   const name = value.name.trim()
-  const environmentId = value.environmentId.trim()
+  const environmentId = typeof value.environmentId === 'string' ? value.environmentId.trim() : ''
   const steps = value.steps.map(normalizeStep)
-  if (!id || !name || !environmentId || steps.some((step) => step === null)) return null
+  if (!id || !name || steps.some((step) => step === null)) return null
 
   try {
     validateSteps(steps as AutomationPipelineStep[])
@@ -113,7 +112,7 @@ function normalizePipeline(value: unknown): AutomationPipeline | null {
     id,
     name,
     description: value.description.trim(),
-    environmentId,
+    ...(environmentId ? { environmentId } : {}),
     steps: steps as AutomationPipelineStep[],
     createdAt: value.createdAt,
     updatedAt: value.updatedAt,

@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 
-import { expect as playwrightExpect } from '@playwright/test'
+import { expect as playwrightExpect } from './environment-timeouts.mjs'
 
 const assertionContext = new AsyncLocalStorage()
 

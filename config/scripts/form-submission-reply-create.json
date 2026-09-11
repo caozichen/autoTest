@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "revision": 1,
+  "id": "form-submission-reply-create",
+  "name": "手动创建提报信息",
+  "description": "通过后台手动创建提报页面加载前序脚本发布的全题型表单，校验单页创建态、必填与格式边界，填写全部题型并验证唯一创建请求、动态字段载荷、成功详情回显及全部接口和静态资源健康。",
+  "directory": "scripts",
+  "entryFile": "form-submission-reply-create.ui.spec.mjs",
+  "timeoutMs": 300000,
+  "enabled": true,
+  "requestPath": "/form-activity/submission/preview/reply/create?fid={{FORM_ID}}",
+  "inputParameters": [
+    {
+      "id": "target-form-id",
+      "key": "FORM_ID",
+      "value": "q3r72J",
+      "description": "待手动创建提报的表单 ID，可映射前序创建完整表单脚本输出。"
+    },
+    {
+      "id": "published-form-contract",
+      "key": "FORM_CONTRACT",
+      "value": "",
+      "description": "可选的前序全题型发布契约，用于校验动态 item_key、题目规则和提交载荷。"
+    }
+  ],
+  "responseVariableBindings": [
+    {
+      "id": "created-submission-id",
+      "variableName": "SUBMISSION_ID",
+      "responsePath": "submissionId",
+      "secret": false
+    }
+  ],
+  "tags": [
+    "Playwright",
+    "UI",
+    "Headless Chrome",
+    "后台提报",
+    "全题型",
+    "P0"
+  ],
+  "createdAt": "2026-09-09T04:00:00.000Z",
+  "updatedAt": "2026-09-09T04:00:00.000Z"
+}

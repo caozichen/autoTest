@@ -1,3 +1,4 @@
+import { scaleTimeout } from './environment-timeouts.mjs'
 const MAX_BODY_CHARACTERS = 100_000
 const DEFAULT_RESPONSE_DRAIN_TIMEOUT_MS = 2_000
 const DEFAULT_NETWORK_PHASE = '未标记'
@@ -282,7 +283,7 @@ export function attachNetworkObserver(target, {
   onResourceResponse,
   onNetworkEntry,
   shouldRecord = () => true,
-  responseDrainTimeoutMs = DEFAULT_RESPONSE_DRAIN_TIMEOUT_MS,
+  responseDrainTimeoutMs = scaleTimeout(DEFAULT_RESPONSE_DRAIN_TIMEOUT_MS),
   initialPhase = DEFAULT_NETWORK_PHASE,
   includeApi = true,
   includeResources = true,
@@ -1057,7 +1058,7 @@ export function attachNetworkObserver(target, {
 export function attachApiResponseRecorder(page, {
   onApiResponse,
   shouldRecord = () => true,
-  responseDrainTimeoutMs = DEFAULT_RESPONSE_DRAIN_TIMEOUT_MS,
+  responseDrainTimeoutMs = scaleTimeout(DEFAULT_RESPONSE_DRAIN_TIMEOUT_MS),
   initialPhase = DEFAULT_NETWORK_PHASE,
 } = {}) {
   if (typeof onApiResponse !== 'function') {

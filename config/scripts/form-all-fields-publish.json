@@ -1,13 +1,14 @@
 {
   "schemaVersion": 1,
-  "revision": 0,
+  "revision": 1,
   "id": "form-all-fields-publish",
-  "name": "表单全题型三页发布",
+  "name": "创建完整表单",
   "description": "Chrome 无头模式创建三页表单，加入全部联系人、通用和高级题型，设置可作答题必填，保存、发布并校验列表。",
   "directory": "scripts",
   "entryFile": "form-all-fields-publish.ui.spec.mjs",
   "timeoutMs": 300000,
   "enabled": true,
+  "inputParameters": [],
   "responseVariableBindings": [
     {
       "id": "published-form-id",
@@ -31,5 +32,5 @@
     "P0"
   ],
   "createdAt": "2026-08-31T08:00:00.000Z",
-  "updatedAt": "2026-08-31T08:02:00.000Z"
+  "updatedAt": "2026-09-09T02:55:59.366Z"
 }

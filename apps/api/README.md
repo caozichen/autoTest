@@ -1,7 +1,7 @@
 # Playwright Runner
 
 本地 Runner 只接受 `config/scripts/` 中已经持久化的脚本 ID，不接受运行请求传入任意
-文件路径。它通过 Playwright Runner 执行已登记的 Playwright 脚本。六个内置表单脚本
+文件路径。它通过 Playwright Runner 执行已登记的 Playwright 脚本。内置表单脚本
 都会启动 Google Chrome 无头浏览器，访问目标页面并模拟真实用户操作。
 
 ## 启动
@@ -24,13 +24,14 @@ Invoke-RestMethod http://127.0.0.1:4310/health
 
 正常响应为 `{ "ok": true, "service": "autotest-playwright-runner" }`。
 
-## 初始脚本
+## 当前注册脚本（v1.1）
 
 - `form-all-fields-publish`
+- `form-all-fields-publish-mainland`（创建完整表单（内地版））
 - `form-all-fields-submit`
 - `form-lpxavn-submit`
-- `form-submission-reply-edit`
-- `form-contact-publish`
+- `form-submission-list-check`
+- `form-submission-reply-create`
 - `form-multilingual-translation-publish`
 
 脚本行为、运行依赖和真实数据副作用见根目录 README 的“已注册脚本”。
@@ -87,6 +88,22 @@ Invoke-RestMethod http://127.0.0.1:4310/health
 `{ "record": { ... }, "expectedRevision": 0, "expectedUpdatedAt": "..." }`。
 当前磁盘版本与两个期望值任一不符时返回 HTTP 409，避免其它页面的旧数据覆盖新记录。
 运行记录创建、更新和旧数据迁移请求允许最大 64 MB 请求体。
+
+### 执行结果补写与失联恢复
+
+Runner 接收关联批次的脚本后登记执行状态，每 10 秒独立维护心跳，并在脚本结束时保存
+脱敏后的结果、断言、日志、接口证据和输出。关闭或刷新页面不影响当前脚本的结果回写；
+临时保存失败只重试持久化，不重新执行脚本。正在执行或等待结果写入的任务不会因没有日志
+而被标记中断，脚本自身的超时和手动停止规则不变。
+
+流水线调度仍由前端负责。Runner 不再持有任务、前端也未更新记录时，保留 2 分钟宽限期，
+让正常的变量提取、校验及步骤切换完成。宽限期后，全部步骤已有结果的批次按结果补写终态；
+仍有未确认步骤的批次标记为中断，保留已成功或部分通过的结果，并提示人工核对业务结果。
+Runner 重启后同样先保留宽限期，再恢复遗留状态，不自动继续或重跑任务。尚未登记任何
+Runner 执行且所有步骤仍排队的登录阶段记录，继续使用原有 4 小时兜底，避免误伤正常认证。
+
+服务端保留内部 `runnerTracking` 元数据。前端旧版本省略该字段不会将其清除，旧的运行中
+进度也不能覆盖 Runner 已保存的步骤结果；前端仍可以记录后续变量校验失败。
 
 ## 脚本配置存储
 

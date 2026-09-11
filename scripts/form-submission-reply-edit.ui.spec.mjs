@@ -1,4 +1,5 @@
-import { expect as flowExpect } from '@playwright/test'
+import { scaleTimeout } from './support/environment-timeouts.mjs'
+import { expect as flowExpect } from './support/environment-timeouts.mjs'
 
 import { attachNetworkObserver } from './support/api-response-recorder.mjs'
 import { launchGoogleChrome } from './support/google-chrome.mjs'
@@ -555,8 +556,8 @@ export async function run({
     })
     await networkObserver.ready
     page = await context.newPage()
-    page.setDefaultTimeout(ACTION_TIMEOUT_MS)
-    page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS)
+    page.setDefaultTimeout(scaleTimeout(ACTION_TIMEOUT_MS))
+    page.setDefaultNavigationTimeout(scaleTimeout(NAVIGATION_TIMEOUT_MS))
 
     let businessRequestCount = 0
     let authenticatedRequestCount = 0
@@ -591,7 +592,7 @@ export async function run({
       origin: apiUrl.origin,
       formId,
       submissionId,
-    }), { timeout: ACTION_TIMEOUT_MS })
+    }), { timeout: scaleTimeout(ACTION_TIMEOUT_MS) })
     await submitButton.click()
     const updateResponseObject = await updateResponsePromise
     const updateOutcome = await inspectMutationResponse(updateResponseObject)

@@ -162,7 +162,7 @@ test('reloads disk state before CAS so another repository cannot be overwritten'
   assert.deepEqual(await firstRepository.get(original.id), updated)
 })
 
-test('uses CAS when deleting and removes only the target configuration', async (t) => {
+test('uses CAS when deleting, removes only the list configuration, and keeps the script file', async (t) => {
   const { directory, scriptsDirectory } = await temporaryWorkspace(t)
   const repository = new FileScriptConfigRepository({ directory, scriptsDirectory })
   const original = await repository.create(configFixture())
@@ -185,6 +185,10 @@ test('uses CAS when deleting and removes only the target configuration', async (
     throw error
   })
   assert.deepEqual(storedFiles, [])
+  assert.equal(
+    await fileSystem.readFile(join(scriptsDirectory, original.entryFile), 'utf8'),
+    'export async function run() { return { ok: true } }\n',
+  )
 })
 
 test('keeps the previous configuration intact when atomic rename fails', async (t) => {

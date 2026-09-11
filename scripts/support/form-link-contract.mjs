@@ -50,7 +50,7 @@ function itemKey(item) {
   return typeof item?.item_key === 'string' ? item.item_key.trim() : ''
 }
 
-function isSystemItem(item) {
+export function isSystemItem(item) {
   const itemKind = typeof item?.item_kind === 'string'
     ? item.item_kind.trim().toLowerCase()
     : ''

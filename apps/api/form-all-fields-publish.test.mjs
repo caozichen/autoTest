@@ -4,6 +4,7 @@ import { basename } from 'node:path'
 import test from 'node:test'
 
 import { runWithAssertionRecorder } from '../../scripts/support/recorded-expect.mjs'
+import { run as runMainland } from '../../scripts/form-all-fields-publish-mainland.ui.spec.mjs'
 import {
   ADVANCED_FIELD_TYPES,
   CASCADER_LEVEL_VALUES,
@@ -196,7 +197,7 @@ function sendHtml(response, html) {
   response.end(html)
 }
 
-function mockApplicationHtml() {
+function mockApplicationHtml({ mainland = false } = {}) {
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -315,7 +316,7 @@ function mockApplicationHtml() {
         parentGroupCode,
         children: type === 'fieldGroup' ? [] : undefined,
         settings: {
-          collectToContact: Boolean(parentGroupCode),
+          collectToContact: (${mainland} && contactPresetTypes.includes(type)) || Boolean(parentGroupCode),
           choiceMode: type === 'cascader' ? 'single' : undefined,
         },
         checkboxOptionCount: type === 'checkbox' ? 2 : undefined,
@@ -349,7 +350,7 @@ function mockApplicationHtml() {
       group.children.push(...contactPresetTypes.map((type) => makeField(type, true, group.key)))
       selectedKey = group.children[group.children.length - 1].key
       renderDesignerFields()
-      showActivityConsentDialog()
+      if (!${mainland}) showActivityConsentDialog()
     }
     function addType(type) {
       if (type === 'contactGroup') {
@@ -540,7 +541,7 @@ function mockApplicationHtml() {
       } else if (field.type === 'divider') {
         html += '<label>分割线文案<input placeholder="请输入分割线文案" data-divider-text value="' + escapeHtml(field.label) + '"></label>'
       }
-      if (field.parentGroupCode) {
+      if (field.parentGroupCode || (${mainland} && contactPresetTypes.includes(field.type))) {
         html += checkedSwitch('是否收录联系人', 'collectToContact', Boolean(field.settings.collectToContact))
       }
       editor.innerHTML = html
@@ -684,7 +685,7 @@ function mockApplicationHtml() {
       let sort = 0
       function append(field, groupCode = '') {
         const commonConfig = {}
-        if (groupCode) {
+        if (groupCode || (${mainland} && contactPresetTypes.includes(field.type))) {
           commonConfig.collect_to_contact = {
             enabled: field.settings.collectToContact ? 1 : 2,
             anchor: '',
@@ -833,7 +834,7 @@ function mockApplicationHtml() {
           '<div class="form-activity-step-nav"><span class="form-activity-step" id="settings">' +
             '<span class="form-activity-step__text">基础设置</span></span></div>',
           '<header><span>基础设置</span></header>',
-          '<div role="dialog" id="collect-dialog"><h2>是否收录联系人</h2>' +
+          ${mainland} ? '' : '<div role="dialog" id="collect-dialog"><h2>是否收录联系人</h2>' +
             button('确认收录到联系人', 'id="confirm-collect"') + '</div>',
         ].join('')
         document.querySelectorAll('.palette [data-component-type]').forEach((element) => {
@@ -897,7 +898,7 @@ function mockApplicationHtml() {
             richEditor.focus()
           }
         })
-        document.querySelector('#confirm-collect').onclick = () => {
+        if (!${mainland}) document.querySelector('#confirm-collect').onclick = () => {
           document.querySelector('#collect-dialog').innerHTML = [
             '<h2>联系人信息替换确认</h2>',
             '<label><input type="radio" name="initial-strategy" value="ignore">忽略，不替换</label>',
@@ -951,10 +952,13 @@ function mockApplicationHtml() {
       if (location.pathname === '/form-activity/settings') {
         app.innerHTML = [
           button('发布', 'aria-label="发布" id="publish"'),
-          button('收录联系人设置', 'data-menu-key="collect-contact" id="contact-settings"'),
+          ${mainland}
+            ? button('填报设定', 'data-menu-key="form" id="form-settings"')
+              + button('', 'role="switch" aria-label="填报开始结束时间开关" aria-checked="false"')
+            : button('收录联系人设置', 'data-menu-key="collect-contact" id="contact-settings"'),
           '<section id="contact-panel"></section>',
         ].join('')
-        document.querySelector('#contact-settings').onclick = () => {
+        if (!${mainland}) document.querySelector('#contact-settings').onclick = () => {
           document.querySelector('#contact-panel').innerHTML = [
             button('', 'role="switch" aria-label="是否收录联系人开关" aria-checked="true" data-state="checked"'),
             button('编辑', 'aria-label="是否收录联系人" id="edit-contact"'),
@@ -1001,7 +1005,7 @@ function mockApplicationHtml() {
 </html>`
 }
 
-test('creates, configures, uploads, saves, and publishes the complete three-page form', async () => {
+async function checkCompleteForm({ mainland, execute }) {
   const requests = []
   const apiResponses = []
   const signatureRequests = []
@@ -1037,7 +1041,7 @@ test('creates, configures, uploads, saves, and publishes the complete three-page
     }
 
     if (!url.pathname.startsWith('/api/')) {
-      sendHtml(response, mockApplicationHtml())
+      sendHtml(response, mockApplicationHtml({ mainland }))
       return
     }
 
@@ -1196,7 +1200,7 @@ test('creates, configures, uploads, saves, and publishes the complete three-page
     assert.ok(address && typeof address === 'object')
     const origin = 'http://127.0.0.1:' + address.port
     const logs = []
-    const runScenario = (overrides = {}) => run({
+    const runScenario = (overrides = {}) => execute({
       siteBaseUrl: origin + '/',
       apiBaseUrl: origin + '/api',
       ignoreHTTPSErrors: false,
@@ -1326,11 +1330,11 @@ test('creates, configures, uploads, saves, and publishes the complete three-page
     assert.equal(savedConfigPayload.theme_config.submit_button.background_color, '#2563eb')
     assert.equal(savedConfigPayload.theme_config.form_container.background_color, '#e2e8f0')
     assert.equal(savedConfigPayload.theme_config.wallpaper.background_color.color, '#0f766e')
-    assert.equal(strategy, 'ignore')
+    assert.equal(strategy, mainland ? '' : 'ignore')
     assert.equal(
       requests.filter((entry) => entry.path === '/api/be/form/202/config' && entry.body.selected === 'ignore').length,
-      1,
-      '设计器首次联系人弹窗即使不发送 config 请求也应继续，设置页负责持久化忽略策略',
+      mainland ? 0 : 1,
+      mainland ? '内地不存在全局策略菜单，不应伪造策略写入' : '设置页负责持久化忽略策略',
     )
     assert.equal(published, true)
 
@@ -1338,6 +1342,14 @@ test('creates, configures, uploads, saves, and publishes the complete three-page
     assert.ok(businessRequests.length >= 12)
     assert.ok(businessRequests.every((entry) => entry.authorization === 'Bearer all-fields-token'))
     assert.ok(logs.some((log) => log.level === 'success' && log.message.includes('全题型三页 UI 自动化执行完成')))
+
+    if (mainland) {
+      assert.ok(logs.some((log) => log.message.includes('内地联系人题初始化完成')))
+      assert.ok(logs.some((log) => log.message.includes('内地基础设置没有全局收录联系人')))
+      assert.equal(requests.filter((entry) => entry.path.includes('/activity/update-props')).length, 0)
+      assert.ok(['username', 'mobile', 'email'].every((type) => byType(type).common_config.collect_to_contact.enabled === 1))
+      return
+    }
 
     forcedBusinessFailure = 'save-config'
     const saveConfigAssertions = []
@@ -1378,4 +1390,11 @@ test('creates, configures, uploads, saves, and publishes the complete three-page
   } finally {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
   }
-})
+}
+
+for (const { mainland, execute, name } of [
+  { mainland: false, execute: run, name: 'creates, configures, uploads, saves, and publishes the complete three-page form' },
+  { mainland: true, execute: runMainland, name: 'mainland: publishes the same complete form without collection dialogs or global collection settings' },
+]) {
+  test(name, () => checkCompleteForm({ mainland, execute }))
+}

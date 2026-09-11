@@ -12,7 +12,7 @@ import {
 } from './script-runner.mjs'
 import { expect as recordedExpect } from '../../scripts/support/recorded-expect.mjs'
 
-function validRunPayload(scriptId = 'form-contact-publish') {
+function validRunPayload(scriptId = 'form-all-fields-publish') {
   return {
     scriptId,
     context: {
@@ -60,7 +60,7 @@ async function temporaryScriptsDirectory(t) {
 
 test('accepts a registered script with a same-origin authorization context', () => {
   const result = validateRunRequest({
-    scriptId: 'form-contact-publish',
+    scriptId: 'form-all-fields-publish',
     context: {
       siteBaseUrl: 'https://example.test/',
       apiBaseUrl: 'https://example.test/api',
@@ -119,7 +119,7 @@ test('keeps a supplied run ID as the artifact attempt ID and rejects incompatibl
   assert.equal(validateRunRequest({
     ...validRunPayload(),
     runId: 'attempt-001',
-  }).scriptId, 'form-contact-publish')
+  }).scriptId, 'form-all-fields-publish')
 
   for (const runId of ['short', '-attempt-001', '_attempt-001', 'attempt.001']) {
     assert.throws(
@@ -242,7 +242,7 @@ test('rejects unsafe script URL path configuration', () => {
 
 test('rejects malformed runtime variables', () => {
   assert.throws(() => validateRunRequest({
-    scriptId: 'form-contact-publish',
+    scriptId: 'form-all-fields-publish',
     context: {
       siteBaseUrl: 'https://example.test/',
       apiBaseUrl: 'https://example.test/api',
@@ -256,7 +256,7 @@ test('rejects malformed runtime variables', () => {
 test('rejects unregistered scripts and cross-origin token forwarding', () => {
   assert.throws(() => validateRunRequest({ scriptId: '../../other.mjs', context: {} }), /脚本未登记/)
   assert.throws(() => validateRunRequest({
-    scriptId: 'form-contact-publish',
+    scriptId: 'form-all-fields-publish',
     context: {
       siteBaseUrl: 'https://web.example.test/',
       apiBaseUrl: 'https://example.test/api',
@@ -265,7 +265,7 @@ test('rejects unregistered scripts and cross-origin token forwarding', () => {
     },
   }), /Web 基址.*不同源/)
   assert.throws(() => validateRunRequest({
-    scriptId: 'form-contact-publish',
+    scriptId: 'form-all-fields-publish',
     context: {
       siteBaseUrl: 'https://other.example.test/',
       apiBaseUrl: 'https://api.example.test/api',
@@ -503,7 +503,7 @@ test('seals artifact capture after cancellation cleanup times out and removes la
   const finalPath = resolve(
     artifactRootDirectory,
     'execution-late-001',
-    'form-contact-publish',
+    'form-all-fields-publish',
     'attempt-late-001',
     'screenshots',
     'late.png',
@@ -526,8 +526,8 @@ test('counts artifact sealing against the configured script timeout', async (t) 
   const artifactRootDirectory = await fileSystem.mkdtemp(join(tmpdir(), 'autotest-runner-seal-timeout-'))
   t.after(() => fileSystem.rm(artifactRootDirectory, { recursive: true, force: true }))
   const config = registeredConfig({
-    id: 'form-contact-publish',
-    entryFile: 'form-contact-publish.ui.spec.mjs',
+    id: 'form-all-fields-publish',
+    entryFile: 'form-all-fields-publish.ui.spec.mjs',
     timeoutMs: 1_000,
   })
   let releaseProducer
@@ -573,7 +573,7 @@ test('counts artifact sealing against the configured script timeout', async (t) 
   await assert.rejects(fileSystem.access(resolve(
     artifactRootDirectory,
     'execution-seal-timeout-001',
-    'form-contact-publish',
+    'form-all-fields-publish',
     'attempt-seal-timeout-001',
     'traces',
     'late.zip',
@@ -906,6 +906,14 @@ test('treats the TEST public form origin and explicit custom origins as first-pa
 test('derives the public origin for generic admin and local TEST host conventions', async () => {
   const cases = [
     {
+      siteOrigin: 'https://prodtest.admin.lingxi360.com',
+      publicUrl: 'https://prodtest.form.lingxi360.com/api/f/form/code',
+    },
+    {
+      siteOrigin: 'https://prodtest.admin.lxi.hk',
+      publicUrl: 'https://prodtest.lxi.hk/api/f/form/code',
+    },
+    {
       siteOrigin: 'https://tenant.admin.example.test',
       publicUrl: 'https://tenant.example.test/f/form/code',
     },
@@ -1187,8 +1195,8 @@ test('stops a script at its configured timeout and reports a failure instead of 
   let receivedSignal
   let cleanupFinished = false
   const config = registeredConfig({
-    id: 'form-contact-publish',
-    entryFile: 'form-contact-publish.ui.spec.mjs',
+    id: 'form-all-fields-publish',
+    entryFile: 'form-all-fields-publish.ui.spec.mjs',
     timeoutMs: 1_000,
   })
   const result = await executeRegisteredScript({

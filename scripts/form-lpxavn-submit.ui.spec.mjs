@@ -1,4 +1,7 @@
-import { expect as flowExpect } from '@playwright/test'
+import { clickWhenReady, observeUiReadiness } from './support/ui-readiness.mjs'
+import { publicOriginForSite } from '../shared/form-environment.mjs'
+import { scaleTimeout } from './support/environment-timeouts.mjs'
+import { expect as flowExpect } from './support/environment-timeouts.mjs'
 
 import { expect } from './support/recorded-expect.mjs'
 import { attachNetworkObserver } from './support/api-response-recorder.mjs'
@@ -443,16 +446,6 @@ function assertPublishedFormContract(payload, expectedFormId = FORM_ID, linkedCo
   }
 }
 
-function publicOriginForSite(siteBaseUrl) {
-  const url = new URL(siteBaseUrl)
-  if (url.hostname.includes('.admin.')) {
-    url.hostname = url.hostname.replace('.admin.', '.')
-  } else if (url.hostname.includes('.b.lingxi-hk.localtest')) {
-    url.hostname = url.hostname.replace('.b.lingxi-hk.localtest', '.f.lingxi-hk.localtest')
-  }
-  return url.origin
-}
-
 function normalizeFormPath(requestPath = FORM_PATH) {
   if (typeof requestPath !== 'string' || !requestPath.trim()) throw new Error('公开表单 URL 路径不能为空')
   const normalizedPath = requestPath.trim()
@@ -513,6 +506,20 @@ function createTestData(now = Date.now()) {
     nps: 10,
     selectedDate: '',
     selectedTime: '',
+  }
+}
+
+function createSubmissionAssertions(title, data) {
+  const primaryContactName = String(data?.username ?? '')
+  const groupContactName = String(data?.groupUsername ?? '')
+  return {
+    title: String(title ?? ''),
+    primaryContactName,
+    groupContactName,
+    fields: {
+      '姓名[1]': primaryContactName,
+      '姓名[2]': groupContactName,
+    },
   }
 }
 
@@ -768,7 +775,7 @@ async function fillAndAssert(input, value, label) {
 }
 
 async function replaceWithUserInputAndBlur(input, value, label) {
-  await input.click()
+  await clickWhenReady(input)
   await input.fill('')
   await input.pressSequentially(value)
   await input.press('Tab')
@@ -802,41 +809,41 @@ async function selectOption(page, trigger, optionName, label, logger = () => und
   for (let attempt = 1; attempt <= SELECT_MAX_ATTEMPTS; attempt += 1) {
     let listbox
     try {
-      await trigger.scrollIntoViewIfNeeded({ timeout: SELECT_VISIBILITY_TIMEOUT_MS })
-      await trigger.click({ timeout: SELECT_VISIBILITY_TIMEOUT_MS })
+      await trigger.scrollIntoViewIfNeeded({ timeout: scaleTimeout(SELECT_VISIBILITY_TIMEOUT_MS) })
+      await clickWhenReady(trigger, { timeout: scaleTimeout(SELECT_VISIBILITY_TIMEOUT_MS) })
       await flowExpect(trigger, `“${label}”下拉框点击后应展开`).toHaveAttribute('aria-expanded', 'true', {
-        timeout: SELECT_VISIBILITY_TIMEOUT_MS,
+        timeout: scaleTimeout(SELECT_VISIBILITY_TIMEOUT_MS),
       })
 
       const listboxId = await trigger.getAttribute('aria-controls')
       flowExpect(listboxId, `“${label}”下拉框应关联当前选项列表`).toBeTruthy()
       listbox = page.locator(`[role="listbox"][id=${JSON.stringify(listboxId)}]:visible`)
       await flowExpect(listbox, `“${label}”当前选项列表应打开`).toBeVisible({
-        timeout: SELECT_VISIBILITY_TIMEOUT_MS,
+        timeout: scaleTimeout(SELECT_VISIBILITY_TIMEOUT_MS),
       })
       const option = listbox.getByRole('option', { name: optionPattern })
       await flowExpect(option, `“${label}”应唯一提供“${expectedOptionLabel}”中的一个选项`).toHaveCount(1, {
-        timeout: SELECT_VISIBILITY_TIMEOUT_MS,
+        timeout: scaleTimeout(SELECT_VISIBILITY_TIMEOUT_MS),
       })
       const selectedOptionName = (await option.innerText()).trim()
-      await option.scrollIntoViewIfNeeded({ timeout: SELECT_VISIBILITY_TIMEOUT_MS })
+      await option.scrollIntoViewIfNeeded({ timeout: scaleTimeout(SELECT_VISIBILITY_TIMEOUT_MS) })
       await flowExpect(option, `“${label}”选项“${selectedOptionName}”应可见`).toBeVisible({
-        timeout: SELECT_VISIBILITY_TIMEOUT_MS,
+        timeout: scaleTimeout(SELECT_VISIBILITY_TIMEOUT_MS),
       })
-      await option.click({ timeout: SELECT_VISIBILITY_TIMEOUT_MS })
+      await clickWhenReady(option, { timeout: scaleTimeout(SELECT_VISIBILITY_TIMEOUT_MS) })
       await flowExpect(listbox, `选择“${selectedOptionName}”后选项列表应关闭`).toBeHidden({
-        timeout: SELECT_COMMIT_TIMEOUT_MS,
+        timeout: scaleTimeout(SELECT_COMMIT_TIMEOUT_MS),
       })
       await expect(trigger, `“${label}”成功选择“${selectedOptionName}”`).toHaveText(selectedOptionName, {
-        timeout: SELECT_COMMIT_TIMEOUT_MS,
+        timeout: scaleTimeout(SELECT_COMMIT_TIMEOUT_MS),
       })
       return selectedOptionName
     } catch (error) {
       lastError = error
       await page.keyboard.press('Escape').catch(() => undefined)
-      if (listbox) await flowExpect(listbox).toBeHidden({ timeout: 500 }).catch(() => undefined)
-      await flowExpect(trigger).toHaveAttribute('aria-expanded', 'false', { timeout: 500 }).catch(() => undefined)
-      const actualText = await trigger.innerText({ timeout: 500 }).catch(() => '')
+      if (listbox) await flowExpect(listbox).toBeHidden({ timeout: scaleTimeout(500) }).catch(() => undefined)
+      await flowExpect(trigger).toHaveAttribute('aria-expanded', 'false', { timeout: scaleTimeout(500) }).catch(() => undefined)
+      const actualText = await trigger.innerText({ timeout: scaleTimeout(500) }).catch(() => '')
       if (attempt < SELECT_MAX_ATTEMPTS) {
         logger('warning', `“${label}”第 ${attempt} 次选择未生效，准备重新选择“${expectedOptionLabel}”`, {
           attempt,
@@ -859,12 +866,12 @@ async function expandCascaderOption(page, optionName, logger = () => undefined) 
     try {
       const option = page.getByRole('button', { name: optionName, exact: true })
       await expect(option, `级联选择应唯一显示“${optionName}”`).toHaveCount(1, {
-        timeout: SELECT_VISIBILITY_TIMEOUT_MS,
+        timeout: scaleTimeout(SELECT_VISIBILITY_TIMEOUT_MS),
       })
       await expect(option, `级联选择项“${optionName}”应可见`).toBeVisible({
-        timeout: SELECT_VISIBILITY_TIMEOUT_MS,
+        timeout: scaleTimeout(SELECT_VISIBILITY_TIMEOUT_MS),
       })
-      await option.hover({ timeout: SELECT_VISIBILITY_TIMEOUT_MS })
+      await option.hover({ timeout: scaleTimeout(SELECT_VISIBILITY_TIMEOUT_MS) })
       return
     } catch (error) {
       lastError = error
@@ -887,7 +894,7 @@ async function selectCascaderPath(page, trigger, path, logger = () => undefined)
   for (let attempt = 1; attempt <= SELECT_MAX_ATTEMPTS; attempt += 1) {
     try {
       await page.keyboard.press('Escape').catch(() => undefined)
-      await trigger.click({ timeout: SELECT_VISIBILITY_TIMEOUT_MS })
+      await clickWhenReady(trigger, { timeout: scaleTimeout(SELECT_VISIBILITY_TIMEOUT_MS) })
       for (const optionName of path.slice(0, -1)) {
         await expandCascaderOption(page, optionName, logger)
       }
@@ -895,23 +902,23 @@ async function selectCascaderPath(page, trigger, path, logger = () => undefined)
       const leafName = path.at(-1)
       const leafOption = page.getByRole('button', { name: leafName, exact: true })
       await expect(leafOption, `级联选择应唯一显示叶子项“${leafName}”`).toHaveCount(1, {
-        timeout: SELECT_VISIBILITY_TIMEOUT_MS,
+        timeout: scaleTimeout(SELECT_VISIBILITY_TIMEOUT_MS),
       })
       const leafCheckbox = leafOption.locator('.fb-runtime-cascader-checkbox')
       await expect(leafCheckbox, `叶子项“${leafName}”应包含多选框`).toHaveCount(1)
-      await leafOption.click({ timeout: SELECT_VISIBILITY_TIMEOUT_MS })
+      await clickWhenReady(leafOption, { timeout: scaleTimeout(SELECT_VISIBILITY_TIMEOUT_MS) })
       await expect(leafCheckbox, `叶子项“${leafName}”应进入选中状态`).toHaveClass(/fb-text-white/, {
-        timeout: SELECT_COMMIT_TIMEOUT_MS,
+        timeout: scaleTimeout(SELECT_COMMIT_TIMEOUT_MS),
       })
       await expect(trigger, '级联选择应在关闭面板前回显完整三级结果').toContainText(/华东区.*江苏省.*南京市/, {
-        timeout: SELECT_COMMIT_TIMEOUT_MS,
+        timeout: scaleTimeout(SELECT_COMMIT_TIMEOUT_MS),
       })
       await page.keyboard.press('Escape')
       await expect(trigger, '多选级联确认后应关闭选项面板').toHaveAttribute('data-state', 'closed', {
-        timeout: SELECT_COMMIT_TIMEOUT_MS,
+        timeout: scaleTimeout(SELECT_COMMIT_TIMEOUT_MS),
       })
       await expect(trigger, '级联选择应回显完整三级结果').toContainText(/华东区.*江苏省.*南京市/, {
-        timeout: SELECT_COMMIT_TIMEOUT_MS,
+        timeout: scaleTimeout(SELECT_COMMIT_TIMEOUT_MS),
       })
       return
     } catch (error) {
@@ -945,10 +952,10 @@ async function waitForPublicMutation(
       && request.method() === 'POST'
   }
   const requestPromise = page.waitForRequest(matchesMutation, {
-    timeout: CLIENT_VALIDATION_SETTLE_TIMEOUT_MS,
+    timeout: scaleTimeout(CLIENT_VALIDATION_SETTLE_TIMEOUT_MS),
   })
   const responsePromise = page.waitForResponse((response) => matchesMutation(response.request()), {
-    timeout: ACTION_TIMEOUT_MS,
+    timeout: scaleTimeout(ACTION_TIMEOUT_MS),
   }).then((response) => ({ response }), (error) => ({ error }))
   await action()
   try {
@@ -1019,7 +1026,7 @@ function paginationActionButton(page) {
 async function assertFieldError(card, label) {
   const error = card.locator('.fb-runtime-field-error').first()
   await expect(error, `“${label}”应显示字段校验错误`).toBeVisible({
-    timeout: CLIENT_VALIDATION_SETTLE_TIMEOUT_MS,
+    timeout: scaleTimeout(CLIENT_VALIDATION_SETTLE_TIMEOUT_MS),
   })
   await expect(error, `“${label}”字段校验错误不应为空`).toContainText(/\S+/)
 }
@@ -1030,7 +1037,7 @@ async function assertClientValidationBlocked(page, {
   getMutationCount,
   logger,
   mutationLabel = '分页',
-  action = () => paginationActionButton(page).click(),
+  action = () => clickWhenReady(paginationActionButton(page)),
   pageFieldKeys = PAGE_FIELD_KEYS,
 }) {
   const requestCountBefore = getMutationCount()
@@ -1099,12 +1106,12 @@ async function assertRuleValidationBlocked(page, publicOrigin, {
     return url.origin === publicOrigin
       && url.pathname.endsWith(pathSuffix)
       && response.request().method() === 'POST'
-  }, { timeout: CLIENT_VALIDATION_SETTLE_TIMEOUT_MS }).catch(() => null)
+  }, { timeout: scaleTimeout(CLIENT_VALIDATION_SETTLE_TIMEOUT_MS) }).catch(() => null)
 
-  await paginationActionButton(page).click()
+  await clickWhenReady(paginationActionButton(page))
   const card = fieldCard(page, key)
   const hasClientError = await card.locator('.fb-runtime-field-error').first()
-    .waitFor({ state: 'visible', timeout: 400 })
+    .waitFor({ state: 'visible', timeout: scaleTimeout(400) })
     .then(() => true, () => false)
   const response = hasClientError ? null : await responsePromise
   if (hasClientError) {
@@ -1127,12 +1134,12 @@ async function assertRuleValidationBlocked(page, publicOrigin, {
   await dismissPublicErrorDialog(page)
   const currentPageCard = fieldCard(page, pageFieldKeys[currentPage - 1][0])
   const currentPageMessage = `“${label}”校验失败后应停留在第 ${currentPage} 页`
-  await expect(currentPageCard, currentPageMessage).toBeVisible({ timeout: CLIENT_VALIDATION_SETTLE_TIMEOUT_MS })
+  await expect(currentPageCard, currentPageMessage).toBeVisible({ timeout: scaleTimeout(CLIENT_VALIDATION_SETTLE_TIMEOUT_MS) })
   const nextPageFirstKey = pageFieldKeys[currentPage]?.[0]
   if (nextPageFirstKey) {
     const nextPageCard = fieldCard(page, nextPageFirstKey)
     const nextPageMessage = `“${label}”校验失败后不应翻页`
-    await expect(nextPageCard, nextPageMessage).toBeHidden({ timeout: CLIENT_VALIDATION_SETTLE_TIMEOUT_MS })
+    await expect(nextPageCard, nextPageMessage).toBeHidden({ timeout: scaleTimeout(CLIENT_VALIDATION_SETTLE_TIMEOUT_MS) })
   }
 }
 
@@ -1151,9 +1158,9 @@ async function dismissPublicErrorDialog(page) {
     name: /^(?:我已知晓|我已知曉|我知道了|知道了|Got it|OK)$/i,
   })
   if (await acknowledgement.isVisible().catch(() => false)) {
-    await acknowledgement.click({ timeout: SELECT_VISIBILITY_TIMEOUT_MS })
+    await clickWhenReady(acknowledgement, { timeout: scaleTimeout(SELECT_VISIBILITY_TIMEOUT_MS) })
     await flowExpect(page.locator('[role="dialog"]:visible')).toHaveCount(0, {
-      timeout: SELECT_COMMIT_TIMEOUT_MS,
+      timeout: scaleTimeout(SELECT_COMMIT_TIMEOUT_MS),
     })
   }
 }
@@ -1166,7 +1173,7 @@ async function assertVisibleSubmissionResult(
   const expectedFormId = typeof expectedFormIdOrOptions === 'string'
     ? expectedFormIdOrOptions
     : FORM_ID
-  const { timeout = NAVIGATION_TIMEOUT_MS } = typeof expectedFormIdOrOptions === 'string'
+  const { timeout = scaleTimeout(NAVIGATION_TIMEOUT_MS) } = typeof expectedFormIdOrOptions === 'string'
     ? options
     : expectedFormIdOrOptions
   const result = page.locator(SUBMISSION_RESULT_SELECTOR)
@@ -1199,7 +1206,7 @@ async function goToNextPage(page, publicOrigin, currentPage, logger, formId = FO
         page,
         publicOrigin,
         `/f/form/${formId}/submission/validate-page`,
-        () => paginationButtons.last().click(),
+        () => clickWhenReady(paginationButtons.last()),
         `第 ${currentPage} 页校验`,
       )
       if (
@@ -1238,10 +1245,10 @@ async function goToNextPage(page, publicOrigin, currentPage, logger, formId = FO
   const nextPageFirstField = fieldCard(page, nextPageFirstKey)
   const pageTransitionMessage = `应进入第 ${currentPage + 1} 页`
   await expect(nextPageFirstField, pageTransitionMessage).toBeVisible({
-    timeout: CLIENT_VALIDATION_SETTLE_TIMEOUT_MS,
+    timeout: scaleTimeout(CLIENT_VALIDATION_SETTLE_TIMEOUT_MS),
   })
   await flowExpect(nextPageFirstField, pageTransitionMessage).toBeVisible({
-    timeout: ACTION_TIMEOUT_MS,
+    timeout: scaleTimeout(ACTION_TIMEOUT_MS),
   })
   logger('success', `第 ${currentPage} 页服务端校验通过，已进入第 ${currentPage + 1} 页`, {
     status: validation.response.status(),
@@ -1254,7 +1261,7 @@ async function goToPreviousPage(page, currentPage, logger, pageFieldKeys = PAGE_
   expect(currentPage, '只有第 2 页或第 3 页可以返回上一页').toBeGreaterThan(1)
   const paginationButtons = page.locator('.fb-runtime-pagination-buttons > button.fb-runtime-submit-button')
   await expect(paginationButtons, `第 ${currentPage} 页应显示上一页按钮`).not.toHaveCount(0)
-  await paginationButtons.first().click()
+  await clickWhenReady(paginationButtons.first())
   const previousPageFirstKey = pageFieldKeys[currentPage - 2]?.[0]
   await expect(fieldCard(page, previousPageFirstKey), `应返回第 ${currentPage - 1} 页`).toBeVisible()
   logger('success', `已从第 ${currentPage} 页返回第 ${currentPage - 1} 页`)
@@ -1289,12 +1296,16 @@ async function rankOptions(ranking, expectedOrder) {
   for (const [index, option] of expectedOrder.entries()) {
     const item = ranking.locator('.fb-runtime-ranking-item').filter({ hasText: option })
     await expect(item, `排序题应唯一显示“${option}”`).toHaveCount(1)
-    await item.click({ force: true, timeout: SELECT_VISIBILITY_TIMEOUT_MS })
+    await clickWhenReady(item.locator('.fb-runtime-ranking-label'), { timeout: scaleTimeout(ACTION_TIMEOUT_MS) })
     await expect.poll(async () => (
       await rankedLabels.allTextContents()
     ).map((value) => value.trim()), {
       message: `排序题选择“${option}”后排名应稳定`,
-      timeout: SELECT_VISIBILITY_TIMEOUT_MS,
+      timeout: scaleTimeout(SELECT_VISIBILITY_TIMEOUT_MS),
+    }).toEqual(expectedOrder.slice(0, index + 1))
+    await flowExpect.poll(async () => (await rankedLabels.allTextContents()).map(value => value.trim()), {
+      message: `后续提交依赖排序题“${option}”已真正选中`,
+      timeout: scaleTimeout(ACTION_TIMEOUT_MS),
     }).toEqual(expectedOrder.slice(0, index + 1))
   }
 }
@@ -1336,12 +1347,12 @@ async function uploadAndAssert(card, filePath, label) {
     return
   }
   await expect(card, `“${label}”上传完成后应回显文件名`).toContainText(fileName, {
-    timeout: ACTION_TIMEOUT_MS,
+    timeout: scaleTimeout(ACTION_TIMEOUT_MS),
   })
 }
 
 async function drawSignature(page, card, logger) {
-  await card.locator('.fb-signature-empty-trigger').click()
+  await clickWhenReady(card.locator('.fb-signature-empty-trigger'))
   const dialog = page.locator('[role="dialog"]:visible').filter({ has: page.locator('canvas') })
   await expect(dialog, '点击签名题后应打开手写签名弹窗').toBeVisible()
   const canvas = dialog.locator('canvas')
@@ -1354,7 +1365,7 @@ async function drawSignature(page, card, logger) {
       return box
     }, {
       message: '签名画布应在等待后获得可绘制尺寸',
-      timeout: ACTION_TIMEOUT_MS,
+      timeout: scaleTimeout(ACTION_TIMEOUT_MS),
     }).toBeTruthy()
   }
   const points = [
@@ -1368,8 +1379,8 @@ async function drawSignature(page, card, logger) {
   await page.mouse.up()
   const confirmButton = dialog.locator('button.fb-text-white')
   await expect(confirmButton, '签名弹窗应唯一显示主确认按钮').toHaveCount(1)
-  await confirmButton.click()
-  await expect(dialog, '确认并上传签名后弹窗应关闭').toBeHidden({ timeout: ACTION_TIMEOUT_MS })
+  await clickWhenReady(confirmButton)
+  await expect(dialog, '确认并上传签名后弹窗应关闭').toBeHidden({ timeout: scaleTimeout(ACTION_TIMEOUT_MS) })
   await expect(card.locator('.fb-signature-filled-surface'), '签名题应回显签名结果').toBeVisible()
   logger('success', '手写签名已通过画布完成并上传')
 }
@@ -1456,8 +1467,9 @@ export async function run({
     })
     await networkObserver.ready
     page = await context.newPage()
-    page.setDefaultTimeout(ACTION_TIMEOUT_MS)
-    page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS)
+    observeUiReadiness(page)
+    page.setDefaultTimeout(scaleTimeout(ACTION_TIMEOUT_MS))
+    page.setDefaultNavigationTimeout(scaleTimeout(NAVIGATION_TIMEOUT_MS))
 
     let publicRequestCount = 0
     let pageValidationRequestCount = 0
@@ -1484,7 +1496,7 @@ export async function run({
       return url.origin === publicOrigin
         && url.pathname.endsWith(`/f/form/${configuredFormId}`)
         && response.request().method() === 'GET'
-    }, { timeout: NAVIGATION_TIMEOUT_MS })
+    }, { timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) })
     await page.goto(formUrl, { waitUntil: 'domcontentloaded' })
     const publishedConfigResponse = await publishedConfigResponsePromise
     expect(
@@ -1603,19 +1615,19 @@ export async function run({
       await expect(radioImages.nth(index), `单项选择第 ${index + 1} 张图片应包含地址`).toHaveAttribute('src', /^https?:\/\//)
     }
     const customizedRadio = radioControls.nth(2)
-    await customizedRadio.click()
+    await clickWhenReady(customizedRadio)
     await expect(customizedRadio, '单项选择“其他”应进入选中状态').toHaveAttribute('data-state', 'checked')
     const customizedRadioInput = radio.locator('input[type="text"]:visible')
     await expect(customizedRadioInput, '选择“其他”后应显示一个自定义文本输入框').toHaveCount(1)
     await fillAndAssert(customizedRadioInput, '其他边界选项', '单项选择-其他')
     const radioChoice = radioControls.nth(data.radioIndex)
-    await radioChoice.click()
+    await clickWhenReady(radioChoice)
     await expect(radioChoice, '单项选择应选中“选项1”').toHaveAttribute('data-state', 'checked')
     await expect(customizedRadio, '切回普通选项后“其他”应取消选中').toHaveAttribute('data-state', 'unchecked')
     const checkbox = await assertField(page, FIELD_KEYS.checkbox, '多项选择')
     const checkboxControls = checkbox.locator('.fb-ui-checkbox-root')
     await expect(checkboxControls, '多项选择应显示 3 个选项控件').toHaveCount(3)
-    await checkboxControls.nth(0).click()
+    await clickWhenReady(checkboxControls.nth(0))
     await expect(checkboxControls.nth(0), '多项选择应先只选 1 项以覆盖最小值下界').toHaveAttribute('data-state', 'checked')
     const select = await assertField(page, FIELD_KEYS.select, '下拉选择')
     await selectOption(page, select.locator('[role="combobox"]'), data.select, '下拉选择', logger)
@@ -1625,12 +1637,12 @@ export async function run({
     const date = await assertField(page, FIELD_KEYS.date, '日期')
     const dateTrigger = date.locator('button').first()
     const datePlaceholder = (await dateTrigger.innerText()).trim()
-    await dateTrigger.click()
+    await clickWhenReady(dateTrigger)
     const dateOverlay = page.locator('[data-fb-date-overlay]')
     await expect(dateOverlay, '日期题应打开日期面板').toBeVisible()
     await expect(dateOverlay.locator('button[disabled]'), '日期面板应禁用范围外日期').not.toHaveCount(0)
     await expect(dateOverlay.locator('button:not([disabled])'), '日期面板应保留范围内可选日期').not.toHaveCount(0)
-    await dateOverlay.locator('button.fb-ring-1:not([disabled])').click()
+    await clickWhenReady(dateOverlay.locator('button.fb-ring-1:not([disabled])'))
     await expect.poll(async () => (await dateTrigger.innerText()).trim(), {
       message: '日期题选择日期后应更新回显',
     }).not.toBe(datePlaceholder)
@@ -1638,13 +1650,13 @@ export async function run({
     const time = await assertField(page, FIELD_KEYS.time, '时间')
     const timeTrigger = time.locator('button').first()
     const timePlaceholder = (await timeTrigger.innerText()).trim()
-    await timeTrigger.click()
+    await clickWhenReady(timeTrigger)
     const timePanel = page.locator('.fb-timepicker-container:visible')
     await expect(timePanel, '时间题应打开时间面板').toBeVisible()
     const timeActions = timePanel.locator('button.fb-h-7.fb-min-w-14')
     await expect(timeActions, '时间面板应显示设为当前时间和确认两个操作').toHaveCount(2)
-    await timeActions.nth(0).click()
-    await timeActions.nth(1).click()
+    await clickWhenReady(timeActions.nth(0))
+    await clickWhenReady(timeActions.nth(1))
     await expect(timePanel, '确认时间后时间面板应关闭').toBeHidden()
     await expect.poll(async () => (await timeTrigger.innerText()).trim(), {
       message: '时间题选择时间后应更新回显',
@@ -1675,9 +1687,9 @@ export async function run({
       pageFieldKeys: PAGE_FIELD_KEYS,
       logger,
     })
-    await checkboxControls.nth(1).click()
+    await clickWhenReady(checkboxControls.nth(1))
     await expect(checkbox.locator('.fb-ui-checkbox-root[data-state="checked"]'), '多项选择选 2 项应达到合法最小边界').toHaveCount(2)
-    await checkboxControls.nth(2).click()
+    await clickWhenReady(checkboxControls.nth(2))
     await expect(checkbox.locator('.fb-ui-checkbox-root[data-state="checked"]'), '多项选择选满 3 项应达到合法最大边界').toHaveCount(3)
 
     await assertRuleValidationBlocked(page, publicOrigin, {
@@ -1736,7 +1748,7 @@ export async function run({
       getMutationCount: () => submissionRequestCount,
       mutationLabel: '最终提交',
       pageFieldKeys: PAGE_FIELD_KEYS,
-      action: () => page.locator('.fb-runtime-submit-button-wrap button.fb-runtime-submit-button').click(),
+      action: () => clickWhenReady(page.locator('.fb-runtime-submit-button-wrap button.fb-runtime-submit-button')),
       logger,
     })
     await expect(fieldCard(page, FIELD_KEYS.fieldGroup).locator('.fb-runtime-field-error'), '空题组实例应只拦截必填的姓名和手机号，邮箱保持可选')
@@ -1775,7 +1787,7 @@ export async function run({
     const matrixRadios = matrixChoice.getByRole('radio')
     await expect(matrixRadios, '矩阵选择应有 3×3 共 9 个选项').toHaveCount(9)
     for (const index of data.matrixChoiceIndexes) {
-      await matrixRadios.nth(index).click()
+      await clickWhenReady(matrixRadios.nth(index))
       await expect(matrixRadios.nth(index), `矩阵选择第 ${Math.floor(index / 3) + 1} 行应选中目标列`).toBeChecked()
     }
     const ranking = await assertField(page, FIELD_KEYS.ranking, '排序题')
@@ -1785,18 +1797,18 @@ export async function run({
     const rating = await assertField(page, FIELD_KEYS.rating, '评分题')
     const ratingButtons = rating.locator('button.rating-item')
     await expect(ratingButtons, '评分题应显示 5 个评分按钮').toHaveCount(5)
-    await ratingButtons.first().click()
+    await clickWhenReady(ratingButtons.first())
     await expect(ratingButtons.first().locator('.rating-icon--accent'), '评分题应支持选择 1 分下边界').toBeVisible()
-    await ratingButtons.nth(data.rating - 1).click()
+    await clickWhenReady(ratingButtons.nth(data.rating - 1))
     await expect(ratingButtons.nth(data.rating - 1).locator('.rating-icon--accent'), '评分题应选择 5 分').toBeVisible()
     const nps = await assertField(page, FIELD_KEYS.nps, 'NPS')
     const npsButtons = nps.locator('button.nps-scale__score-btn')
     await expect(npsButtons, 'NPS 应显示 1 到 10 共 10 个分值').toHaveCount(10)
     const npsMinimumButton = npsButtons.filter({ hasText: /^1$/ })
-    await npsMinimumButton.click()
+    await clickWhenReady(npsMinimumButton)
     await expect(npsMinimumButton, 'NPS 应支持选择 1 分下边界').toHaveClass(/fb-text-white/)
     const npsButton = nps.locator('button.nps-scale__score-btn').filter({ hasText: new RegExp(`^${data.nps}$`) })
-    await npsButton.click()
+    await clickWhenReady(npsButton)
     await expect(npsButton, 'NPS 应支持选择 10 分上边界').toHaveClass(/fb-text-white/)
     await expect(npsMinimumButton, '选择 NPS 10 分后，1 分应取消选中').not.toHaveClass(/fb-text-white/)
     logger('info', '第 3 页高级题目和题组填写及逐项断言执行完成', {
@@ -1817,7 +1829,7 @@ export async function run({
       page,
       publicOrigin,
       `/f/form/${configuredFormId}/submission`,
-      () => page.locator('.fb-runtime-submit-button-wrap button.fb-runtime-submit-button').click(),
+      () => clickWhenReady(page.locator('.fb-runtime-submit-button-wrap button.fb-runtime-submit-button')),
       '提交表单',
       { expectBusinessSuccess: false },
     )
@@ -1831,7 +1843,7 @@ export async function run({
     )
     networkObserver.setPhase('提交结果验证')
     await expect(page, '提交后应进入普通表单结果页').toHaveURL(SUBMISSION_RESULT_URL_PATTERN, {
-      timeout: NAVIGATION_TIMEOUT_MS,
+      timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS),
     })
     const renderedSubmissionId = await assertVisibleSubmissionResult(page, configuredFormId)
     if (responseSubmissionId) {
@@ -1861,6 +1873,7 @@ export async function run({
       formUrl,
       title: EXPECTED_FORM_TITLE,
       submissionId,
+      submissionAssertions: createSubmissionAssertions(EXPECTED_FORM_TITLE, data),
       status: 'submitted',
       browser: 'chrome',
       headless: true,
@@ -1916,18 +1929,28 @@ export {
   SUBMISSION_RESULT_SELECTOR,
   SUBMISSION_RESULT_URL_PATTERN,
   assertEmailFormatBoundary,
+  assertField,
   assertPublishedFormContract,
   assertRuleValidationRejected,
   assertRuleValidationBlocked,
   assertSubmissionPayload,
   assertVisibleSubmissionResult,
   buildFormUrl,
+  createSubmissionAssertions,
   createTestData,
+  createUploadFixtures,
   dismissPublicErrorDialog,
+  drawSignature,
+  fieldCard,
+  fillAndAssert,
   indexSubmissionEntries,
   isRetryablePageValidationStatus,
   normalizeFormPath,
   parseSubmissionRequestPayload,
+  rankOptions,
+  replaceWithUserInputAndBlur,
+  selectCascaderPath,
   selectOption,
+  uploadAndAssert,
   waitForPublicMutation,
 }

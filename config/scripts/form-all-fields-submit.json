@@ -1,14 +1,35 @@
 {
   "schemaVersion": 1,
-  "revision": 0,
+  "revision": 3,
   "id": "form-all-fields-submit",
-  "name": "已发布全题型表单填写并提交",
+  "name": "检查并编辑提报信息",
   "description": "通过运行时 FORM_ID 定位前序发布的全题型公开表单，并可使用 FORM_CONTRACT 校验动态字段契约；逐题填写三页内容、上传附件、完成签名并提交。",
   "directory": "scripts",
   "entryFile": "form-all-fields-submit.ui.spec.mjs",
   "timeoutMs": 300000,
   "enabled": true,
   "requestPath": "/form/?id={{FORM_ID}}",
+  "inputParameters": [],
+  "responseVariableBindings": [
+    {
+      "id": "submitted-form-id",
+      "variableName": "FORM_ID",
+      "responsePath": "formId",
+      "secret": false
+    },
+    {
+      "id": "submitted-submission-id",
+      "variableName": "SUBMISSION_ID",
+      "responsePath": "submissionId",
+      "secret": false
+    },
+    {
+      "id": "submitted-submission-assertions",
+      "variableName": "SUBMISSION_ASSERTIONS",
+      "responsePath": "submissionAssertions",
+      "secret": false
+    }
+  ],
   "tags": [
     "Playwright",
     "UI",
@@ -18,5 +39,5 @@
     "P0"
   ],
   "createdAt": "2026-08-31T08:00:00.000Z",
-  "updatedAt": "2026-08-31T08:04:00.000Z"
+  "updatedAt": "2026-09-09T06:35:14.000Z"
 }

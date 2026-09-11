@@ -1,3 +1,4 @@
+import type { RuntimeVariable } from '@/domain/runtime-variable'
 import type { TestEnvironment } from '@/domain/environment'
 import type { ScriptRunContext } from '@/domain/script'
 import type { RuntimeVariableService } from '@/services/runtime-variables/runtime-variable-service'
@@ -5,6 +6,7 @@ import type { RuntimeVariableService } from '@/services/runtime-variables/runtim
 export function buildScriptRunContext(
   environment: TestEnvironment,
   runtimeVariables: RuntimeVariableService,
+  authenticatedToken?: RuntimeVariable,
 ): ScriptRunContext {
   const tokenKey = environment.auth.tokenVariable.trim()
   if (!tokenKey) throw new Error(`环境“${environment.name}”未配置 Token 变量名`)
@@ -16,7 +18,13 @@ export function buildScriptRunContext(
     ...runtimeVariables.list()
       .map((variable) => [variable.key, variable.value] as const),
   ])
-  const authorization = runtimeVariables.buildAuthorizationHeader(
+  if (authenticatedToken && (authenticatedToken.sourceEnvironmentId !== environment.id || authenticatedToken.key !== tokenKey)) {
+    throw new Error('登录态与当前运行环境不匹配，请重新认证')
+  }
+  if (authenticatedToken) variables[tokenKey] = authenticatedToken.value
+  const authorization = authenticatedToken
+    ? `${authenticatedToken.authorizationScheme || environment.auth.tokenTypeFallback || 'Bearer'} ${authenticatedToken.value}`
+    : runtimeVariables.buildAuthorizationHeader(
     tokenKey,
     environment.auth.tokenTypeFallback,
   )
@@ -36,6 +44,7 @@ export function buildScriptRunContext(
 
   return {
     environmentId: environment.id,
+    environmentCode: environment.code,
     siteBaseUrl: environment.baseUrl,
     apiBaseUrl: environment.apiBaseUrl,
     ignoreHTTPSErrors: environment.ignoreHTTPSErrors ?? apiHostname === 'lx.admin.lingxi.tech',

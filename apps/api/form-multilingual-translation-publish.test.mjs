@@ -338,7 +338,7 @@ test('locates the AI submit button from the modal page layer rather than its bod
   )
 
   assert.match(source, /const startTranslationButton = page\.getByRole\('button', \{[\s\S]*?开始翻译/)
-  assert.match(source, /\}, \(\) => startTranslationButton\.click\(\)\)/)
+  assert.match(source, /\}, \(\) => clickWhenReady\(startTranslationButton\)\)/)
   assert.doesNotMatch(source, /modal\.getByRole\('button', \{ name: \/开始翻译/)
 })
 
@@ -520,6 +520,61 @@ test('uses locale as the authoritative public preview language parameter', () =>
   assert.equal(preview.searchParams.get('id'), 'another-form-id')
   assert.equal(preview.searchParams.get('locale'), 'en_US')
   assert.equal(preview.searchParams.has('language'), false)
+})
+
+test('aligns API items by identity while detecting changes to actual order, content, groups and options', () => {
+  const source = { data: { revision_no: 1, form: { form_id: 'ordered-form', source_language: 'zh_CN' }, items: [
+    { item_key: 'name', type_code: 'username', sort: 2, label: '姓名', group_code: '', option: [] },
+    { item_key: 'page', type_code: 'page', sort: 1, label: '第一页', group_code: '', option: [] },
+    { item_key: 'choice', type_code: 'radio', sort: 3, label: '选择', group_code: '', option: [{ value: 'a', label: '甲' }, { value: 'b', label: '乙' }] },
+  ] } }
+  const publicPayload = structuredClone(source)
+  publicPayload.data.items.reverse()
+  const expectedStructure = structuralSignature(source)
+  const expectedText = sourceTextSignature(source)
+  assert.deepEqual(publicStructuralSignature(source, publicPayload), expectedStructure)
+  assert.deepEqual(publicSourceTextSignature(source, publicPayload), expectedText)
+  assert.deepEqual(structuralSignature(publicPayload), expectedStructure)
+  assert.deepEqual(sourceTextSignature(publicPayload), expectedText)
+
+  for (const mutate of [
+    (items) => { items.find((item) => item.item_key === 'name').sort = 4 },
+    (items) => { items.find((item) => item.item_key === 'name').group_code = 'different-group' },
+    (items) => { items.find((item) => item.item_key === 'choice').option.reverse() },
+    (items) => { items.pop() },
+    (items) => { items[1] = structuredClone(items[0]) },
+  ]) {
+    const changed = structuredClone(publicPayload)
+    mutate(changed.data.items)
+    assert.notDeepEqual(publicStructuralSignature(source, changed), expectedStructure)
+  }
+  const changedText = structuredClone(publicPayload)
+  changedText.data.items.find((item) => item.item_key === 'name').label = '错误的姓名'
+  assert.notDeepEqual(publicSourceTextSignature(source, changedText), expectedText)
+  assert.deepEqual(source.data.items.map((item) => item.item_key), ['name', 'page', 'choice'], 'signature comparison must not mutate the API response')
+})
+
+test('public source text comparison excludes admin submission metadata while preserving authored fields and admin checks', () => {
+  const source = { code: 0, data: { form: { title: '活动', source_language: 'zh_CN' }, items: [
+    { item_key: 'name_dynamic', item_kind: 'common', label: '姓名', placeholder: '请输入姓名' },
+    { item_key: 'duration', label: '用时' },
+    { item_key: 'future_metadata', item_kind: 'system', label: '后台系统字段' },
+  ] } }
+  const publicPayload = structuredClone(source)
+  publicPayload.data.items[1].label = ''
+  publicPayload.data.items[2].label = ''
+  const expected = sourceTextSignature(source, { includeSystemItems: false })
+  assert.deepEqual(publicSourceTextSignature(source, publicPayload), expected)
+  assert.notDeepEqual(sourceTextSignature(source), sourceTextSignature(publicPayload), 'admin source checks must still detect changed metadata labels')
+
+  for (const field of ['label', 'placeholder']) {
+    const changed = structuredClone(publicPayload)
+    changed.data.items[0][field] = '错误的原文'
+    assert.notDeepEqual(publicSourceTextSignature(source, changed), expected, `authored ${field} changes must fail`)
+  }
+  const missingQuestion = structuredClone(publicPayload)
+  missingQuestion.data.items.shift()
+  assert.notDeepEqual(publicSourceTextSignature(source, missingQuestion), expected)
 })
 
 test('parses optional exact translation expectations for both target languages', () => {

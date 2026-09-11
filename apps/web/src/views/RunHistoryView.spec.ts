@@ -15,6 +15,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const serviceMocks = vi.hoisted(() => ({
+  environments: vi.fn(),
   list: vi.fn(),
   get: vi.fn(),
   stopByRecordId: vi.fn(),
@@ -22,6 +23,7 @@ const serviceMocks = vi.hoisted(() => ({
 
 vi.mock('@/services/container', () => ({
   services: {
+    environments: { list: serviceMocks.environments },
     runRecords: {
       list: serviceMocks.list,
       get: serviceMocks.get,
@@ -231,6 +233,11 @@ function changeValue(element: HTMLInputElement | HTMLSelectElement, value: strin
 }
 
 beforeEach(() => {
+  localStorage.clear()
+  serviceMocks.environments.mockResolvedValue([
+    { id: 'environment-one', name: '测试环境', code: 'TEST' },
+    { id: 'environment-two', name: '预发环境', code: 'STAGING' },
+  ])
   vi.useFakeTimers()
 })
 
@@ -338,6 +345,72 @@ describe('RunHistoryView', () => {
     expect(resetButton.disabled).toBe(true)
   })
 
+  it('uses saved tab order and combines environment, status and keyword filters', async () => {
+    localStorage.setItem('autotest.run-history-tabs.v1', JSON.stringify(['environment-two', 'environment-one']))
+    const root = await mountView([
+      runRecord('one', 'passed'),
+      runRecord('two', 'failed', { environmentId: 'environment-two', name: 'target failure' }),
+      runRecord('three', 'passed', { environmentId: 'environment-two' }),
+    ])
+    const tabs = root.querySelectorAll<HTMLButtonElement>('.environment-tabs button')
+    expect([...tabs].map((tab) => tab.textContent)).toEqual(['全部环境', '预发环境', '测试环境'])
+    tabs[1]!.click()
+    await nextTick()
+    expect(root.querySelector('[data-label="批次"]')?.textContent).not.toContain('RUN-ONE')
+    expect(root.querySelector('.metric-strip .is-total strong')?.textContent).toBe('2')
+    changeValue(root.querySelector('[aria-label="筛选运行状态"]')!, 'failed')
+    changeValue(root.querySelector('[aria-label="搜索运行记录"]')!, 'target')
+    await nextTick()
+    expect(root.querySelector('[data-label="批次"]')?.textContent).toContain('RUN-TWO')
+    expect(root.querySelector('[data-label="批次"]')?.textContent).not.toContain('RUN-THREE')
+    root.querySelector<HTMLButtonElement>('[aria-label="重置筛选条件"]')!.click()
+    await nextTick()
+    expect(tabs[0]!.getAttribute('aria-pressed')).toBe('true')
+  })
+
+  it('updates each script outcome while the batch is still running', async () => {
+    const initial = runRecord('live', 'running', { counts: counts({ total: 6 }) })
+    const root = await mountView([initial])
+    const result = () => root.querySelector('[data-label="脚本结果"] [data-row-id="live"]')?.textContent
+    expect(result()).toContain('执行成功 0 · 部分通过 0 · 执行失败 0 · 未执行 0')
+
+    for (const [revision, outcomes] of [
+      [2, { passed: 2, partial: 1, failed: 0, skipped: 0 }],
+      [3, { passed: 2, partial: 1, failed: 1, skipped: 1 }],
+    ] as const) {
+      serviceMocks.list.mockResolvedValue([{ ...initial, revision, counts: counts({ total: 6, ...outcomes }) }])
+      await vi.advanceTimersByTimeAsync(1_000)
+      await flushView()
+      expect(result()).toContain(`执行成功 ${outcomes.passed} · 部分通过 ${outcomes.partial} · 执行失败 ${outcomes.failed} · 未执行 ${outcomes.skipped}`)
+      expect(root.querySelector('[data-label="状态"]')?.textContent).toContain('执行中')
+    }
+  })
+
+  it('keeps refreshing counts when an open detail request is slow or fails', async () => {
+    const initial = runRecord('live', 'running', { counts: counts({ total: 6 }) })
+    const root = await mountView([initial])
+    serviceMocks.get.mockResolvedValue(initial)
+    const detailButton = [...root.querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent === '详情')!
+    detailButton.click()
+    await flushView()
+
+    let rejectDetail!: (error: Error) => void
+    serviceMocks.get.mockImplementation(() => new Promise((_, reject) => { rejectDetail = reject }))
+    serviceMocks.list.mockResolvedValue([{ ...initial, revision: 2, counts: counts({ total: 6, passed: 2, partial: 1 }) }])
+    await vi.advanceTimersByTimeAsync(1_000)
+    await flushView()
+    expect(root.querySelector('.result-cell')?.textContent).toContain('执行成功 2 · 部分通过 1')
+
+    rejectDetail(new Error('detail unavailable'))
+    await flushView()
+    serviceMocks.list.mockResolvedValue([{ ...initial, revision: 3, counts: counts({ total: 6, passed: 3, partial: 1, failed: 1 }) }])
+    serviceMocks.get.mockRejectedValue(new Error('detail unavailable'))
+    await vi.advanceTimersByTimeAsync(1_000)
+    await flushView()
+    expect(root.querySelector('.result-cell')?.textContent).toContain('执行成功 3 · 部分通过 1 · 执行失败 1')
+  })
+
   it('renders passed, partial, failed and skipped script outcomes in the distribution', async () => {
     const root = await mountView([
       runRecord('mixed', 'partial', {
@@ -347,12 +420,12 @@ describe('RunHistoryView', () => {
     const result = root.querySelector<HTMLElement>('[data-label="脚本结果"] [data-row-id="mixed"]')
     const distribution = result?.querySelector<HTMLElement>('.mini-distribution')
 
-    expect(distribution?.getAttribute('aria-label')).toBe('通过 1，部分通过 1，执行失败 1，未执行 1，待完成 0')
+    expect(distribution?.getAttribute('aria-label')).toBe('执行成功 1，部分通过 1，执行失败 1，未执行 1，待完成 0')
     expect(distribution?.querySelector<HTMLElement>('.is-passed')?.style.flexGrow).toBe('1')
     expect(distribution?.querySelector<HTMLElement>('.is-partial')?.style.flexGrow).toBe('1')
     expect(distribution?.querySelector<HTMLElement>('.is-failed')?.style.flexGrow).toBe('1')
     expect(distribution?.querySelector<HTMLElement>('.is-skipped')?.style.flexGrow).toBe('1')
-    expect(result?.textContent).toContain('部分通过 1 · 执行失败 1 · 未执行 1 · 通过率 0%')
+    expect(result?.textContent).toContain('执行成功 1 · 部分通过 1 · 执行失败 1 · 未执行 1 · 通过率 0%')
     expect(root.querySelector('[data-label="状态"] [data-row-id="mixed"] .status-tag--partial')).not.toBeNull()
   })
 })

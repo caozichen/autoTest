@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "revision": 1,
+  "id": "form-all-fields-publish-mainland",
+  "name": "创建完整表单（内地版）",
+  "description": "适配内地生产环境：直接添加联系人，无需首次收录弹窗或全局收录设置菜单。与创建完整表单共用三页全题型、必填及题型限制、头图配色、保存发布、列表校验和表单联动输出。",
+  "directory": "scripts",
+  "entryFile": "form-all-fields-publish-mainland.ui.spec.mjs",
+  "timeoutMs": 300000,
+  "enabled": true,
+  "inputParameters": [],
+  "responseVariableBindings": [
+    {
+      "id": "published-form-id",
+      "variableName": "FORM_ID",
+      "responsePath": "formId",
+      "secret": false
+    },
+    {
+      "id": "published-form-contract",
+      "variableName": "FORM_CONTRACT",
+      "responsePath": "formContract",
+      "secret": false
+    }
+  ],
+  "tags": ["Playwright", "UI", "Headless Chrome", "表单活动", "全题型", "内地生产", "P0"],
+  "createdAt": "2026-09-10T09:00:00.000Z",
+  "updatedAt": "2026-09-10T09:00:00.000Z"
+}

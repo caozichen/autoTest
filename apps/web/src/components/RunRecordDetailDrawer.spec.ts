@@ -636,7 +636,7 @@ describe('RunRecordDetailDrawer', () => {
     const partial = distribution?.querySelector<HTMLElement>('.result-distribution__partial')
 
     expect(distribution?.getAttribute('aria-label')).toBe(
-      '通过 1，部分通过 1，执行失败 0，未执行 0，待完成 0',
+      '执行成功 1，部分通过 1，执行失败 0，未执行 0，待完成 0',
     )
     expect(partial?.style.flexGrow).toBe('1')
     expect(distribution?.querySelector('.result-distribution__pending')).toBeNull()

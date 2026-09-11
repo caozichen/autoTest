@@ -13,7 +13,8 @@ export interface AutomationPipeline {
   id: string
   name: string
   description: string
-  environmentId: string
+  /** Legacy binding; new configurations choose their environment at execution time. */
+  environmentId?: string
   steps: AutomationPipelineStep[]
   createdAt: string
   updatedAt: string

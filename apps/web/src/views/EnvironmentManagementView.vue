@@ -15,6 +15,7 @@ import {
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 
+import EnvironmentSessionDialog from '@/components/EnvironmentSessionDialog.vue'
 import EnvironmentEditorDialog from '@/components/EnvironmentEditorDialog.vue'
 import EnvironmentLoginResultDialog from '@/components/EnvironmentLoginResultDialog.vue'
 import type { EnvironmentLoginResult, ResponseVariableBinding } from '@/domain/environment-login'
@@ -36,6 +37,9 @@ const pageSize = 6
 const editorVisible = ref(false)
 const editorSaving = ref(false)
 const editingEnvironment = ref<TestEnvironment | null>(null)
+const sessionVisible = ref(false)
+const sessionEnvironment = ref<TestEnvironment | null>(null)
+const sessionRevision = ref(0)
 const loginTestingId = ref('')
 const loginResultVisible = ref(false)
 const loginResultEnvironment = ref<TestEnvironment | null>(null)
@@ -88,19 +92,24 @@ function openEdit(environment: TestEnvironment): void {
   editorVisible.value = true
 }
 
-async function saveEnvironment(draft: EnvironmentDraft): Promise<void> {
+async function saveEnvironment(draft: EnvironmentDraft, manageSession = false): Promise<void> {
   if (editorSaving.value) return
   editorSaving.value = true
   try {
+    let savedEnvironment: TestEnvironment
     if (editingEnvironment.value) {
-      await services.environments.update(editingEnvironment.value.id, draft)
+      savedEnvironment = await services.environments.update(editingEnvironment.value.id, draft)
       ElMessage.success('环境配置已更新')
     } else {
-      await services.environments.create(draft)
+      savedEnvironment = await services.environments.create(draft)
       ElMessage.success('环境已新增')
     }
     editorVisible.value = false
     await loadEnvironments()
+    if (manageSession && savedEnvironment.auth.strategy === 'reuse-session') {
+      sessionEnvironment.value = savedEnvironment
+      sessionVisible.value = true
+    }
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '环境保存失败')
   } finally {
@@ -121,6 +130,11 @@ async function activateEnvironment(environment: TestEnvironment): Promise<void> 
 async function removeEnvironment(environment: TestEnvironment): Promise<void> {
   try {
     await services.environments.remove(environment.id)
+    try {
+      services.environmentSessions.clear(environment.id)
+    } catch {
+      ElMessage.warning('环境已删除，但本地登录态清理失败，请检查浏览器存储权限')
+    }
     await loadEnvironments()
     ElMessage.success('环境已删除')
   } catch (error) {
@@ -129,6 +143,11 @@ async function removeEnvironment(environment: TestEnvironment): Promise<void> {
 }
 
 async function testLogin(environment: TestEnvironment): Promise<void> {
+  if (environment.auth.strategy === 'reuse-session') {
+    sessionEnvironment.value = environment
+    sessionVisible.value = true
+    return
+  }
   if (loginTestingId.value) return
   loginTestingId.value = environment.id
   loginResultEnvironment.value = environment
@@ -203,11 +222,21 @@ function enabledVariableCount(environment: TestEnvironment): number {
   return environment.variables.filter((variable) => variable.enabled).length
 }
 
+function sessionStatus(environment: TestEnvironment): string {
+  void sessionRevision.value
+  const session = services.environmentSessions.get(environment)
+  if (!session) return '未导入匹配的登录态'
+  if (session.expiresAt !== null && session.expiresAt <= Date.now()) return '已过期，请更新'
+  return session.accountLabel ? `已保存 · ${session.accountLabel}` : '已保存登录态'
+}
+
 function loginModeLabel(environment: TestEnvironment): string {
+  if (environment.auth.strategy === 'reuse-session') return '复用已有登录态'
   return environment.auth.mode === 'mobile-code' ? '手机号验证码' : '账号密码'
 }
 
 function loginAccountLabel(environment: TestEnvironment): string {
+  if (environment.auth.strategy === 'reuse-session') return sessionStatus(environment)
   return environment.auth.mode === 'mobile-code' ? environment.auth.mobile : environment.auth.username
 }
 
@@ -222,7 +251,7 @@ onMounted(() => loadEnvironments())
         <h1>环境管理</h1>
         <span>配置登录凭据、Token 提取规则和运行变量</span>
       </div>
-      <el-button type="primary" :icon="Plus" @click="openCreate">新增环境</el-button>
+      <el-button type="primary" :icon="Plus" aria-haspopup="dialog" :aria-expanded="editorVisible" @click="openCreate">新增环境</el-button>
     </header>
 
     <section v-if="currentEnvironment" class="current-environment">
@@ -274,7 +303,8 @@ onMounted(() => loadEnvironments())
           <template #default="scope">
             <div class="endpoint-info">
               <code>{{ scope.row.apiBaseUrl }}</code>
-              <span>{{ scope.row.auth.method }} {{ scope.row.auth.loginPath }}</span>
+              <span v-if="scope.row.auth.strategy === 'reuse-session'">运行时跳过登录接口</span>
+              <span v-else>{{ scope.row.auth.method }} {{ scope.row.auth.loginPath }}</span>
             </div>
           </template>
         </el-table-column>
@@ -282,7 +312,7 @@ onMounted(() => loadEnvironments())
           <template #default="scope">
             <div class="token-info">
               <strong>{{ loginModeLabel(scope.row) }} · {{ loginAccountLabel(scope.row) }}</strong>
-              <span>{{ scope.row.auth.tokenPath || '暂未配置 Token 提取路径' }}</span>
+              <span>{{ scope.row.auth.strategy === 'reuse-session' ? '有效性以业务服务校验为准' : scope.row.auth.tokenPath || '暂未配置 Token 提取路径' }}</span>
             </div>
           </template>
         </el-table-column>
@@ -310,13 +340,13 @@ onMounted(() => loadEnvironments())
                   @click="activateEnvironment(scope.row)"
                 />
               </el-tooltip>
-              <el-tooltip content="测试登录" placement="top">
+              <el-tooltip :content="scope.row.auth.strategy === 'reuse-session' ? '管理登录态' : '测试登录'" placement="top">
                 <el-button
                   text
                   type="primary"
-                  :icon="Promotion"
+                  :icon="scope.row.auth.strategy === 'reuse-session' ? Key : Promotion"
                   :loading="loginTestingId === scope.row.id"
-                  aria-label="测试环境登录"
+                  :aria-label="scope.row.auth.strategy === 'reuse-session' ? '管理登录态' : '测试环境登录'"
                   :disabled="!scope.row.enabled || Boolean(loginTestingId)"
                   @click="testLogin(scope.row)"
                 />
@@ -357,6 +387,11 @@ onMounted(() => loadEnvironments())
       :environment="editingEnvironment"
       :saving="editorSaving"
       @save="saveEnvironment"
+    />
+    <EnvironmentSessionDialog
+      v-model="sessionVisible"
+      :environment="sessionEnvironment"
+      @changed="sessionRevision++"
     />
     <EnvironmentLoginResultDialog
       v-model="loginResultVisible"

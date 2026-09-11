@@ -23,11 +23,14 @@ import type { RunFailureStage, RunRecord } from '@/domain/run-record'
 import type { RuntimeVariable } from '@/domain/runtime-variable'
 import type { AutomationScript, ScriptDraft, ScriptStatus } from '@/domain/script'
 import { services } from '@/services/container'
-import { applyResponseVariable } from '@/services/environments/apply-response-variable'
+import { authenticateEnvironment, authenticationSuccessMessage } from '@/services/environments/authenticate-environment'
 import { createRunScriptProgressDraft } from '@/services/run-records/script-run-progress'
 import { collectBatchStopScriptIds } from '@/services/scripts/script-batch-stop-plan'
 import { buildScriptRunContext } from '@/services/scripts/script-run-context'
+import { restoreLatestScriptRuns } from '@/services/scripts/script-run-history'
 import { applyScriptResponseVariables } from '@/services/scripts/script-response-variables'
+import { formatScriptCreatedAt, sortScriptsByCreatedAtDesc } from './script-management-list'
+import { removeScriptFromListIfUnused, scriptUsageWarning } from './script-removal-guard'
 
 const scripts = ref<AutomationScript[]>([])
 const environments = ref<TestEnvironment[]>([])
@@ -47,6 +50,7 @@ const runningScriptIds = ref<Set<string>>(new Set())
 const stoppingScriptIds = ref<Set<string>>(new Set())
 const router = useRouter()
 let liveRefreshTimer: number | null = null
+let runHistoryRecords: RunRecord[] = []
 
 const statusOptions: Array<{ label: string; value: 'all' | ScriptStatus }> = [
   { label: '全部状态', value: 'all' },
@@ -84,17 +88,35 @@ function setRunningScripts(records: RunRecord[]): void {
 }
 
 async function refreshRunningScripts(): Promise<void> {
-  setRunningScripts(await services.runRecords.list())
+  const records = await services.runRecords.list()
+  runHistoryRecords = records
+  setRunningScripts(records)
+}
+
+async function refreshScriptsFromHistory(): Promise<void> {
+  const [latestScripts, records] = await Promise.all([
+    services.scripts.list(),
+    services.runRecords.list(),
+  ])
+  runHistoryRecords = records
+  const restoredScripts = restoreLatestScriptRuns(latestScripts, records)
+  scripts.value = restoredScripts
+  setRunningScripts(records)
+  if (resultScript.value) {
+    resultScript.value = restoredScripts.find((script) => script.id === resultScript.value?.id)
+      ?? resultScript.value
+  }
 }
 
 const filteredScripts = computed(() => {
   const keyword = searchKeyword.value.trim().toLowerCase()
-  return scripts.value.filter((script) => {
+  const matchingScripts = scripts.value.filter((script) => {
     const matchesStatus = statusFilter.value === 'all' || displayStatus(script) === statusFilter.value
     const matchesKeyword = !keyword || [script.name, script.description, script.directory, script.entryFile, ...script.tags]
       .some((value) => value.toLowerCase().includes(keyword))
     return matchesStatus && matchesKeyword
   })
+  return sortScriptsByCreatedAtDesc(matchingScripts)
 })
 
 const pagedScripts = computed(() => {
@@ -136,12 +158,7 @@ watch([searchKeyword, statusFilter], () => {
 async function loadScripts(showSuccess = false): Promise<void> {
   loading.value = true
   try {
-    const [latestScripts, records] = await Promise.all([
-      services.scripts.list(),
-      services.runRecords.list(),
-    ])
-    scripts.value = latestScripts
-    setRunningScripts(records)
+    await refreshScriptsFromHistory()
     if (showSuccess) ElMessage.success('脚本列表已刷新')
   } catch {
     ElMessage.error('脚本列表加载失败')
@@ -152,9 +169,21 @@ async function loadScripts(showSuccess = false): Promise<void> {
 
 async function refreshLiveScripts(): Promise<void> {
   const latest = await services.scripts.list()
-  scripts.value = latest
+  const restoredScripts = restoreLatestScriptRuns(latest, runHistoryRecords, {
+    preserveRuntimeState: true,
+  })
+  scripts.value = restoredScripts
   if (resultScript.value) {
-    resultScript.value = latest.find((script) => script.id === resultScript.value?.id) ?? resultScript.value
+    resultScript.value = restoredScripts.find((script) => script.id === resultScript.value?.id)
+      ?? resultScript.value
+  }
+}
+
+async function refreshScriptsAfterStop(): Promise<void> {
+  try {
+    await refreshScriptsFromHistory()
+  } catch {
+    await Promise.allSettled([refreshLiveScripts(), refreshRunningScripts()])
   }
 }
 
@@ -218,11 +247,18 @@ async function saveScript(draft: ScriptDraft): Promise<void> {
 
 async function removeScript(script: AutomationScript): Promise<void> {
   try {
-    await services.scripts.remove(script.id)
-    ElMessage.success('脚本已删除')
+    const result = await removeScriptFromListIfUnused(script.id, {
+      listAutomationPipelines: () => services.automationPipelines.list(),
+      removeScript: (scriptId) => services.scripts.remove(scriptId),
+    })
+    if (!result.removed) {
+      ElMessage.warning(scriptUsageWarning(result.usages))
+      return
+    }
+    ElMessage.success('脚本已从列表移除，源文件已保留')
     await loadScripts()
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '删除失败')
+    ElMessage.error(error instanceof Error ? error.message : '移除失败')
   }
 }
 
@@ -258,7 +294,7 @@ async function forceStop(script: AutomationScript): Promise<void> {
       result.status === 'fulfilled' ? [result.value] : []
     ))
     const interruptedRecords = await services.runRecords.interruptByScriptId(script.id)
-    await Promise.allSettled([refreshLiveScripts(), refreshRunningScripts()])
+    await refreshScriptsAfterStop()
     const cleanupTimedOutRunIds = new Set(
       stopResults.flatMap((result) => result.cleanupTimedOutRunIds ?? []),
     )
@@ -276,7 +312,7 @@ async function forceStop(script: AutomationScript): Promise<void> {
       ElMessage.warning('未发现活动任务，页面运行状态已解除')
     }
   } catch (error) {
-    await Promise.allSettled([refreshLiveScripts(), refreshRunningScripts()])
+    await refreshScriptsAfterStop()
     const message = error instanceof Error ? error.message : '未知错误'
     ElMessage.error(stopRequestsSucceeded
       ? `脚本停止请求已完成，但运行批次状态更新失败：${message}；批次仍保持运行锁定`
@@ -362,17 +398,11 @@ async function runScripts(targets: AutomationScript[]): Promise<void> {
       })),
     })
 
-    ElMessage.info(`正在登录${environment.name}并刷新 Token`)
-    const loginResult = await services.environmentLogin.login(environment)
-    if (!loginResult.businessSuccess) {
-      const status = loginResult.status ? `HTTP ${loginResult.status}` : '未收到 HTTP 响应'
-      throw new Error(loginResult.error || `环境登录失败（${status}），请检查登录配置和业务成功规则`)
-    }
-    const runtimeToken = applyResponseVariable({
-      variableName: environment.auth.tokenVariable,
-      responsePath: environment.auth.tokenPath,
-    }, environment, loginResult, services.runtimeVariables)
-    if (!runtimeToken) throw new Error(`登录成功，但无法从 ${environment.auth.tokenPath} 提取 Token`)
+    ElMessage.info(environment.auth.strategy === 'reuse-session'
+      ? `正在加载${environment.name}的已有登录态`
+      : `正在登录${environment.name}并刷新 Token`)
+    const runtimeToken = await authenticateEnvironment(environment, services)
+    if (!runtimeToken) throw new Error('认证已取消')
     runSecretValues = [
       runtimeToken.value,
       ...runSecretValues,
@@ -381,13 +411,13 @@ async function runScripts(targets: AutomationScript[]): Promise<void> {
     await services.runRecords.appendLog(runRecord.id, {
       level: 'success',
       scope: 'login',
-      message: `${environment.name}登录成功，运行时 Token 已刷新`,
+      message: authenticationSuccessMessage(environment),
       secretValues: runSecretValues,
     })
 
     const recordId = runRecord.id
     const runContext = {
-      ...buildScriptRunContext(environment, services.runtimeVariables),
+      ...buildScriptRunContext(environment, services.runtimeVariables, runtimeToken),
       executionId: recordId,
     }
     const runTask = services.scripts.run(
@@ -483,12 +513,16 @@ async function runScripts(targets: AutomationScript[]): Promise<void> {
     ElMessage.error(message)
   } finally {
     stopLiveRefresh()
-    await refreshLiveScripts().catch(() => undefined)
-    await refreshRunningScripts().catch(() => {
-      const nextRunningIds = new Set(runningScriptIds.value)
-      for (const id of lockedIds) nextRunningIds.delete(id)
-      runningScriptIds.value = nextRunningIds
-    })
+    try {
+      await refreshScriptsFromHistory()
+    } catch {
+      await refreshLiveScripts().catch(() => undefined)
+      await refreshRunningScripts().catch(() => {
+        const nextRunningIds = new Set(runningScriptIds.value)
+        for (const id of lockedIds) nextRunningIds.delete(id)
+        runningScriptIds.value = nextRunningIds
+      })
+    }
     services.runtimeVariables.clear()
   }
 }
@@ -630,6 +664,9 @@ onBeforeUnmount(stopLiveRefresh)
             </el-tag>
           </template>
         </el-table-column>
+        <el-table-column label="创建时间" width="180">
+          <template #default="scope">{{ formatScriptCreatedAt(scope.row.createdAt) }}</template>
+        </el-table-column>
         <el-table-column label="更新时间" prop="updatedAt" width="180" />
         <el-table-column label="操作" width="238" fixed="right">
           <template #default="scope">
@@ -666,9 +703,15 @@ onBeforeUnmount(stopLiveRefresh)
               <el-tooltip content="编辑" placement="top">
                 <el-button text :icon="EditPen" aria-label="编辑脚本" @click="openEdit(scope.row)" />
               </el-tooltip>
-              <el-popconfirm title="确定删除这个脚本吗？" confirm-button-text="删除" cancel-button-text="取消" @confirm="removeScript(scope.row)">
+              <el-popconfirm
+                title="确定从列表移除这个脚本吗？源文件将保留在原目录。"
+                confirm-button-text="移除"
+                cancel-button-text="取消"
+                :width="300"
+                @confirm="removeScript(scope.row)"
+              >
                 <template #reference>
-                  <el-button text type="danger" :icon="Delete" aria-label="删除脚本" />
+                  <el-button text type="danger" :icon="Delete" aria-label="从列表移除脚本" />
                 </template>
               </el-popconfirm>
             </div>

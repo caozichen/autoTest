@@ -37,9 +37,13 @@ defineProps<{
         <span v-if="!compact">运行记录</span>
       </RouterLink>
       <p v-if="!compact" class="nav__caption nav__caption--section">系统设置</p>
-      <RouterLink class="nav__item" active-class="nav__item--active" to="/settings">
+      <RouterLink class="nav__item" exact-active-class="nav__item--active" to="/settings">
         <el-icon :size="19"><Setting /></el-icon>
         <span v-if="!compact">Runner 管理</span>
+      </RouterLink>
+      <RouterLink class="nav__item" active-class="nav__item--active" to="/settings/run-history">
+        <el-icon :size="19"><Operation /></el-icon>
+        <span v-if="!compact">运行记录 Tab 配置</span>
       </RouterLink>
     </nav>
 

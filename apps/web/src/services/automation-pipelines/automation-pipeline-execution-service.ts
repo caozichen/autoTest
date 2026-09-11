@@ -7,7 +7,8 @@ import type {
   RunRecord,
 } from '@/domain/run-record'
 import type { AutomationScript, ScriptRunContext, ScriptRunResult } from '@/domain/script'
-import { applyResponseVariable } from '@/services/environments/apply-response-variable'
+import { authenticateEnvironment, authenticationSuccessMessage } from '@/services/environments/authenticate-environment'
+import type { EnvironmentSessionService } from '@/services/environments/local-environment-session.service'
 import type { EnvironmentLoginService } from '@/services/environments/environment-login-service'
 import type { EnvironmentService } from '@/services/environments/environment-service'
 import type { RunRecordService } from '@/services/run-records/run-record-service'
@@ -25,7 +26,7 @@ export interface AutomationPipelineStopResult {
 }
 
 export interface AutomationPipelineExecutionService {
-  run(pipeline: AutomationPipeline): Promise<RunRecord>
+  run(pipeline: AutomationPipeline, environmentId?: string): Promise<RunRecord>
   stop(pipelineId: string): Promise<AutomationPipelineStopResult>
   stopByRecordId(recordId: string): Promise<AutomationPipelineStopResult>
   isRunning(pipelineId: string): boolean
@@ -34,6 +35,7 @@ export interface AutomationPipelineExecutionService {
 export interface AutomationPipelineExecutionDependencies {
   environments: EnvironmentService
   environmentLogin: EnvironmentLoginService
+  environmentSessions?: EnvironmentSessionService
   runtimeVariables: RuntimeVariableService
   scripts: ScriptService
   runRecords: RunRecordService
@@ -176,7 +178,7 @@ export class LocalAutomationPipelineExecutionService implements AutomationPipeli
 
   constructor(private readonly dependencies: AutomationPipelineExecutionDependencies) {}
 
-  run(pipeline: AutomationPipeline): Promise<RunRecord> {
+  run(pipeline: AutomationPipeline, environmentId?: string): Promise<RunRecord> {
     if (this.activeExecutions.has(pipeline.id)) {
       throw new Error(`自动化配置“${pipeline.name}”正在运行，请先等待完成或强制停止`)
     }
@@ -191,7 +193,7 @@ export class LocalAutomationPipelineExecutionService implements AutomationPipeli
       interruptionPromise: null,
     }
     this.activeExecutions.set(pipeline.id, execution)
-    return this.execute(pipeline, execution).finally(() => {
+    return this.execute({ ...pipeline, environmentId: environmentId ?? pipeline.environmentId }, execution).finally(() => {
       if (this.activeExecutions.get(pipeline.id) === execution) {
         this.activeExecutions.delete(pipeline.id)
       }
@@ -311,31 +313,23 @@ export class LocalAutomationPipelineExecutionService implements AutomationPipeli
     let secretValues = environmentSecrets(environment)
     try {
       if (execution.cancelRequested) return await this.interruptExecution(execution)
-      const loginResult = await this.dependencies.environmentLogin.login(environment)
+      const runtimeToken = await authenticateEnvironment(environment, this.dependencies, () => execution.cancelRequested)
       if (execution.cancelRequested) return await this.interruptExecution(execution)
-      if (!loginResult.businessSuccess) {
-        const status = loginResult.status ? `HTTP ${loginResult.status}` : '未收到 HTTP 响应'
-        throw new Error(loginResult.error || `环境登录失败（${status}），请检查登录配置和业务成功规则`)
-      }
-
-      const runtimeToken = applyResponseVariable({
-        variableName: environment.auth.tokenVariable,
-        responsePath: environment.auth.tokenPath,
-      }, environment, loginResult, this.dependencies.runtimeVariables)
-      if (!runtimeToken) throw new Error(`登录成功，但无法从 ${environment.auth.tokenPath} 提取 Token`)
+      if (!runtimeToken) throw new Error('认证已取消')
       secretValues = [runtimeToken.value, ...secretValues].filter(Boolean)
 
       await this.dependencies.runRecords.appendLog(record.id, {
         level: 'success',
         scope: 'login',
-        message: `${environment.name}登录成功，运行时 Token 已刷新`,
+        message: authenticationSuccessMessage(environment),
         secretValues,
       })
 
       failureStage = 'runner'
       const baseContext = {
-        ...buildScriptRunContext(environment, this.dependencies.runtimeVariables),
+        ...buildScriptRunContext(environment, this.dependencies.runtimeVariables, runtimeToken),
         executionId: record.id,
+        failBatchOnError: true,
       }
       return await this.runSteps(record.id, pipeline, baseContext, secretValues, execution)
     } catch (error) {

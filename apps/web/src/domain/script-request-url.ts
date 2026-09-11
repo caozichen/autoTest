@@ -1,19 +1,29 @@
+import { publicOriginForSite } from '../../../../shared/form-environment.mjs'
+
 export const LPXAVN_SCRIPT_ID = 'form-lpxavn-submit'
 export const ALL_FIELDS_SUBMIT_SCRIPT_ID = 'form-all-fields-submit'
 export const SUBMISSION_REPLY_EDIT_SCRIPT_ID = 'form-submission-reply-edit'
+export const SUBMISSION_REPLY_CREATE_SCRIPT_ID = 'form-submission-reply-create'
+export const SUBMISSION_LIST_CHECK_SCRIPT_ID = 'form-submission-list-check'
 export const MULTILINGUAL_TRANSLATION_PUBLISH_SCRIPT_ID = 'form-multilingual-translation-publish'
 export const DEFAULT_LPXAVN_REQUEST_PATH = '/form/?id={{FORM_ID}}'
 export const DEFAULT_ALL_FIELDS_REQUEST_PATH = '/form/?id={{FORM_ID}}'
 export const DEFAULT_SUBMISSION_REPLY_EDIT_REQUEST_PATH = '/form-activity/submission/preview/reply/{{SUBMISSION_ID}}?fid={{FORM_ID}}'
+export const DEFAULT_SUBMISSION_REPLY_CREATE_REQUEST_PATH = '/form-activity/submission/preview/reply/create?fid={{FORM_ID}}'
+export const DEFAULT_SUBMISSION_LIST_CHECK_REQUEST_PATH = '/form-activity/submission/preview?id={{FORM_ID}}'
 export const DEFAULT_MULTILINGUAL_TRANSLATION_PUBLISH_REQUEST_PATH = '/form-activity/translation?id={{FORM_ID}}'
 const REQUEST_PATH_SCRIPT_IDS = new Set([
   LPXAVN_SCRIPT_ID,
   ALL_FIELDS_SUBMIT_SCRIPT_ID,
   SUBMISSION_REPLY_EDIT_SCRIPT_ID,
+  SUBMISSION_REPLY_CREATE_SCRIPT_ID,
+  SUBMISSION_LIST_CHECK_SCRIPT_ID,
   MULTILINGUAL_TRANSLATION_PUBLISH_SCRIPT_ID,
 ])
 const ADMIN_REQUEST_PATH_SCRIPT_IDS = new Set([
   SUBMISSION_REPLY_EDIT_SCRIPT_ID,
+  SUBMISSION_REPLY_CREATE_SCRIPT_ID,
+  SUBMISSION_LIST_CHECK_SCRIPT_ID,
   MULTILINGUAL_TRANSLATION_PUBLISH_SCRIPT_ID,
 ])
 const VARIABLE_PATTERN = /{{\s*([^{}]+?)\s*}}/g
@@ -33,6 +43,8 @@ export function defaultRequestPathForScript(scriptId?: string): string {
   if (scriptId === LPXAVN_SCRIPT_ID) return DEFAULT_LPXAVN_REQUEST_PATH
   if (scriptId === ALL_FIELDS_SUBMIT_SCRIPT_ID) return DEFAULT_ALL_FIELDS_REQUEST_PATH
   if (scriptId === SUBMISSION_REPLY_EDIT_SCRIPT_ID) return DEFAULT_SUBMISSION_REPLY_EDIT_REQUEST_PATH
+  if (scriptId === SUBMISSION_REPLY_CREATE_SCRIPT_ID) return DEFAULT_SUBMISSION_REPLY_CREATE_REQUEST_PATH
+  if (scriptId === SUBMISSION_LIST_CHECK_SCRIPT_ID) return DEFAULT_SUBMISSION_LIST_CHECK_REQUEST_PATH
   if (scriptId === MULTILINGUAL_TRANSLATION_PUBLISH_SCRIPT_ID) {
     return DEFAULT_MULTILINGUAL_TRANSLATION_PUBLISH_REQUEST_PATH
   }
@@ -111,15 +123,7 @@ export function resolveScriptRequestPath(
 }
 
 export function publicOriginForEnvironment(siteBaseUrl: string): string {
-  const url = new URL(siteBaseUrl)
-  if (!['http:', 'https:'].includes(url.protocol)) throw new Error('环境域名只允许 http 或 https')
-
-  if (url.hostname.includes('.admin.')) {
-    url.hostname = url.hostname.replace('.admin.', '.')
-  } else if (url.hostname.includes('.b.lingxi-hk.localtest')) {
-    url.hostname = url.hostname.replace('.b.lingxi-hk.localtest', '.f.lingxi-hk.localtest')
-  }
-  return url.origin
+  return publicOriginForSite(siteBaseUrl)
 }
 
 function adminOriginForEnvironment(siteBaseUrl: string): string {

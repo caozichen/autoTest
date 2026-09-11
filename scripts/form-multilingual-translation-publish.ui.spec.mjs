@@ -1,6 +1,10 @@
+import { clickWhenReady, observeUiReadiness } from './support/ui-readiness.mjs'
+import { publicOriginForSite } from '../shared/form-environment.mjs'
+import { isSystemItem } from './support/form-link-contract.mjs'
+import { scaleTimeout } from './support/environment-timeouts.mjs'
 import { randomUUID } from 'node:crypto'
 
-import { expect as flowExpect } from '@playwright/test'
+import { expect as flowExpect } from './support/environment-timeouts.mjs'
 import { request as playwrightRequest } from '@playwright/test'
 import jsQR from 'jsqr'
 
@@ -441,6 +445,20 @@ function formatBusinessBody(body) {
   return text.length > 2_000 ? `${text.slice(0, 2_000)}...[已截断]` : text
 }
 
+async function readResponseJsonWithin(response, label, timeoutMs = scaleTimeout(ACTION_TIMEOUT_MS)) {
+  let timer
+  try {
+    return await Promise.race([
+      Promise.resolve().then(() => response.json()),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label}响应体读取超过 ${timeoutMs}ms，HTTP 响应已到达但正文未完成`)), timeoutMs)
+      }),
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 async function inspectBusinessResponse(response, label) {
   const status = Number(response?.status?.() ?? 0)
   const httpSucceeded = Boolean(response?.ok?.())
@@ -449,9 +467,10 @@ async function inspectBusinessResponse(response, label) {
   let body = null
   let bodyReadError = ''
   try {
-    body = await response.json()
+    body = await readResponseJsonWithin(response, label)
   } catch (error) {
     bodyReadError = error instanceof Error ? error.message : String(error)
+    if (bodyReadError.includes('响应体读取超过')) throw error
   }
   const bodyValid = isRecord(body)
   expect(bodyValid, `${label}接口应返回有效 JSON 业务信封`).toBe(true)
@@ -489,11 +508,21 @@ function parseRequestPayload(request, label) {
 }
 
 function exactApiResponse(page, method, pathnameSuffix, options = {}) {
-  const { query = {}, timeout = ACTION_TIMEOUT_MS } = options
-  return page.waitForResponse((response) => {
+  const { query = {}, timeout = scaleTimeout(ACTION_TIMEOUT_MS), acceptRequest = () => true } = options
+  return page.waitForResponse(async (response) => {
     const url = new URL(response.url())
     if (response.request().method() !== method || !url.pathname.endsWith(pathnameSuffix)) return false
-    return Object.entries(query).every(([key, value]) => url.searchParams.get(key) === String(value))
+    if (!acceptRequest(response.request())) return false
+    if (!Object.entries(query).every(([key, value]) => url.searchParams.get(key) === String(value))) return false
+    // GET headers alone do not mean usable data. A stalled duplicate must not win
+    // over a later complete response. Mutations retain their first response.
+    if (method === 'GET') {
+      try {
+        if (await response.finished()) return false
+        await response.body()
+      } catch { return false }
+    }
+    return true
   }, { timeout })
 }
 
@@ -513,9 +542,30 @@ async function runActionAndWaitForWatchers(watcherFactories, action = () => unde
 function runActionAndWaitForApiResponses(page, responseSpecs, action = () => undefined) {
   const specs = Array.isArray(responseSpecs) ? responseSpecs : [responseSpecs]
   if (specs.length === 0) throw new Error('至少需要一个 API 响应监听条件')
+  const navigationScoped = specs.some(spec => spec.options?.afterNavigation)
+  const documentRequests = new WeakSet()
+  let committed = false
+  const onNavigation = frame => {
+    if (frame === page.mainFrame()) committed = true
+  }
+  const onRequest = request => {
+    if (committed) documentRequests.add(request)
+  }
+  if (navigationScoped) {
+    page.on('framenavigated', onNavigation)
+    page.on('request', onRequest)
+  }
   return runActionAndWaitForWatchers(specs.map(({ method, pathnameSuffix, options }) => (
-    () => exactApiResponse(page, method, pathnameSuffix, options)
-  )), action)
+    () => exactApiResponse(page, method, pathnameSuffix, {
+      ...options,
+      ...(options?.afterNavigation ? { acceptRequest: request => documentRequests.has(request) } : {}),
+    })
+  )), action).finally(() => {
+    if (navigationScoped) {
+      page.off('framenavigated', onNavigation)
+      page.off('request', onRequest)
+    }
+  })
 }
 
 function unwrapFormPayload(payload) {
@@ -1140,6 +1190,13 @@ function structureOnly(value, parentKey = '') {
   return result
 }
 
+function signatureItems(items) {
+  // Admin list settings can change API array order without changing the form.
+  // Align by identity; structural signatures still compare each item's sort,
+  // group, rules and ordered options, including missing or duplicate items.
+  return [...items].sort((left, right) => String(left.item_key ?? '').localeCompare(String(right.item_key ?? '')))
+}
+
 function structuralSignature(payload) {
   const { data, form, items } = unwrapFormPayload(payload)
   const revisionNo = numericValue(data.revision_no)
@@ -1149,7 +1206,7 @@ function structuralSignature(payload) {
   return {
     formId: String(form.form_id ?? form.id ?? data.form_id ?? ''),
     revisionNo,
-    items: items.map((item) => ({
+    items: signatureItems(items).map((item) => ({
       item_key: String(item.item_key ?? ''),
       type_code: String(item.type_code ?? ''),
       group_code: String(item.group_code ?? ''),
@@ -1195,14 +1252,14 @@ function publicStructuralSignature(sourcePayload, publicPayload) {
   return projectSignatureAgainstReference(source, structuralSignature(publicPayload))
 }
 
-function sourceTextSignature(payload) {
+function sourceTextSignature(payload, { includeSystemItems = true } = {}) {
   const { form, items } = unwrapFormPayload(payload)
   return {
     source_language: String(form.source_language ?? ''),
     title: String(form.title ?? ''),
     subtitle: String(form.subtitle ?? ''),
     description: String(form.description ?? ''),
-    items: items.map((item) => ({
+    items: signatureItems(items.filter((item) => includeSystemItems || !isSystemItem(item))).map((item) => ({
       item_key: String(item.item_key ?? ''),
       label: String(item.label ?? ''),
       description: String(item.description ?? ''),
@@ -1215,8 +1272,12 @@ function sourceTextSignature(payload) {
 }
 
 function publicSourceTextSignature(sourcePayload, publicPayload) {
-  const source = sourceTextSignature(sourcePayload)
-  return projectSignatureAgainstReference(source, sourceTextSignature(publicPayload))
+  // Submission metadata labels (device, duration, etc.) belong to the admin
+  // list settings and are intentionally absent from the public form content.
+  // Admin-to-admin checks above still compare them; structure checks keep every item.
+  const options = { includeSystemItems: false }
+  const source = sourceTextSignature(sourcePayload, options)
+  return projectSignatureAgainstReference(source, sourceTextSignature(publicPayload, options))
 }
 
 function orderedContentFormItems(items) {
@@ -1358,16 +1419,6 @@ function isApiBusinessRequest(request, apiOrigin) {
   const url = new URL(request.url())
   return url.origin === apiOrigin
     && AUTHENTICATED_API_PATH_PREFIXES.some((prefix) => url.pathname.startsWith(prefix))
-}
-
-function publicOriginForSite(siteBaseUrl) {
-  const url = new URL(siteBaseUrl)
-  if (url.hostname.includes('.admin.')) {
-    url.hostname = url.hostname.replace('.admin.', '.')
-  } else if (url.hostname.includes('.b.lingxi-hk.localtest')) {
-    url.hostname = url.hostname.replace('.b.lingxi-hk.localtest', '.f.lingxi-hk.localtest')
-  }
-  return url.origin
 }
 
 function buildPublicPreviewUrl(siteBaseUrl, formId, language) {
@@ -1543,7 +1594,7 @@ async function ensureTargetLanguagesEnabled(page, workspace, formId, logger) {
     const [response] = await runActionAndWaitForApiResponses(page, {
       method: 'PUT',
       pathnameSuffix: `/be/form/${formId}/translation/language`,
-    }, () => toggle.click())
+    }, () => clickWhenReady(toggle))
     const outcome = await inspectBusinessResponse(response, `启用 ${language} 目标语言`)
     flowExpect(outcome.succeeded, `启用 ${language} 接口必须成功，才能继续多语言配置`).toBe(true)
     const requestPayload = parseRequestPayload(response.request(), `启用 ${language} 目标语言`)
@@ -1586,11 +1637,11 @@ async function activateTargetLanguage(page, language) {
     const alternateLanguage = TARGET_LANGUAGES.find((candidate) => candidate !== language)
     const alternateCard = targetLanguageCard(page, alternateLanguage)
     await flowExpect(alternateCard, `${language} 同步前必须存在另一目标语言标签`).toHaveCount(1)
-    await alternateCard.click()
+    await clickWhenReady(alternateCard)
     await flowExpect(alternateCard, `${language} 同步前应先切换到另一目标语言标签`)
       .toHaveClass(activeClassPattern)
   }
-  await languageCard.click()
+  await clickWhenReady(languageCard)
   await expect(languageCard, `${language} 保存前应是当前选中的目标语言标签`)
     .toHaveClass(activeClassPattern)
   await flowExpect(languageCard, `${language} 保存前必须是当前选中的目标语言标签`)
@@ -1602,7 +1653,7 @@ async function navigateToWorkspaceSection(page, workspace, sectionKey) {
   flowExpect(sectionIndex, `翻译编辑器必须能定位分区 ${sectionKey}`).toBeGreaterThanOrEqual(0)
   const navItem = page.locator('.section-nav__item').nth(sectionIndex)
   await flowExpect(navItem, `翻译编辑器必须显示分区 ${sectionKey} 的导航项`).toBeVisible()
-  await navItem.click()
+  await clickWhenReady(navItem)
   return navItem
 }
 
@@ -1712,7 +1763,7 @@ async function triggerAiTranslation(page, workspace, formId, aiTimeoutMs, logger
   const aiButton = page.getByRole('button', { name: /一键\s*AI\s*翻译|一鍵\s*AI\s*翻譯/i })
   await expect(aiButton, '多语言页面应提供“一键 AI 翻译”按钮').toBeVisible()
   await flowExpect(aiButton, '一键 AI 翻译流程入口必须可点击').toBeEnabled()
-  await aiButton.click()
+  await clickWhenReady(aiButton)
 
   const modal = page.locator('.ai-translation-modal')
   await expect(modal, 'AI 一键翻译应打开目标语言确认弹窗').toBeVisible()
@@ -1745,7 +1796,7 @@ async function triggerAiTranslation(page, workspace, formId, aiTimeoutMs, logger
     method: 'POST',
     pathnameSuffix: `/be/form/${formId}/translation/ai`,
     options: { timeout: remainingTimeout() },
-  }, () => startTranslationButton.click())
+  }, () => clickWhenReady(startTranslationButton))
   const outcome = await inspectBusinessResponse(aiResponse, 'AI 一键翻译任务提交')
   const requestPayload = parseRequestPayload(aiResponse.request(), 'AI 一键翻译任务提交')
   expect(Number(requestPayload.revision_no), 'AI 一键翻译请求 revision_no 应匹配工作区').toBe(workspace.revision_no)
@@ -1814,7 +1865,8 @@ async function loadPersistedWorkspace(page, translationUrl, formId, language, ex
     pathnameSuffix: `/be/form/${formId}/translation`,
     options: {
       query: { target_language: language, revision_no: expectedRevision },
-      timeout: NAVIGATION_TIMEOUT_MS,
+      afterNavigation: true,
+      timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS),
     },
   }, () => page.goto(url.toString(), { waitUntil: 'domcontentloaded' }))
   const outcome = await inspectBusinessResponse(response, `${language} 翻译保存后回读`)
@@ -1850,7 +1902,7 @@ async function saveTranslationValue(page, formId, language, workspace, unit, val
   const [response] = await runActionAndWaitForApiResponses(page, {
     method: 'PUT',
     pathnameSuffix: `/be/form/${formId}/translation`,
-  }, () => saveButton.click())
+  }, () => clickWhenReady(saveButton))
   const outcome = await inspectBusinessResponse(response, label)
   const requestPayload = parseRequestPayload(response.request(), label)
   expect(Number(requestPayload.revision_no), `${label} revision_no 应匹配`).toBe(workspace.revision_no)
@@ -1910,7 +1962,7 @@ async function directTranslationRequest(requestContext, url, options, label, tim
 async function disposeRequestContextWithin(
   requestContext,
   logger,
-  disposeTimeoutMs = REQUEST_CONTEXT_DISPOSE_TIMEOUT_MS,
+  disposeTimeoutMs = scaleTimeout(REQUEST_CONTEXT_DISPOSE_TIMEOUT_MS),
 ) {
   if (!requestContext) return
   let timeoutId
@@ -1964,7 +2016,7 @@ async function ensureOriginalTranslationRestored({
   originalValue,
   probeValue,
   probePersistenceUncertain = false,
-  recoveryTimeoutMs = PROBE_RECOVERY_TIMEOUT_MS,
+  recoveryTimeoutMs = scaleTimeout(PROBE_RECOVERY_TIMEOUT_MS),
   recoveryPollIntervalMs = PROBE_RECOVERY_POLL_INTERVAL_MS,
   recoveryActionReserveMs = PROBE_RECOVERY_ACTION_RESERVE_MS,
   now = Date.now,
@@ -2183,7 +2235,7 @@ async function completeAndPublish(page, formId, workspace, formTitle, logger) {
   const completeButton = page.getByRole('button', { name: /完成并发布|完成並發佈|Complete and publish/i }).first()
   await expect(completeButton, '全部目标语言完成后“完成并发布”按钮应可用').toBeEnabled()
   await flowExpect(completeButton, '发布流程依赖全部已启用语言达到 100%').toBeEnabled()
-  await completeButton.click()
+  await clickWhenReady(completeButton)
 
   const confirmationText = page.getByText(/确认发布全部已启用语言|確認發佈全部已啟用語言|Publish all enabled languages/i)
   await expect(confirmationText, '完成并发布前应二次确认全部已启用语言').toBeVisible()
@@ -2196,7 +2248,7 @@ async function completeAndPublish(page, formId, workspace, formTitle, logger) {
   const [completeResponse] = await runActionAndWaitForApiResponses(page, {
     method: 'POST',
     pathnameSuffix: `/be/form/${formId}/translation/complete`,
-  }, () => confirmButton.click())
+  }, () => clickWhenReady(confirmButton))
   const outcome = await inspectBusinessResponse(completeResponse, '多语言完成并发布')
   flowExpect(outcome.succeeded, '多语言完成并发布接口必须成功，才能进入发布结果检查').toBe(true)
   const requestPayload = parseRequestPayload(completeResponse.request(), '多语言完成并发布')
@@ -2228,7 +2280,7 @@ async function completeAndPublish(page, formId, workspace, formTitle, logger) {
       .every((entry) => entry.published),
     '完成发布响应中两个目标语言必须都标记为已发布',
   ).toBe(true)
-  await page.waitForURL(/\/form-activity\/list(?:[/?#]|$)/, { timeout: NAVIGATION_TIMEOUT_MS })
+  await page.waitForURL(/\/form-activity\/list(?:[/?#]|$)/, { timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) })
 
   const statusFilter = page.locator('.filter-card-field').filter({
     has: page.locator('.filter-card-label', { hasText: /发布状态|發佈狀態|Publication status/i }),
@@ -2236,12 +2288,12 @@ async function completeAndPublish(page, formId, workspace, formTitle, logger) {
   await flowExpect(statusFilter, '发布后列表必须提供发布状态筛选器').toHaveCount(1)
   const statusSelect = statusFilter.locator('.arco-select')
   await flowExpect(statusSelect, '发布状态筛选器必须可操作').toBeVisible()
-  await statusSelect.click()
+  await clickWhenReady(statusSelect)
   const publishedOption = page.locator('.arco-select-option:visible').filter({
     hasText: /^(已发布|已發佈|Published)$/i,
   })
   await flowExpect(publishedOption, '发布状态筛选器必须提供已发布选项').toHaveCount(1)
-  await publishedOption.click()
+  await clickWhenReady(publishedOption)
   await flowExpect(statusSelect, '发布后定向查询必须限定为已发布状态')
     .toHaveAttribute('title', /^(已发布|已發佈|Published)$/i)
   const titleInput = page.getByPlaceholder(/请输入标题|請輸入標題|Enter title/i)
@@ -2252,9 +2304,9 @@ async function completeAndPublish(page, formId, workspace, formTitle, logger) {
     pathnameSuffix: '/be/form/list',
     options: {
       query: { 'filter[title]': formTitle },
-      timeout: NAVIGATION_TIMEOUT_MS,
+      timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS),
     },
-  }, () => page.getByRole('button', { name: /查询|查詢|搜索|搜尋|Search/i }).click())
+  }, () => clickWhenReady(page.getByRole('button', { name: /查询|查詢|搜索|搜尋|Search/i })))
   const listOutcome = await inspectBusinessResponse(listResponse, '多语言发布后定向查询表单列表')
   logger('success', '两个目标语言已完成并发布，页面已返回表单列表', {
     formId,
@@ -2304,12 +2356,12 @@ async function assertPublishedListUi(page, formTitle, formId, recordIndex) {
     '多语言列表列应显示已发布状态',
   ).toHaveCount(1)
   await flowExpect(translationLink, '多语言列表进度应可进入目标表单翻译页').toBeVisible()
-  await translationLink.click()
+  await clickWhenReady(translationLink)
   await flowExpect(page, '多语言列表目标行应导航到对应 FORM_ID 的翻译页')
     .toHaveURL((url) => (
       url.pathname.endsWith('/form-activity/translation')
         && url.searchParams.get('id') === formId
-    ), { timeout: NAVIGATION_TIMEOUT_MS })
+    ), { timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) })
 }
 
 function parseShareLink(rawValue, label) {
@@ -2333,7 +2385,7 @@ async function waitForShareLink(rows, index, label) {
   await flowExpect(value, `${label}展示区域必须可见`).toBeVisible()
   await flowExpect.poll(async () => tryParseShareLink(await value.innerText()), {
     message: `${label}必须在分享页异步生成完成后显示有效绝对 URL`,
-    timeout: NAVIGATION_TIMEOUT_MS,
+    timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS),
   }).toBeTruthy()
   return String(await value.innerText()).trim()
 }
@@ -2343,7 +2395,7 @@ async function decodeQrImage(qrImage, expectedValue, label) {
     image.complete && image.naturalWidth > 0 && image.naturalHeight > 0
   )), {
     message: `${label}二维码图片必须完成加载，才能解码`,
-    timeout: ACTION_TIMEOUT_MS,
+    timeout: scaleTimeout(ACTION_TIMEOUT_MS),
   }).toBe(true)
   const pixels = await qrImage.evaluate((image) => {
     const canvas = document.createElement('canvas')
@@ -2401,16 +2453,16 @@ async function inspectDirectOpenButton(page, row, openedUrl, expectedLandingUrl,
   let popup
   try {
     const [openedPopup] = await runActionAndWaitForWatchers([
-      () => context.waitForEvent('page', { timeout: ACTION_TIMEOUT_MS }),
-    ], () => directOpen.click())
+      () => context.waitForEvent('page', { timeout: scaleTimeout(ACTION_TIMEOUT_MS) }),
+    ], () => clickWhenReady(directOpen))
     popup = openedPopup
-    await popup.waitForLoadState('domcontentloaded', { timeout: NAVIGATION_TIMEOUT_MS }).catch(() => undefined)
+    await popup.waitForLoadState('domcontentloaded', { timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) }).catch(() => undefined)
     await popup.waitForURL((url) => (
       url.origin === expectedLandingUrl.origin
         && url.pathname === expectedLandingUrl.pathname
         && url.searchParams.get('id') === expectedLandingUrl.searchParams.get('id')
     ), {
-      timeout: NAVIGATION_TIMEOUT_MS,
+      timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS),
     })
     const popupNavigations = navigationRequests
       .filter((entry) => entry.page === popup || entry.page === null)
@@ -2439,8 +2491,9 @@ async function assertUnauthenticatedShareRedirect(context, shortUrlValue, longUr
   const shortUrl = new URL(shortUrlValue)
   const longUrl = new URL(longUrlValue)
   const page = await context.newPage()
-  page.setDefaultTimeout(ACTION_TIMEOUT_MS)
-  page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS)
+  observeUiReadiness(page)
+  page.setDefaultTimeout(scaleTimeout(ACTION_TIMEOUT_MS))
+  page.setDefaultNavigationTimeout(scaleTimeout(NAVIGATION_TIMEOUT_MS))
   const navigations = []
   const trackNavigation = (request) => {
     if (!isMainFrameNavigationRequest(request, page)) return
@@ -2454,7 +2507,7 @@ async function assertUnauthenticatedShareRedirect(context, shortUrlValue, longUr
         && url.pathname === longUrl.pathname
         && url.searchParams.get('id') === formId
         && url.searchParams.get('channel_code') === longUrl.searchParams.get('channel_code')
-    ), { timeout: NAVIGATION_TIMEOUT_MS })
+    ), { timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) })
     await flowExpect(page.locator('.fb-runtime-form-title'), '无认证上下文经短链进入后公开表单必须完成挂载')
       .toBeVisible()
     flowExpect(navigations[0]?.url, '无认证短链验证的首次主框架导航必须严格命中界面显示短链')
@@ -2543,12 +2596,12 @@ async function inspectShareSettingsPage({
   if (await segmentedButtons.count() === 2) {
     await expect(segmentedButtons.nth(0), '二维码默认应选择长链').toHaveAttribute('aria-pressed', 'true')
     const longQrSource = qrState.src
-    await segmentedButtons.nth(1).click()
+    await clickWhenReady(segmentedButtons.nth(1))
     await expect(segmentedButtons.nth(1), '二维码应能切换到短链模式').toHaveAttribute('aria-pressed', 'true')
     await expect(qrImage, '长短链二维码图片内容应不同').not.toHaveAttribute('src', longQrSource)
     const decodedShortQr = await decodeQrImage(qrImage, rawShortUrl, '分享短链')
     expect(decodedShortQr, '短链二维码不得错误编码成长链').not.toBe(decodedLongQr)
-    await segmentedButtons.nth(0).click()
+    await clickWhenReady(segmentedButtons.nth(0))
     await expect(segmentedButtons.nth(0), '二维码应能切回长链模式').toHaveAttribute('aria-pressed', 'true')
     await decodeQrImage(qrImage, rawLongUrl, '切回后的分享长链')
   }
@@ -2586,14 +2639,15 @@ async function openPublicPreview({
   logger,
 }) {
   const page = await context.newPage()
-  page.setDefaultTimeout(ACTION_TIMEOUT_MS)
-  page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS)
+  observeUiReadiness(page)
+  page.setDefaultTimeout(scaleTimeout(ACTION_TIMEOUT_MS))
+  page.setDefaultNavigationTimeout(scaleTimeout(NAVIGATION_TIMEOUT_MS))
   const previewUrl = buildPublicPreviewUrl(siteBaseUrl, formId, language)
   const publicOrigin = new URL(previewUrl).origin
   const [response] = await runActionAndWaitForApiResponses(page, {
     method: 'GET',
     pathnameSuffix: `/f/form/${formId}`,
-    options: { timeout: NAVIGATION_TIMEOUT_MS },
+    options: { timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) },
   }, () => page.goto(previewUrl, { waitUntil: 'domcontentloaded' }))
   const outcome = await inspectBusinessResponse(response, `${language} 公开预览配置`)
   const { form } = unwrapFormPayload(outcome.body)
@@ -2609,7 +2663,7 @@ async function openPublicPreview({
 
   if (language === 'zh_CN') {
     expect(publicSourceTextSignature(sourcePayload, outcome.body), '简体中文公开配置应保持原文内容不变')
-      .toEqual(sourceTextSignature(sourcePayload))
+      .toEqual(sourceTextSignature(sourcePayload, { includeSystemItems: false }))
   } else {
     assertWorkspaceAppliedToPayload(workspace, sourcePayload, outcome.body, language)
   }
@@ -2634,7 +2688,7 @@ async function assertShareLanguageMenu(page, previews, formId, shareLongUrl, art
   const [initialResponse] = await runActionAndWaitForApiResponses(page, {
     method: 'GET',
     pathnameSuffix: `/f/form/${formId}`,
-    options: { timeout: NAVIGATION_TIMEOUT_MS },
+    options: { timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) },
   }, () => page.goto(shareUrl.toString(), { waitUntil: 'domcontentloaded' }))
   const initialOutcome = await inspectBusinessResponse(initialResponse, '分享长链公开配置')
   flowExpect(initialOutcome.succeeded, '分享长链必须能读取公开表单配置').toBe(true)
@@ -2642,12 +2696,11 @@ async function assertShareLanguageMenu(page, previews, formId, shareLongUrl, art
 
   const initialSwitchButton = page.getByRole('button', { name: SWITCH_LANGUAGE_PATTERN })
   await flowExpect(initialSwitchButton, '分享长链右上角必须显示语言切换入口').toBeVisible()
-  await initialSwitchButton.click()
+  await clickWhenReady(initialSwitchButton)
   const initialMenu = page.getByRole('group', { name: SWITCH_LANGUAGE_PATTERN })
   await flowExpect(initialMenu, '分享长链右上角语言菜单必须展开').toBeVisible()
   const initialMenuButtons = initialMenu.getByRole('button')
   await expect(initialMenuButtons, '分享长链语言菜单应恰好显示三种语言').toHaveCount(3)
-  await flowExpect(initialMenuButtons, '分享长链语言菜单应恰好显示三种语言').toHaveCount(3)
   const initialButtonStates = await initialMenuButtons.evaluateAll((buttons) => buttons.map((button) => ({
     label: button.textContent?.trim() ?? '',
     pressed: button.getAttribute('aria-pressed') === 'true',
@@ -2661,23 +2714,21 @@ async function assertShareLanguageMenu(page, previews, formId, shareLongUrl, art
       .toEqual(sourceTextSignature(previews[initialLanguage].outcome.body))
     await assertPublicPreviewUi(page, previews[initialLanguage].outcome.body, initialLanguage, formId)
   }
-  await initialSwitchButton.click()
+  await clickWhenReady(initialSwitchButton)
 
   for (const language of localeOrder) {
     const switchButton = page.getByRole('button', { name: SWITCH_LANGUAGE_PATTERN })
     await expect(switchButton, `${language} 预览右上角应显示语言切换入口`).toHaveCount(1)
     await flowExpect(switchButton, `${language} 语言切换入口必须可点击`).toBeVisible()
-    await switchButton.click()
+    await clickWhenReady(switchButton)
     const menu = page.getByRole('group', { name: SWITCH_LANGUAGE_PATTERN })
     await flowExpect(menu, `${language} 右上角语言菜单必须展开`).toBeVisible()
     const menuButtons = menu.getByRole('button')
     await expect(menuButtons, '分享公开页语言菜单应恰好显示简体、繁体、English 三种语言').toHaveCount(3)
-    await flowExpect(menuButtons, '分享公开页语言菜单应恰好显示简体、繁体、English 三种语言').toHaveCount(3)
     const menuLanguageCodes = languageCodesForDisplayLabels(
       (await menuButtons.allTextContents()).map((value) => value.trim()),
     )
     expect(menuLanguageCodes, '分享公开页三种语言及顺序应正确').toEqual(localeOrder)
-    flowExpect(menuLanguageCodes, '分享公开页三种语言及顺序应正确').toEqual(localeOrder)
 
     const targetButton = menu.getByRole('button', { name: languageLabelPattern(language) })
     await expect(targetButton, `分享菜单应显示 ${language} 切换项`).toHaveCount(1)
@@ -2685,13 +2736,13 @@ async function assertShareLanguageMenu(page, previews, formId, shareLongUrl, art
     const alreadySelected = await targetButton.getAttribute('aria-pressed') === 'true'
     let switchedResponse = null
     if (alreadySelected) {
-      await targetButton.click()
+      await clickWhenReady(targetButton)
     } else {
       [switchedResponse] = await runActionAndWaitForApiResponses(page, {
         method: 'GET',
         pathnameSuffix: `/f/form/${formId}`,
-        options: { timeout: NAVIGATION_TIMEOUT_MS },
-      }, () => targetButton.click())
+        options: { timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) },
+      }, () => clickWhenReady(targetButton))
     }
     if (switchedResponse) {
       const switchedOutcome = await inspectBusinessResponse(
@@ -2718,7 +2769,7 @@ async function assertShareLanguageMenu(page, previews, formId, shareLongUrl, art
       .toBe(shareUrl.searchParams.get('channel_code'))
     const switchedSnapshot = await assertPublicPreviewUi(page, previews[language].outcome.body, language, formId)
 
-    await page.getByRole('button', { name: SWITCH_LANGUAGE_PATTERN }).click()
+    await clickWhenReady(page.getByRole('button', { name: SWITCH_LANGUAGE_PATTERN }))
     const reopenedMenu = page.getByRole('group', { name: SWITCH_LANGUAGE_PATTERN })
     await expect(
       reopenedMenu.getByRole('button', { name: languageLabelPattern(language) }),
@@ -2728,14 +2779,14 @@ async function assertShareLanguageMenu(page, previews, formId, shareLongUrl, art
       reopenedMenu.getByRole('button', { name: languageLabelPattern(language) }),
       `分享菜单 ${language} 应显示为当前选中语言`,
     ).toHaveAttribute('aria-pressed', 'true')
-    await page.getByRole('button', { name: SWITCH_LANGUAGE_PATTERN }).click()
+    await clickWhenReady(page.getByRole('button', { name: SWITCH_LANGUAGE_PATTERN }))
     logger('success', '分享公开页语言菜单切换和本语言首屏呈现正确', {
       language,
       title: switchedSnapshot.title,
     })
   }
 
-  await page.getByRole('button', { name: SWITCH_LANGUAGE_PATTERN }).click()
+  await clickWhenReady(page.getByRole('button', { name: SWITCH_LANGUAGE_PATTERN }))
   const artifact = await captureEvidence(
     page,
     artifactWriter,
@@ -2745,7 +2796,6 @@ async function assertShareLanguageMenu(page, previews, formId, shareLongUrl, art
   const menu = page.getByRole('group', { name: SWITCH_LANGUAGE_PATTERN })
   const finalMenuLanguageCodes = languageCodesForDisplayLabels(await menu.getByRole('button').allTextContents())
   expect(finalMenuLanguageCodes, '分享界面最终证据应包含三种语言').toEqual(localeOrder)
-  flowExpect(finalMenuLanguageCodes, '分享界面最终证据应包含三种语言').toEqual(localeOrder)
   logger('success', '分享长链公开页右上角三语言切换校验完成', {
     formId,
     languages: localeOrder,
@@ -2788,7 +2838,7 @@ export async function run({
   const translationUrl = buildTranslationUrl(siteBaseUrl, requestPath, variables)
   const formId = new URL(translationUrl).searchParams.get('id')
   const customExpectations = parseTranslationExpectations(variables.TRANSLATION_EXPECTATIONS)
-  const aiTimeoutMs = resolveAiTimeout(variables.AI_TRANSLATION_TIMEOUT_MS)
+  const aiTimeoutMs = scaleTimeout(resolveAiTimeout(variables.AI_TRANSLATION_TIMEOUT_MS))
   const siteOrigin = new URL(siteBaseUrl).origin
   const apiOrigin = new URL(apiBaseUrl).origin
   if (siteOrigin !== apiOrigin) throw new Error('Web 基址与 API 基址必须同源')
@@ -2860,8 +2910,9 @@ export async function run({
     })
 
     page = await adminContext.newPage()
-    page.setDefaultTimeout(ACTION_TIMEOUT_MS)
-    page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS)
+    observeUiReadiness(page)
+    page.setDefaultTimeout(scaleTimeout(ACTION_TIMEOUT_MS))
+    page.setDefaultNavigationTimeout(scaleTimeout(NAVIGATION_TIMEOUT_MS))
     adminNetworkObserver.setPhase('加载多语言设置')
     const initialTranslationUrl = new URL(translationUrl)
     initialTranslationUrl.searchParams.set('target_language', 'zh_HK')
@@ -2869,12 +2920,12 @@ export async function run({
       {
         method: 'GET',
         pathnameSuffix: `/be/form/${formId}`,
-        options: { query: { draft: 1 }, timeout: NAVIGATION_TIMEOUT_MS },
+        options: { query: { draft: 1 }, timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) },
       },
       {
         method: 'GET',
         pathnameSuffix: `/be/form/${formId}/translation`,
-        options: { query: { target_language: 'zh_HK' }, timeout: NAVIGATION_TIMEOUT_MS },
+        options: { query: { target_language: 'zh_HK' }, timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) },
       },
     ], () => page.goto(initialTranslationUrl.toString(), { waitUntil: 'domcontentloaded' }))
     await expect(page, '环境 Token 生效后不应跳转登录页').not.toHaveURL(/\/login(?:[/?#]|$)/)
@@ -2939,13 +2990,14 @@ export async function run({
       },
       ignoreHTTPSErrors,
       storageState: await adminContext.storageState(),
-      timeout: PROBE_RECOVERY_TIMEOUT_MS,
+      timeout: scaleTimeout(PROBE_RECOVERY_TIMEOUT_MS),
     })
 
     const persistedWorkspaces = {}
     for (const language of TARGET_LANGUAGES) {
       throwIfRunAborted(signal)
       adminNetworkObserver.setPhase(`${language} 翻译保存与回读`)
+      logger('info', `开始加载 ${language} 翻译工作区并校验响应体`)
       const firstRead = await loadPersistedWorkspace(page, translationUrl, formId, language, source.revisionNo)
       const workspaceGate = requireWorkspaceMutationGate(firstRead.outcome.body, {
         expectedRevision: source.revisionNo,
@@ -3054,12 +3106,12 @@ export async function run({
       {
         method: 'GET',
         pathnameSuffix: `/be/form/${formId}`,
-        options: { query: { draft: 1 }, timeout: NAVIGATION_TIMEOUT_MS },
+        options: { query: { draft: 1 }, timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) },
       },
       {
         method: 'GET',
         pathnameSuffix: `/be/form/${formId}/translation`,
-        options: { query: { target_language: 'zh_HK' }, timeout: NAVIGATION_TIMEOUT_MS },
+        options: { query: { target_language: 'zh_HK' }, timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) },
       },
     ], () => page.goto(publishedTranslationUrl.toString(), { waitUntil: 'domcontentloaded' }))
     const publishedDetailOutcome = await inspectBusinessResponse(publishedDetailResponse, '多语言发布后表单详情回读')
@@ -3189,8 +3241,9 @@ export async function run({
       formId,
     )
     const sharePage = await shareContext.newPage()
-    sharePage.setDefaultTimeout(ACTION_TIMEOUT_MS)
-    sharePage.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS)
+    observeUiReadiness(sharePage)
+    sharePage.setDefaultTimeout(scaleTimeout(ACTION_TIMEOUT_MS))
+    sharePage.setDefaultNavigationTimeout(scaleTimeout(NAVIGATION_TIMEOUT_MS))
     const shareArtifact = await assertShareLanguageMenu(
       sharePage,
       previews,
@@ -3335,6 +3388,7 @@ export {
   projectSignatureAgainstReference,
   publicSourceTextSignature,
   publicStructuralSignature,
+  readResponseJsonWithin,
   readFieldPath,
   requireTranslationQualityGate,
   requireWorkspaceMutationGate,

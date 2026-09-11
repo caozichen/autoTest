@@ -1,3 +1,4 @@
+import { scaleTimeout } from './support/environment-timeouts.mjs'
 import { expect } from './support/recorded-expect.mjs'
 import { attachNetworkObserver } from './support/api-response-recorder.mjs'
 import {
@@ -118,7 +119,7 @@ async function waitForApiResponse(page, urlPattern, action, label) {
   const responsePromise = page.waitForResponse((response) => {
     const url = new URL(response.url())
     return url.pathname.includes(urlPattern) && response.request().method() !== 'GET'
-  }, { timeout: ACTION_TIMEOUT_MS })
+  }, { timeout: scaleTimeout(ACTION_TIMEOUT_MS) })
   await action()
   const response = await responsePromise
   const outcome = await inspectBusinessResponse(response, label)
@@ -179,7 +180,7 @@ async function chooseContactCollectionInDesigner(page, logger) {
 
   const collectDialog = page.getByRole('dialog').filter({ hasText: /是否收录联系人|是否收錄聯絡人/ })
   const collectDialogVisible = await collectDialog
-    .waitFor({ state: 'visible', timeout: 5_000 })
+    .waitFor({ state: 'visible', timeout: scaleTimeout(5_000) })
     .then(() => true)
     .catch(() => false)
   if (collectDialogVisible) {
@@ -190,7 +191,7 @@ async function chooseContactCollectionInDesigner(page, logger) {
 
   const replaceDialog = page.getByRole('dialog').filter({ hasText: /联系人信息替换确认|聯絡人資訊替換確認/ })
   const replaceDialogVisible = await replaceDialog
-    .waitFor({ state: 'visible', timeout: collectDialogVisible ? 5_000 : 1_000 })
+    .waitFor({ state: 'visible', timeout: scaleTimeout(collectDialogVisible ? 5_000 : 1_000) })
     .then(() => true)
     .catch(() => false)
   if (replaceDialogVisible) {
@@ -230,7 +231,7 @@ async function ensureIgnoreStrategyInSettings(page, logger) {
   await expect(basicSettingsStep, '顶部步骤导航中应有唯一的“基础设置”入口').toHaveCount(1)
   await expect(basicSettingsStep, '“基础设置”步骤应可点击').toBeVisible()
   await basicSettingsStep.click()
-  await page.waitForURL(/\/form-activity\/settings\?[^#]*id=/, { timeout: NAVIGATION_TIMEOUT_MS })
+  await page.waitForURL(/\/form-activity\/settings\?[^#]*id=/, { timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) })
   await page.locator('[data-menu-key="collect-contact"]').click()
 
   const switchControl = page.getByRole('switch', { name: /是否收录联系人开关|是否收錄聯絡人開關/ })
@@ -305,8 +306,8 @@ export async function run({
     })
     await networkObserver.ready
     page = await context.newPage()
-    page.setDefaultTimeout(ACTION_TIMEOUT_MS)
-    page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS)
+    page.setDefaultTimeout(scaleTimeout(ACTION_TIMEOUT_MS))
+    page.setDefaultNavigationTimeout(scaleTimeout(NAVIGATION_TIMEOUT_MS))
 
     let businessRequestCount = 0
     let authenticatedRequestCount = 0
@@ -340,7 +341,7 @@ export async function run({
       () => page.getByText(/从空白表单开始|從空白表單開始/, { exact: true }).click(),
       '通过页面创建空白表单',
     )
-    await page.waitForURL(/\/form-activity\/designer\?[^#]*id=/, { timeout: NAVIGATION_TIMEOUT_MS })
+    await page.waitForURL(/\/form-activity\/designer\?[^#]*id=/, { timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) })
     formId = new URL(page.url()).searchParams.get('id') || String(createResponse.body?.data?.id ?? '')
     if (!formId) throw new Error('创建表单后 URL 或响应中未返回表单 id')
     logger('success', '已通过页面进入表单设计器', { formId })
@@ -351,7 +352,7 @@ export async function run({
 
     const initialCollectDialog = page.getByRole('dialog').filter({ hasText: /是否收录联系人|是否收錄聯絡人/ })
     const initialDialogVisible = await initialCollectDialog
-      .waitFor({ state: 'visible', timeout: 3_000 })
+      .waitFor({ state: 'visible', timeout: scaleTimeout(3_000) })
       .then(() => true)
       .catch(() => false)
     if (initialDialogVisible) {
@@ -386,7 +387,7 @@ export async function run({
     const itemSavePromise = page.waitForResponse((response) => {
       const url = new URL(response.url())
       return response.request().method() === 'PUT' && url.pathname.endsWith(`/be/form/${formId}/items`)
-    }, { timeout: ACTION_TIMEOUT_MS })
+    }, { timeout: scaleTimeout(ACTION_TIMEOUT_MS) })
     await page.getByRole('button', { name: /保存草稿|儲存草稿/ }).click()
     const itemSaveResponse = await itemSavePromise
     await inspectBusinessResponse(itemSaveResponse, '保存草稿')
@@ -402,12 +403,12 @@ export async function run({
     const publishPromise = page.waitForResponse((response) => {
       const url = new URL(response.url())
       return response.request().method() === 'POST' && url.pathname.endsWith(`/be/form/${formId}/publish`)
-    }, { timeout: ACTION_TIMEOUT_MS })
+    }, { timeout: scaleTimeout(ACTION_TIMEOUT_MS) })
     await page.getByRole('button', { name: /发布|發佈/, exact: true }).click()
     const publishResponse = await publishPromise
     const publishOutcome = await inspectBusinessResponse(publishResponse, '发布表单')
     const publishBody = publishOutcome.body
-    await page.waitForURL(/\/form-activity\/list(?:[/?#]|$)/, { timeout: NAVIGATION_TIMEOUT_MS })
+    await page.waitForURL(/\/form-activity\/list(?:[/?#]|$)/, { timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) })
     logger('success', '表单发布成功并已回到列表页')
 
     networkObserver.setPhase('已发布列表验证')

@@ -28,6 +28,7 @@ import {
   assertSubmissionPayload,
   assertVisibleSubmissionResult,
   buildFormUrl,
+  createSubmissionAssertions,
   createTestData,
   dismissPublicErrorDialog,
   indexSubmissionEntries,
@@ -440,6 +441,20 @@ test('creates unique answers for the main contact and nested field-group contact
   assert.deepEqual(data.checkboxIndexes, [0, 1, 2])
   assert.equal(data.nps, 10)
   assert.equal(data.matrix[2][2], '题目3-项目3答案')
+})
+
+test('builds the downstream submission assertion contract with both contact names', () => {
+  const data = createTestData(1787048650389)
+
+  assert.deepEqual(createSubmissionAssertions(EXPECTED_FORM_TITLE, data), {
+    title: EXPECTED_FORM_TITLE,
+    primaryContactName: data.username,
+    groupContactName: data.groupUsername,
+    fields: {
+      '姓名[1]': data.username,
+      '姓名[2]': data.groupUsername,
+    },
+  })
 })
 
 test('checks the native email format boundary and restores a valid value before pagination', async () => {

@@ -17,9 +17,13 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import RunRecordDetailDrawer from '@/components/RunRecordDetailDrawer.vue'
 import type { RunRecord, RunRecordStatus } from '@/domain/run-record'
 import { services } from '@/services/container'
+import { readRunHistoryTabs, resolveRunHistoryTabs, RUN_HISTORY_TABS_KEY, type RunHistoryEnvironment } from '@/services/run-records/run-history-tabs'
 import { pendingRunScriptCount } from '@/services/run-records/run-record-progress'
 
 const records = ref<RunRecord[]>([])
+const configuredEnvironments = ref<RunHistoryEnvironment[]>([])
+const tabIds = ref<string[] | null>(null)
+const environmentTabs = computed(() => resolveRunHistoryTabs(configuredEnvironments.value, tabIds.value))
 const loading = ref(true)
 const keyword = ref('')
 const statusFilter = ref<'all' | RunRecordStatus>('all')
@@ -33,6 +37,7 @@ const stoppingRecordIds = ref<Set<string>>(new Set())
 const recordsRefreshing = ref(false)
 const pollIntervalMs = 1_000
 let detailRequestSequence = 0
+let detailRefreshing = false
 let pollTimer: number | undefined
 
 const statusMap: Record<RunRecordStatus, { label: string; type: 'success' | 'warning' | 'danger' | 'info' }> = {
@@ -46,21 +51,26 @@ const statusMap: Record<RunRecordStatus, { label: string; type: 'success' | 'war
 type SummaryStatus = Extract<RunRecordStatus, 'passed' | 'partial' | 'failed'>
 
 const environments = computed(() => {
-  const map = new Map(records.value.map((record) => [record.environment.id, record.environment]))
+  const map = new Map([...records.value.map((record) => record.environment), ...configuredEnvironments.value]
+    .map((environment) => [environment.id, environment]))
   return [...map.values()]
 })
 
+const environmentRecords = computed(() => records.value.filter((record) => (
+  environmentFilter.value === 'all' || record.environment.id === environmentFilter.value
+)))
+
 const summary = computed(() => {
-  if (records.value.length === 0) {
+  if (environmentRecords.value.length === 0) {
     return { total: null, scriptCount: null, passed: null, partial: null, failed: null }
   }
-  const scriptCount = records.value.reduce((total, record) => total + record.counts.total, 0)
+  const scriptCount = environmentRecords.value.reduce((total, record) => total + record.counts.total, 0)
   return {
-    total: records.value.length,
+    total: environmentRecords.value.length,
     scriptCount,
-    passed: records.value.filter((record) => record.status === 'passed').length,
-    partial: records.value.filter((record) => record.status === 'partial').length,
-    failed: records.value.filter((record) => record.status === 'failed').length,
+    passed: environmentRecords.value.filter((record) => record.status === 'passed').length,
+    partial: environmentRecords.value.filter((record) => record.status === 'partial').length,
+    failed: environmentRecords.value.filter((record) => record.status === 'failed').length,
   }
 })
 
@@ -139,25 +149,34 @@ async function loadRecords(showSuccess = false, silent = false): Promise<void> {
   if (recordsRefreshing.value) return
   recordsRefreshing.value = true
   if (!silent) loading.value = true
-  const openDetailId = detailVisible.value && detailRecord.value?.status === 'running'
-    ? detailRecord.value.id
-    : undefined
+  void refreshOpenDetail()
 
   try {
-    const [nextRecords, nextDetail] = await Promise.all([
-      services.runRecords.list(),
-      openDetailId ? services.runRecords.get(openDetailId) : Promise.resolve(null),
-    ])
-    applyRecordList(nextRecords)
-    if (openDetailId && detailVisible.value && detailRecord.value?.id === openDetailId && nextDetail) {
-      applyRecord(nextDetail)
-    }
+    applyRecordList(await services.runRecords.list())
     if (showSuccess) ElMessage.success('运行记录已刷新')
   } catch {
     if (!silent) ElMessage.error('运行记录加载失败')
   } finally {
     recordsRefreshing.value = false
     if (!silent) loading.value = false
+  }
+}
+
+async function refreshOpenDetail(): Promise<void> {
+  if (detailRefreshing || !detailVisible.value || detailRecord.value?.status !== 'running') return
+  const id = detailRecord.value.id
+  const requestSequence = detailRequestSequence
+  detailRefreshing = true
+  try {
+    const detail = await services.runRecords.get(id)
+    if (detail && detailVisible.value && detailRecord.value?.id === id
+      && requestSequence === detailRequestSequence) {
+      applyRecord(detail)
+    }
+  } catch {
+    // A failed detail request must not block the list's live counters; retry on the next poll.
+  } finally {
+    detailRefreshing = false
   }
 }
 
@@ -261,7 +280,24 @@ function formatDuration(durationMs: number | null): string {
   return minutes ? `${minutes}分 ${seconds}秒` : `${seconds}秒`
 }
 
+async function loadEnvironmentTabs(): Promise<void> {
+  try {
+    configuredEnvironments.value = await services.environments.list()
+    tabIds.value = readRunHistoryTabs()
+  } catch {
+    ElMessage.error('环境 Tab 加载失败，请刷新页面重试')
+  }
+}
+
+function syncTabSettings(event: StorageEvent): void {
+  if (event.key === RUN_HISTORY_TABS_KEY || event.key === null) {
+    void loadEnvironmentTabs()
+  }
+}
+
 onMounted(() => {
+  void loadEnvironmentTabs()
+  window.addEventListener('storage', syncTabSettings)
   void loadRecords()
   pollTimer = window.setInterval(() => {
     if (recordsRefreshing.value) return
@@ -270,6 +306,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('storage', syncTabSettings)
   if (pollTimer !== undefined) window.clearInterval(pollTimer)
   detailRequestSequence += 1
 })
@@ -328,6 +365,13 @@ onBeforeUnmount(() => {
     </section>
 
     <section class="record-panel">
+      <div class="environment-tabs-bar">
+        <nav class="environment-tabs" aria-label="按环境筛选运行记录">
+          <button type="button" :class="{ 'is-active': environmentFilter === 'all' }" :aria-pressed="environmentFilter === 'all'" @click="environmentFilter = 'all'">全部环境</button>
+          <button v-for="environment in environmentTabs" :key="environment.id" type="button" :title="`${environment.name} · ${environment.code}`" :class="{ 'is-active': environmentFilter === environment.id }" :aria-pressed="environmentFilter === environment.id" :data-environment-id="environment.id" @click="environmentFilter = environment.id">{{ environment.name }}</button>
+        </nav>
+        <RouterLink class="configure-tabs" to="/settings/run-history">配置 Tab</RouterLink>
+      </div>
       <div class="toolbar">
         <div class="toolbar__filters">
           <el-input v-model="keyword" :prefix-icon="Search" clearable aria-label="搜索运行记录" placeholder="搜索批次号、脚本或错误" class="search-input" />
@@ -374,14 +418,14 @@ onBeforeUnmount(() => {
             <div class="environment-cell"><strong>{{ scope.row.environment.name }}</strong><code>{{ scope.row.environment.code }} · {{ scope.row.environment.apiBaseUrl }}</code></div>
           </template>
         </el-table-column>
-        <el-table-column label="脚本结果" min-width="280">
+        <el-table-column label="脚本结果" min-width="360">
           <template #default="scope">
             <div class="result-cell">
               <strong>{{ scope.row.counts.passed }} / {{ scope.row.counts.total }}</strong>
               <div
                 class="mini-distribution"
                 role="img"
-                :aria-label="`通过 ${scope.row.counts.passed}，部分通过 ${scope.row.counts.partial}，执行失败 ${scope.row.counts.failed}，未执行 ${scope.row.counts.skipped}，待完成 ${pendingRunScriptCount(scope.row.counts)}`"
+                :aria-label="`执行成功 ${scope.row.counts.passed}，部分通过 ${scope.row.counts.partial}，执行失败 ${scope.row.counts.failed}，未执行 ${scope.row.counts.skipped}，待完成 ${pendingRunScriptCount(scope.row.counts)}`"
               >
                 <span v-if="scope.row.counts.passed" aria-hidden="true" class="is-passed" :style="{ flex: scope.row.counts.passed }" />
                 <span v-if="scope.row.counts.partial" aria-hidden="true" class="is-partial" :style="{ flex: scope.row.counts.partial }" />
@@ -389,7 +433,7 @@ onBeforeUnmount(() => {
                 <span v-if="scope.row.counts.skipped" aria-hidden="true" class="is-skipped" :style="{ flex: scope.row.counts.skipped }" />
                 <span v-if="pendingRunScriptCount(scope.row.counts)" aria-hidden="true" class="is-pending" :style="{ flex: pendingRunScriptCount(scope.row.counts) }" />
               </div>
-              <span>部分通过 {{ scope.row.counts.partial }} · 执行失败 {{ scope.row.counts.failed }} · 未执行 {{ scope.row.counts.skipped }} · 通过率 {{ scope.row.analysis.passRate }}%</span>
+              <span aria-live="polite">执行成功 {{ scope.row.counts.passed }} · 部分通过 {{ scope.row.counts.partial }} · 执行失败 {{ scope.row.counts.failed }} · 未执行 {{ scope.row.counts.skipped }} · 通过率 {{ scope.row.analysis.passRate }}%</span>
             </div>
           </template>
         </el-table-column>
@@ -445,6 +489,14 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.environment-tabs-bar { display: flex; align-items: center; gap: 16px; padding: 0 20px; border-bottom: 1px solid var(--color-border-light); }
+.environment-tabs { display: flex; flex: 1; min-width: 0; gap: 24px; overflow-x: auto; }
+.environment-tabs button { flex-shrink: 0; padding: 16px 0; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--color-text-secondary); font: inherit; font-size: 14px; cursor: pointer; }
+.environment-tabs button.is-active { color: var(--color-primary); border-bottom-color: var(--color-primary); font-weight: 600; }
+.environment-tabs button:hover { color: var(--color-primary); }
+.environment-tabs button:focus-visible { outline: 2px solid var(--color-primary); outline-offset: -2px; }
+.configure-tabs { flex-shrink: 0; color: var(--color-primary); font-size: 13px; text-decoration: none; }
+
 .run-history-page {
   min-width: 0;
   color: var(--color-text-primary, #1f2a44);

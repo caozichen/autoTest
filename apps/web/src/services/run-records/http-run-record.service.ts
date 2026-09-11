@@ -230,6 +230,7 @@ export class HttpRunRecordService implements RunRecordService {
       for (let attempt = 0; attempt <= this.conflictRetries; attempt += 1) {
         const current = await this.fetchRecord(id)
         if (!current) throw new Error('运行记录不存在或已被删除')
+        if (current.status !== 'running') return current
         const next = await transition(this.createTransformer([current]))
         try {
           return await this.patchRecord(current, next)

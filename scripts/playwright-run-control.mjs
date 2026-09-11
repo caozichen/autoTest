@@ -1,3 +1,4 @@
+import { scaleTimeout } from './support/environment-timeouts.mjs'
 const CLOSE_STEP_TIMEOUT_MS = 2_500
 
 function cancellationError(signal) {
@@ -24,7 +25,7 @@ function reportCloseWarning(logger, message) {
 
 async function settleWithin(label, action, {
   logger,
-  timeoutMs = CLOSE_STEP_TIMEOUT_MS,
+  timeoutMs = scaleTimeout(CLOSE_STEP_TIMEOUT_MS),
 } = {}) {
   let timer
   const deadline = new Promise((resolve) => {

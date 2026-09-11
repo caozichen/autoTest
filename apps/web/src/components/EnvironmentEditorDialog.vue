@@ -19,7 +19,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   'update:modelValue': [value: boolean]
-  save: [draft: EnvironmentDraft]
+  save: [draft: EnvironmentDraft, manageSession?: boolean]
 }>()
 
 const formRef = ref<FormInstance>()
@@ -36,6 +36,7 @@ function emptyDraft(): EnvironmentDraft {
     ignoreHTTPSErrors: false,
     enabled: true,
     auth: {
+      strategy: 'login',
       mode: 'mobile-code',
       method: 'POST',
       timeoutMs: 30_000,
@@ -94,6 +95,7 @@ watch(
   ([visible, environment]) => {
     if (!visible) return
     const source = environment ? cloneEnvironmentDraft(environment) : emptyDraft()
+    source.auth.strategy ??= 'login'
     Object.assign(form, source)
     activeTab.value = 'basic'
     formRef.value?.clearValidate()
@@ -116,14 +118,14 @@ function removeVariable(id: string): void {
   form.variables = form.variables.filter((variable) => variable.id !== id)
 }
 
-async function submit(): Promise<void> {
+async function submit(manageSession = false): Promise<void> {
   const valid = await formRef.value?.validate().catch(() => false)
   if (!valid) {
     activeTab.value = 'basic'
     return
   }
 
-  if (!form.auth.method || !form.auth.loginPath.trim()) {
+  if (form.auth.strategy !== 'reuse-session' && (!form.auth.method || !form.auth.loginPath.trim())) {
     activeTab.value = 'auth'
     ElMessage.warning('请填写登录请求方法和接口路径')
     return
@@ -131,14 +133,14 @@ async function submit(): Promise<void> {
 
   let requestBody
   try {
-    requestBody = parseEnvironmentRequestBody(form.auth.requestBody)
+    if (form.auth.strategy !== 'reuse-session') requestBody = parseEnvironmentRequestBody(form.auth.requestBody)
   } catch (error) {
     activeTab.value = 'auth'
     ElMessage.warning(error instanceof Error ? error.message : '请求体必须是合法的 JSON 对象')
     return
   }
 
-  if (!form.auth.tokenPath.trim() || !form.auth.tokenVariable.trim()) {
+  if ((form.auth.strategy !== 'reuse-session' && !form.auth.tokenPath.trim()) || !form.auth.tokenVariable.trim()) {
     activeTab.value = 'auth'
     ElMessage.warning('请完整填写响应变量名和响应路径')
     return
@@ -159,7 +161,7 @@ async function submit(): Promise<void> {
   }
 
   const draft = cloneEnvironmentDraft(form)
-  draft.auth.requestBody = formatEnvironmentRequestBody(requestBody)
+  if (requestBody) draft.auth.requestBody = formatEnvironmentRequestBody(requestBody)
   if (draft.auth.mode === 'mobile-code') {
     draft.auth.username = ''
     draft.auth.password = ''
@@ -167,7 +169,7 @@ async function submit(): Promise<void> {
     draft.auth.mobile = ''
     draft.auth.verifyCode = ''
   }
-  emit('save', draft)
+  emit('save', draft, manageSession)
 }
 </script>
 
@@ -220,52 +222,65 @@ async function submit(): Promise<void> {
         </el-tab-pane>
 
         <el-tab-pane label="登录与 Token" name="auth">
-          <div class="auth-hint">
-            编辑后的登录凭据保存在当前浏览器本地；测试登录的响应只在本次弹窗中展示，不会写入本地存储。
-          </div>
-          <div class="form-grid">
-            <el-form-item label="登录方式">
-              <el-select v-model="form.auth.mode">
-                <el-option label="手机号验证码" value="mobile-code" />
-                <el-option label="账号密码" value="password" />
-              </el-select>
-            </el-form-item>
-            <el-form-item label="请求方法">
-              <el-select v-model="form.auth.method">
-                <el-option label="POST" value="POST" />
-                <el-option label="PUT" value="PUT" />
-                <el-option label="PATCH" value="PATCH" />
-              </el-select>
-            </el-form-item>
-          </div>
-          <el-form-item label="请求超时（毫秒）">
-            <el-input-number v-model="form.auth.timeoutMs" :min="5000" :max="120000" :step="5000" controls-position="right" />
+          <el-form-item label="认证方式">
+            <el-select v-model="form.auth.strategy" aria-label="认证方式">
+              <el-option label="调用登录接口（原有方式）" value="login" />
+              <el-option label="复用已有登录态" value="reuse-session" />
+            </el-select>
           </el-form-item>
-          <el-form-item label="登录接口路径">
-            <el-input v-model="form.auth.loginPath" placeholder="/be/login/mobile" />
-            <code class="login-url-preview">{{ loginUrlPreview }}</code>
-          </el-form-item>
-          <el-form-item label="请求体（JSON）">
-            <el-input
-              v-model="form.auth.requestBody"
-              class="request-body-editor"
-              type="textarea"
-              :rows="8"
-              resize="vertical"
-              :spellcheck="false"
-              :placeholder="requestBodyPlaceholder"
-            />
-          </el-form-item>
-          <div class="form-grid">
-            <el-form-item label="登录成功判定路径（可选）">
-              <el-input v-model="form.auth.successPath" placeholder="code" />
-            </el-form-item>
-            <el-form-item label="成功期望值（可选）">
-              <el-input v-model="form.auth.successValue" placeholder="0" />
-            </el-form-item>
+          <div v-if="form.auth.strategy === 'reuse-session'" class="auth-hint">
+            <p>脚本使用你保存的 Token。Token 变化或失效后，在这里更新即可，后续运行会使用新的值。</p>
+            <el-button type="primary" :loading="saving" @click="submit(true)">配置／更新 Token</el-button>
+            <p>点击后先保存当前环境配置，再打开 Token 管理窗口，可更新或清除登录态。</p>
           </div>
+          <template v-else>
+            <div class="auth-hint">
+              编辑后的登录凭据保存在当前浏览器本地；测试登录的响应只在本次弹窗中展示，不会写入本地存储。
+            </div>
+            <div class="form-grid">
+              <el-form-item label="登录方式">
+                <el-select v-model="form.auth.mode">
+                  <el-option label="手机号验证码" value="mobile-code" />
+                  <el-option label="账号密码" value="password" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="请求方法">
+                <el-select v-model="form.auth.method">
+                  <el-option label="POST" value="POST" />
+                  <el-option label="PUT" value="PUT" />
+                  <el-option label="PATCH" value="PATCH" />
+                </el-select>
+              </el-form-item>
+            </div>
+            <el-form-item label="请求超时（毫秒）">
+              <el-input-number v-model="form.auth.timeoutMs" :min="5000" :max="120000" :step="5000" controls-position="right" />
+            </el-form-item>
+            <el-form-item label="登录接口路径">
+              <el-input v-model="form.auth.loginPath" placeholder="/be/login/mobile" />
+              <code class="login-url-preview">{{ loginUrlPreview }}</code>
+            </el-form-item>
+            <el-form-item label="请求体（JSON）">
+              <el-input
+                v-model="form.auth.requestBody"
+                class="request-body-editor"
+                type="textarea"
+                :rows="8"
+                resize="vertical"
+                :spellcheck="false"
+                :placeholder="requestBodyPlaceholder"
+              />
+            </el-form-item>
+            <div class="form-grid">
+              <el-form-item label="登录成功判定路径（可选）">
+                <el-input v-model="form.auth.successPath" placeholder="code" />
+              </el-form-item>
+              <el-form-item label="成功期望值（可选）">
+                <el-input v-model="form.auth.successValue" placeholder="0" />
+              </el-form-item>
+            </div>
+          </template>
           <div class="form-grid">
-            <el-form-item label="响应变量路径">
+            <el-form-item v-if="form.auth.strategy !== 'reuse-session'" label="响应变量路径">
               <el-input v-model="form.auth.tokenPath" placeholder="data.token" />
             </el-form-item>
             <el-form-item label="全局变量名">
@@ -276,7 +291,7 @@ async function submit(): Promise<void> {
             </el-form-item>
           </div>
           <div class="form-grid">
-            <el-form-item label="Token 类型路径（可选）">
+            <el-form-item v-if="form.auth.strategy !== 'reuse-session'" label="Token 类型路径（可选）">
               <el-input v-model="form.auth.tokenTypePath" placeholder="data.token_type" />
             </el-form-item>
             <el-form-item label="默认请求头前缀">
@@ -313,7 +328,7 @@ async function submit(): Promise<void> {
 
     <template #footer>
       <el-button :disabled="saving" @click="emit('update:modelValue', false)">取消</el-button>
-      <el-button type="primary" :loading="saving" @click="submit">保存环境</el-button>
+      <el-button type="primary" :loading="saving" @click="submit()">保存环境</el-button>
     </template>
   </el-dialog>
 </template>

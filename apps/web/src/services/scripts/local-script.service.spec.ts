@@ -314,6 +314,8 @@ describe('LocalScriptService', () => {
       tags: ['回归'],
       enabled: true,
     })
+    const createdAt = created.createdAt
+    expect(Number.isFinite(Date.parse(createdAt))).toBe(true)
 
     created.name = '外部修改'
     const stored = (await service.list()).find((script) => script.id === created.id)
@@ -341,6 +343,7 @@ describe('LocalScriptService', () => {
       enabled: false,
     })
     expect(updated.status).toBe('disabled')
+    expect(updated.createdAt).toBe(createdAt)
     expect(updated.entryFile).toBe('tests/updated.spec.ts')
     expect(updated.timeoutMs).toBe(180_000)
     expect(updated.inputParameters?.[0]?.value).toBe('20000')

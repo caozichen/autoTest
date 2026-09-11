@@ -151,7 +151,7 @@ export function createFullRunFormHtml({
     card(fieldKeys.ranking, '排序题', `
       <div class="fb-runtime-ranking-ranked-list"></div>
       ${['选项1', '选项2', '选项3'].map((option) => `
-        <button class="fb-runtime-ranking-item" type="button">${option}</button>`).join('')}`),
+        <button class="fb-runtime-ranking-item" type="button"><span class="fb-runtime-ranking-label">${option}</span></button>`).join('')}`),
     card(fieldKeys.rating, '评分题', Array.from({ length: 5 }, (_, index) => `
       <button class="rating-item" type="button" data-score="${index + 1}"><span>★</span></button>`).join('')),
     card(fieldKeys.nps, 'NPS', Array.from({ length: 10 }, (_, index) => `

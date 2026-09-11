@@ -9,7 +9,6 @@ import type {
   AutomationPipelineStep,
   PipelineParameterMapping,
 } from '@/domain/automation-pipeline'
-import type { TestEnvironment } from '@/domain/environment'
 import type { AutomationScript } from '@/domain/script'
 
 interface EditablePipelineStep extends AutomationPipelineStep {
@@ -19,7 +18,6 @@ interface EditablePipelineStep extends AutomationPipelineStep {
 interface EditablePipelineDraft {
   name: string
   description: string
-  environmentId: string
   steps: EditablePipelineStep[]
 }
 
@@ -27,7 +25,6 @@ const props = defineProps<{
   modelValue: boolean
   pipeline: AutomationPipeline | null
   scripts: AutomationScript[]
-  environments: TestEnvironment[]
 }>()
 
 const emit = defineEmits<{
@@ -49,7 +46,6 @@ function emptyDraft(): EditablePipelineDraft {
   return {
     name: '',
     description: '',
-    environmentId: '',
     steps: [],
   }
 }
@@ -73,7 +69,6 @@ const rules: FormRules<EditablePipelineDraft> = {
     { required: true, message: '请输入配置简介', trigger: 'blur' },
     { max: 200, message: '简介不能超过 200 个字符', trigger: 'blur' },
   ],
-  environmentId: [{ required: true, message: '请选择运行环境', trigger: 'change' }],
 }
 
 const selectedIds = computed(() => new Set(form.steps.map((step) => step.scriptId)))
@@ -86,7 +81,6 @@ watch(
 
     form.name = pipeline?.name ?? ''
     form.description = pipeline?.description ?? ''
-    form.environmentId = pipeline?.environmentId ?? ''
     form.steps = (pipeline?.steps ?? []).map(toEditableStep)
     selectedScriptIds.value = []
 
@@ -234,7 +228,6 @@ async function submit(): Promise<void> {
   const draft: AutomationPipelineDraft = {
     name: form.name.trim(),
     description: form.description.trim(),
-    environmentId: form.environmentId,
     steps: form.steps.map((step) => ({
       scriptId: step.scriptId,
       parameterMappings: step.parameterMappings.map<PipelineParameterMapping>((mapping) => ({
@@ -262,25 +255,6 @@ async function submit(): Promise<void> {
       <div class="basic-grid">
         <el-form-item label="配置名称" prop="name">
           <el-input v-model="form.name" maxlength="40" show-word-limit placeholder="请输入自动化配置名称" />
-        </el-form-item>
-        <el-form-item label="运行环境" prop="environmentId">
-          <el-select v-model="form.environmentId" filterable placeholder="请选择运行环境">
-            <el-option
-              v-for="environment in environments"
-              :key="environment.id"
-              :label="environment.name"
-              :value="environment.id"
-              :disabled="!environment.enabled"
-            >
-              <div class="option-row">
-                <span>{{ environment.name }}</span>
-                <code>{{ environment.code }}</code>
-              </div>
-            </el-option>
-            <template #empty>
-              <span class="select-empty">暂无可用环境</span>
-            </template>
-          </el-select>
         </el-form-item>
       </div>
 
@@ -464,7 +438,7 @@ async function submit(): Promise<void> {
 <style scoped>
 .basic-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(260px, 0.65fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 0 16px;
 }
 

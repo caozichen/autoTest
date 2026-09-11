@@ -36,6 +36,16 @@ function draft(): AutomationPipelineDraft {
 }
 
 describe('LocalAutomationPipelineService', () => {
+  it('creates and restores configurations without an environment binding', async () => {
+    const storage = new MemoryStorage()
+    const service = new LocalAutomationPipelineService(storage)
+    const input = draft()
+    delete input.environmentId
+    const created = await service.create(input)
+    expect(created.environmentId).toBeUndefined()
+    expect(await new LocalAutomationPipelineService(storage).get(created.id)).toEqual(created)
+  })
+
   it('starts empty, persists CRUD changes and restores them', async () => {
     const storage = new MemoryStorage()
     const times = [createdAt, updatedAt]

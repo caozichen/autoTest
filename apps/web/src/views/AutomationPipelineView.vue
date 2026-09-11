@@ -27,7 +27,7 @@ const scripts = ref<AutomationScript[]>([])
 const environments = ref<TestEnvironment[]>([])
 const loading = ref(true)
 const searchKeyword = ref('')
-const environmentFilter = ref('all')
+const selectedEnvironmentId = ref('')
 const currentPage = ref(1)
 const pageSize = 8
 const editorVisible = ref(false)
@@ -36,13 +36,10 @@ const runningPipelineIds = ref(new Set<string>())
 const stoppingPipelineIds = ref(new Set<string>())
 
 const scriptById = computed(() => new Map(scripts.value.map((script) => [script.id, script])))
-const environmentById = computed(() => new Map(environments.value.map((environment) => [environment.id, environment])))
+const selectedEnvironment = computed(() => environments.value.find((environment) => environment.id === selectedEnvironmentId.value && environment.enabled) ?? null)
 
 function issuesFor(pipeline: AutomationPipeline): string[] {
   const issues: string[] = []
-  const environment = environmentById.value.get(pipeline.environmentId)
-  if (!environment) issues.push('运行环境已不存在')
-  else if (!environment.enabled) issues.push('运行环境已停用')
 
   for (const step of pipeline.steps) {
     const script = scriptById.value.get(step.scriptId)
@@ -55,15 +52,12 @@ function issuesFor(pipeline: AutomationPipeline): string[] {
 const filteredPipelines = computed(() => {
   const keyword = searchKeyword.value.trim().toLowerCase()
   return pipelines.value.filter((pipeline) => {
-    const environment = environmentById.value.get(pipeline.environmentId)
-    const matchesEnvironment = environmentFilter.value === 'all' || pipeline.environmentId === environmentFilter.value
     const searchable = [
       pipeline.name,
       pipeline.description,
-      environment?.name ?? '',
       ...pipeline.steps.map((step) => scriptById.value.get(step.scriptId)?.name ?? step.scriptId),
     ]
-    return matchesEnvironment && (!keyword || searchable.some((value) => value.toLowerCase().includes(keyword)))
+    return (!keyword || searchable.some((value) => value.toLowerCase().includes(keyword)))
   })
 })
 
@@ -81,7 +75,7 @@ const summary = computed(() => ({
   ),
 }))
 
-watch([searchKeyword, environmentFilter], () => {
+watch(searchKeyword, () => {
   currentPage.value = 1
 })
 
@@ -96,6 +90,9 @@ async function loadData(showSuccess = false): Promise<void> {
     pipelines.value = nextPipelines
     scripts.value = nextScripts
     environments.value = nextEnvironments
+    if (!selectedEnvironment.value) {
+      selectedEnvironmentId.value = nextEnvironments.find((environment) => environment.active && environment.enabled)?.id ?? ''
+    }
     runningPipelineIds.value = new Set(nextPipelines
       .filter((pipeline) => services.automationPipelineExecution.isRunning(pipeline.id))
       .map((pipeline) => pipeline.id))
@@ -106,6 +103,16 @@ async function loadData(showSuccess = false): Promise<void> {
     ElMessage.error(error instanceof Error ? error.message : '自动化配置加载失败')
   } finally {
     loading.value = false
+  }
+}
+
+async function selectEnvironment(environmentId: string): Promise<void> {
+  try {
+    await services.environments.setActive(environmentId)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '环境切换失败')
+    selectedEnvironmentId.value = ''
+    await loadData()
   }
 }
 
@@ -146,6 +153,10 @@ async function removePipeline(pipeline: AutomationPipeline): Promise<void> {
 }
 
 function runPipeline(pipeline: AutomationPipeline): void {
+  if (!selectedEnvironment.value) {
+    ElMessage.error('请选择可用的运行环境')
+    return
+  }
   const issues = issuesFor(pipeline)
   if (issues.length > 0) {
     ElMessage.error(issues[0] ?? '自动化配置不可运行')
@@ -155,7 +166,7 @@ function runPipeline(pipeline: AutomationPipeline): void {
 
   let task: ReturnType<typeof services.automationPipelineExecution.run>
   try {
-    task = services.automationPipelineExecution.run(pipeline)
+    task = services.automationPipelineExecution.run(pipeline, selectedEnvironment.value.id)
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '自动化配置运行失败')
     return
@@ -274,6 +285,33 @@ onMounted(() => loadData())
       </div>
     </section>
 
+    <section class="execution-environment" :class="{ 'execution-environment--missing': !selectedEnvironment }">
+      <span class="execution-environment__icon"><el-icon :size="20"><Setting /></el-icon></span>
+      <div class="execution-environment__label">
+        <strong>运行环境</strong>
+        <span>选择本次执行环境，所有步骤使用同一环境</span>
+      </div>
+      <el-select
+        v-model="selectedEnvironmentId"
+        class="environment-select"
+        placeholder="请选择运行环境"
+        @change="selectEnvironment"
+      >
+        <el-option
+          v-for="environment in environments.filter((environment) => environment.enabled)"
+          :key="environment.id"
+          :label="`${environment.name} · ${environment.code}`"
+          :value="environment.id"
+        />
+      </el-select>
+      <div v-if="selectedEnvironment" class="execution-environment__endpoint">
+        <code>{{ selectedEnvironment.apiBaseUrl }}</code>
+        <span>Token → {{ selectedEnvironment.auth.tokenVariable || '未配置' }}</span>
+      </div>
+      <span v-else class="execution-environment__warning">未选择环境，暂不能运行配置</span>
+      <el-button text :icon="Setting" @click="router.push('/environments')">管理环境</el-button>
+    </section>
+
     <section class="automation-panel">
       <div class="toolbar">
         <div class="toolbar__filters">
@@ -281,21 +319,11 @@ onMounted(() => loadData())
             v-model="searchKeyword"
             :prefix-icon="Search"
             clearable
-            placeholder="搜索配置、脚本或环境"
+            placeholder="搜索配置或脚本"
             class="search-input"
           />
-          <el-select v-model="environmentFilter" class="environment-filter" aria-label="按运行环境筛选">
-            <el-option label="全部环境" value="all" />
-            <el-option
-              v-for="environment in environments"
-              :key="environment.id"
-              :label="environment.name"
-              :value="environment.id"
-            />
-          </el-select>
         </div>
         <div class="toolbar__actions">
-          <el-button :icon="Setting" @click="router.push('/environments')">管理环境</el-button>
           <el-tooltip content="刷新列表" placement="top">
             <el-button
               circle
@@ -339,15 +367,6 @@ onMounted(() => loadData())
           </template>
         </el-table-column>
 
-        <el-table-column label="运行环境" min-width="230">
-          <template #default="scope">
-            <div v-if="environmentById.get(scope.row.environmentId)" class="environment-info">
-              <strong>{{ environmentById.get(scope.row.environmentId)?.name }}</strong>
-              <code>{{ environmentById.get(scope.row.environmentId)?.apiBaseUrl }}</code>
-            </div>
-            <el-tag v-else type="danger" effect="light">环境已删除</el-tag>
-          </template>
-        </el-table-column>
 
         <el-table-column label="传参" width="120" align="center">
           <template #default="scope">
@@ -374,12 +393,12 @@ onMounted(() => loadData())
         <el-table-column label="操作" width="200" fixed="right">
           <template #default="scope">
             <div class="row-actions">
-              <el-tooltip :content="runningPipelineIds.has(scope.row.id) ? '正在运行' : (issuesFor(scope.row)[0] ?? '按顺序运行')" placement="top">
+              <el-tooltip :content="runningPipelineIds.has(scope.row.id) ? '正在运行' : (issuesFor(scope.row)[0] ?? (selectedEnvironment ? '按顺序运行' : '请选择运行环境'))" placement="top">
                 <span>
                   <el-button
                     text
                     :icon="VideoPlay"
-                    :disabled="issuesFor(scope.row).length > 0 || runningPipelineIds.has(scope.row.id)"
+                    :disabled="!selectedEnvironment || issuesFor(scope.row).length > 0 || runningPipelineIds.has(scope.row.id)"
                     aria-label="运行自动化配置"
                     @click="runPipeline(scope.row)"
                   />
@@ -432,13 +451,90 @@ onMounted(() => loadData())
       v-model="editorVisible"
       :pipeline="editingPipeline"
       :scripts="scripts"
-      :environments="environments"
       @save="savePipeline"
     />
   </div>
 </template>
 
 <style scoped>
+.execution-environment {
+  display: flex;
+  min-height: 84px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 12px 16px;
+  border: 1px solid #d9e4f5;
+  border-radius: var(--radius-card);
+  background: #f7faff;
+}
+
+.execution-environment--missing {
+  border-color: #f0d9b5;
+  background: #fffaf2;
+}
+
+.execution-environment__icon {
+  display: grid;
+  width: 46px;
+  height: 46px;
+  flex: 0 0 46px;
+  place-items: center;
+  color: var(--color-primary);
+  border-radius: 5px;
+  background: var(--color-primary-soft);
+}
+
+.execution-environment__label {
+  min-width: 166px;
+}
+
+.execution-environment__label strong,
+.execution-environment__label span,
+.execution-environment__endpoint code,
+.execution-environment__endpoint span {
+  display: block;
+}
+
+.execution-environment__label strong {
+  color: var(--color-text-primary);
+  font-size: var(--font-md);
+}
+
+.execution-environment__label span,
+.execution-environment__endpoint span {
+  margin-top: 4px;
+  color: var(--color-text-muted);
+  font-size: var(--font-caption);
+}
+
+.environment-select {
+  width: 280px;
+  flex: 0 0 280px;
+}
+
+.execution-environment__endpoint {
+  min-width: 0;
+  flex: 1;
+}
+
+.execution-environment__endpoint code {
+  overflow: hidden;
+  color: #315fbd;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: var(--font-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.execution-environment__warning {
+  flex: 1;
+  color: var(--color-warning);
+  font-size: var(--font-sm);
+}
+.execution-environment { flex-wrap: wrap; }
+
 .automation-page {
   min-width: 0;
 }
@@ -559,7 +655,6 @@ onMounted(() => loadData())
 }
 
 .search-input { width: min(420px, 38vw); }
-.environment-filter { width: 210px; }
 
 .automation-table { width: 100%; }
 
@@ -637,18 +732,6 @@ onMounted(() => loadData())
 }
 .step-flow small { color: var(--color-primary); font-size: var(--font-caption); white-space: nowrap; }
 
-.environment-info strong,
-.environment-info code { display: block; }
-.environment-info strong { color: var(--color-text-secondary); font-size: var(--font-sm); }
-.environment-info code {
-  overflow: hidden;
-  margin-top: 6px;
-  color: var(--color-text-muted);
-  font-size: var(--font-xs);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .row-actions { gap: 1px; }
 .row-actions :deep(.el-button) { width: 40px; height: 40px; margin: 0; }
 
@@ -700,8 +783,9 @@ onMounted(() => loadData())
   .summary-strip > div:last-child { border-bottom: 0; }
   .toolbar__filters,
   .toolbar__actions { align-items: stretch; flex-direction: column; }
-  .search-input,
-  .environment-filter { width: 100%; }
+  .search-input { width: 100%; }
+  .environment-select { width: 100%; flex: 1 1 100%; }
+  .execution-environment__endpoint { flex: 1 1 100%; }
   .table-footer :deep(.el-pagination__total) { display: none; }
 }
 </style>

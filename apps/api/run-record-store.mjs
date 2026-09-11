@@ -382,6 +382,9 @@ export class RunRecordFileStore {
     this.now = now
     this.staleAfterMs = staleAfterMs
     this.warningLogger = warningLogger
+    this.runnerActivityProvider = null
+    this.runnerRecoveryGraceMs = 120_000
+    this.runnerStartedAt = this.now().getTime()
     this.records = new Map()
     this.readyPromise = null
     this.mutationTail = Promise.resolve()
@@ -445,6 +448,24 @@ export class RunRecordFileStore {
           code: 'RUN_RECORD_CONFLICT',
         })
       }
+      // Runner metadata is authoritative and is not part of the frontend schema.
+      if (current.runnerTracking) record.runnerTracking = structuredClone(current.runnerTracking)
+      else delete record.runnerTracking
+      let restoredRunnerResult = false
+      record.scripts = record.scripts.map((script) => {
+        const previous = current.scripts.find((item) => item.id === script.id)
+        if (previous && current.runnerTracking?.completedScriptIds?.includes(script.id)
+          && ['queued', 'running'].includes(script.status)) {
+          restoredRunnerResult = true
+          return structuredClone(previous)
+        }
+        return script
+      })
+      if (restoredRunnerResult) {
+        record.logs = [...record.logs.filter((log) => log.scope !== 'script'), ...record.scripts.flatMap((script) => script.logs)]
+        record.counts = recoveredCounts(record.scripts)
+        record.analysis = recoveredAnalysis(record.scripts, record.logs)
+      }
       await this.writeRecord(record)
       return structuredClone(record)
     })
@@ -470,6 +491,113 @@ export class RunRecordFileStore {
         importedIds,
         skippedIds,
       }
+    })
+  }
+
+  setRunnerActivityProvider(provider, { graceMs = 120_000 } = {}) {
+    this.runnerActivityProvider = provider
+    this.runnerRecoveryGraceMs = graceMs
+    this.runnerStartedAt = this.now().getTime()
+  }
+
+  async maintainRunnerRecords() {
+    return this.mutate(() => this.recoverStaleRecords())
+  }
+
+  async startRunnerStep(recordId, scriptId) {
+    return this.mutate(async () => {
+      const source = this.records.get(recordId)
+      if (!source || source.status !== 'running') return null
+      const record = structuredClone(source)
+      const script = record.scripts.find((item) => item.id === scriptId)
+      if (!script) return null
+      const timestamp = this.now().toISOString()
+      script.status = 'running'
+      record.runnerTracking = { ...record.runnerTracking, lastSeenAt: timestamp }
+      record.updatedAt = timestamp
+      record.revision += 1
+      record.counts = recoveredCounts(record.scripts)
+      await this.writeRecord(record)
+      return structuredClone(record)
+    })
+  }
+
+  // Results are already redacted by the server. Keep the batch open for frontend
+  // variable extraction/validation; reconciliation finalizes it only after a grace period.
+  async saveRunnerStepResult(recordId, scriptId, result) {
+    return this.mutate(async () => {
+      const source = this.records.get(recordId)
+      if (!source || source.status !== 'running') return null
+      if (source.runnerTracking?.completedScriptIds?.includes(scriptId)) return structuredClone(source)
+      const record = structuredClone(source)
+      const script = record.scripts.find((item) => item.id === scriptId)
+      if (!script) return null
+      const timestamp = this.now().toISOString()
+      const interrupted = result.status === 'interrupted' || result.cancelled === true
+      script.status = interrupted ? 'skipped' : result.timedOut ? 'failed'
+        : ['passed', 'partial', 'failed'].includes(result.status) ? result.status
+          : result.ok ? 'passed' : 'failed'
+      script.durationMs = result.durationMs ?? 0
+      script.logs = (result.logs ?? []).map((log) => ({ ...log, id: this.logIdFactory(),
+        scope: 'script', scriptRecordId: script.recordId, scriptName: script.name }))
+      for (const field of ['assertions', 'apiResponses', 'resourceResponses', 'networkSummary']) {
+        if (result[field] !== undefined) script[field] = structuredClone(result[field])
+      }
+      const artifacts = new Map((script.artifacts ?? []).map((artifact) => [`${artifact.attemptId}:${artifact.relativePath}`, artifact]))
+      for (const artifact of result.artifacts ?? []) artifacts.set(`${artifact.attemptId}:${artifact.relativePath}`, artifact)
+      script.artifacts = [...artifacts.values()]
+      if (result.result && typeof result.result === 'object') script.output = structuredClone(result.result)
+      if (result.error) script.error = result.error
+      else delete script.error
+      record.logs = [...record.logs.filter((log) => log.scope !== 'script'), ...record.scripts.flatMap((item) => item.logs)]
+      record.runnerTracking = { ...record.runnerTracking, lastSeenAt: timestamp, lastResultAt: timestamp,
+        completedScriptIds: [...new Set([...(record.runnerTracking?.completedScriptIds ?? []), scriptId])],
+        ...(interrupted ? { interrupted: true } : {}) }
+      record.updatedAt = timestamp
+      record.revision += 1
+      record.durationMs = durationBetween(record.startedAt, timestamp)
+      record.counts = recoveredCounts(record.scripts)
+      record.analysis = recoveredAnalysis(record.scripts, record.logs)
+      await this.writeRecord(validateRunRecord(record))
+      return structuredClone(record)
+    })
+  }
+
+  async failPipelineStep(recordId, scriptId, result) {
+    assertSafeRunRecordId(recordId)
+    return this.mutate(async () => {
+      const current = this.records.get(recordId)
+      if (!current || current.status !== 'running') return current ? structuredClone(current) : null
+      if (!current.scripts.some((script) => script.id === scriptId)) return null
+      const record = structuredClone(current)
+      const finishedAt = this.now().toISOString()
+      record.scripts = record.scripts.map((script) => {
+        if (script.id !== scriptId) return script.status === 'queued'
+          ? { ...script, status: 'skipped', error: '前序步骤失败，未执行' } : script
+        const logs = (result.logs ?? []).map((log) => ({ ...log, id: this.logIdFactory(),
+          scope: 'script', scriptRecordId: script.recordId, scriptName: script.name }))
+        return { ...script, status: 'failed', durationMs: result.durationMs, logs,
+          error: result.error || '脚本执行失败', assertions: result.assertions ?? [],
+          apiResponses: result.apiResponses ?? [], resourceResponses: result.resourceResponses ?? [],
+          ...(result.networkSummary ? { networkSummary: result.networkSummary } : {}),
+          artifacts: result.artifacts ?? script.artifacts ?? [] }
+      })
+      record.status = 'failed'
+      record.failureStage = 'runner'
+      record.error = result.error || '脚本执行失败'
+      record.finishedAt = finishedAt
+      record.updatedAt = finishedAt
+      record.revision += 1
+      record.durationMs = durationBetween(record.startedAt, finishedAt)
+      record.logs = [...record.logs.filter((log) => log.scope !== 'script'),
+        ...record.scripts.flatMap((script) => script.logs),
+        { id: this.logIdFactory(), timestamp: finishedAt, level: 'error', scope: 'runner',
+          message: 'Runner 已保存自动化批次失败终态，后续步骤不再执行' }]
+      record.counts = recoveredCounts(record.scripts)
+      record.analysis = recoveredAnalysis(record.scripts, record.logs)
+      validateRunRecord(record)
+      await this.writeRecord(record)
+      return structuredClone(record)
     })
   }
 
@@ -537,27 +665,54 @@ export class RunRecordFileStore {
     if (!(checkedAt instanceof Date) || !Number.isFinite(checkedAt.getTime())) return
     for (const source of this.records.values()) {
       if (source.status !== 'running') continue
-      const lastUpdate = Date.parse(source.updatedAt)
-      if (!Number.isFinite(lastUpdate) || checkedAt.getTime() - lastUpdate <= this.staleAfterMs) continue
+      // Presence is stronger evidence than elapsed time or missing log output.
+      if (this.runnerActivityProvider?.().some((run) => run.executionId === source.id && !run.settled)) {
+        const heartbeatAt = Date.parse(source.runnerTracking?.lastSeenAt ?? '')
+        if (!Number.isFinite(heartbeatAt) || checkedAt.getTime() - heartbeatAt >= 10_000) {
+          const active = structuredClone(source)
+          active.runnerTracking = { ...active.runnerTracking, lastSeenAt: checkedAt.toISOString() }
+          active.updatedAt = checkedAt.toISOString()
+          active.durationMs = durationBetween(active.startedAt, active.updatedAt)
+          active.revision += 1
+          await this.writeRecord(active)
+        }
+        continue
+      }
+      const lastUpdate = Math.max(Date.parse(source.updatedAt), Date.parse(source.runnerTracking?.lastSeenAt ?? source.updatedAt))
+      const runnerManaged = this.runnerActivityProvider && (source.runnerTracking
+        || source.scripts.some((script) => script.status === 'running'))
+      const deadline = runnerManaged
+        ? Math.max(lastUpdate, this.runnerStartedAt) + this.runnerRecoveryGraceMs
+        : lastUpdate + this.staleAfterMs
+      if (!Number.isFinite(deadline) || checkedAt.getTime() <= deadline) continue
 
       const record = structuredClone(source)
       const finishedAt = checkedAt.toISOString()
-      record.status = 'interrupted'
-      record.failureStage = 'runner'
-      record.error = '页面或 Runner 在批次完成前中断'
-      record.finishedAt = finishedAt
+      const allResultsKnown = runnerManaged && record.scripts.every((script) => ['passed', 'partial', 'failed'].includes(script.status))
+      record.status = allResultsKnown && !record.runnerTracking?.interrupted
+        ? recoveredTerminalStatus(record.scripts) : 'interrupted'
+      if (record.status === 'interrupted') {
+        record.failureStage = 'runner'
+        record.error = runnerManaged
+          ? 'Runner 已无活动任务，批次未正常结束；未确认步骤的业务结果请人工核对后再重试'
+          : '页面或 Runner 在批次完成前中断'
+      }
+      record.finishedAt = allResultsKnown ? record.runnerTracking?.lastResultAt ?? source.updatedAt : finishedAt
       record.updatedAt = finishedAt
       record.revision += 1
-      record.durationMs = durationBetween(record.startedAt, finishedAt)
+      record.durationMs = durationBetween(record.startedAt, record.finishedAt)
       record.scripts = record.scripts.map((script) => script.status === 'queued' || script.status === 'running'
-        ? { ...script, status: 'skipped' }
+        ? { ...script, status: 'skipped', ...(runnerManaged ? { error: script.status === 'running'
+          ? '执行结果未确认，请核对业务结果后再重试' : '批次中断，后续步骤未执行' } : {}) }
         : script)
       record.logs.push({
         id: this.logIdFactory(),
         timestamp: finishedAt,
         level: 'warning',
         scope: 'runner',
-        message: '检测到未正常结束的运行批次，已标记为中断',
+        message: record.status === 'interrupted'
+          ? runnerManaged ? '检测到未正常结束的运行批次，已标记为中断；不会自动重跑' : '检测到未正常结束的运行批次，已标记为中断'
+          : 'Runner 已根据保存的全部脚本结果补写批次终态',
       })
       record.counts = recoveredCounts(record.scripts)
       record.analysis = recoveredAnalysis(record.scripts, record.logs)
