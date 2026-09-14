@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/date-time'
 import { computed, ref, watch } from 'vue'
 import { ElCollapse, ElCollapseItem, ElMessage } from 'element-plus'
 import type { TestEnvironment } from '@/domain/environment'
@@ -11,6 +12,13 @@ const token = ref('')
 const accountLabel = ref('')
 const expiresAt = ref('')
 const saved = ref<EnvironmentSession | null>(null)
+const savedExpiryInput = computed(() => {
+  if (saved.value?.expiresAt == null) return ''
+  const date = new Date(saved.value.expiresAt)
+  const pad = (value: number, length = 2) => String(value).padStart(length, '0')
+  return `${pad(date.getFullYear(), 4)}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+    + `T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}`
+})
 const status = computed(() => !saved.value ? '尚未导入匹配的登录态'
   : saved.value.expiresAt !== null && saved.value.expiresAt <= Date.now() ? '已过期，请更新'
     : '已保存，实际有效性以服务器校验为准')
@@ -24,16 +32,20 @@ watch(() => [props.modelValue, props.environment] as const, ([visible, environme
   saved.value = services.environmentSessions.get(environment)
   token.value = saved.value ? `${saved.value.scheme} ${saved.value.token}` : ''
   accountLabel.value = saved.value?.accountLabel ?? ''
-  expiresAt.value = ''
+  expiresAt.value = savedExpiryInput.value
 }, { immediate: true })
 
 function save(): void {
   if (!props.environment) return
   try {
+    // Keep the original instant when a repeated local hour is ambiguous during a DST change.
+    const expiry = expiresAt.value === savedExpiryInput.value
+      ? saved.value?.expiresAt ?? null
+      : expiresAt.value ? new Date(expiresAt.value).getTime() : null
     services.environmentSessions.save(props.environment, {
       token: token.value,
       accountLabel: accountLabel.value,
-      expiresAt: expiresAt.value ? new Date(expiresAt.value).getTime() : null,
+      expiresAt: expiry,
     })
     token.value = ''
     emit('changed')
@@ -70,8 +82,8 @@ function clear(): void {
       <el-alert :title="status" :type="saved ? 'info' : 'warning'" :closable="false" />
       <p class="session-target">绑定网站：{{ environment.baseUrl }}<br>绑定 API：{{ environment.apiBaseUrl }}</p>
       <p v-if="saved" class="session-details">
-        账号备注：{{ saved.accountLabel || '未填写' }} · 保存于 {{ new Date(saved.savedAt).toLocaleString() }}<br>
-        失效时间：{{ saved.expiresAt === null ? '未知，服务端可能提前使其失效' : new Date(saved.expiresAt).toLocaleString() }}
+        账号备注：{{ saved.accountLabel || '未填写' }} · 保存于 {{ formatDateTime(saved.savedAt) }}<br>
+        失效时间：{{ saved.expiresAt === null ? '未知，服务端可能提前使其失效' : formatDateTime(saved.expiresAt) }}
       </p>
       <el-collapse>
         <el-collapse-item title="如何从已登录的浏览器获取 Token？" name="help">
@@ -92,7 +104,7 @@ function clear(): void {
           <el-input v-model="accountLabel" maxlength="80" placeholder="例如：生产测试账号" />
         </el-form-item>
         <el-form-item label="失效时间（可选）">
-          <el-input v-model="expiresAt" type="datetime-local" aria-label="失效时间" />
+          <el-input v-model="expiresAt" type="datetime-local" step="0.001" aria-label="失效时间" />
         </el-form-item>
       </el-form>
       <p class="session-details">Token 保存在当前浏览器的本地存储中，不是加密保险箱；不会明文写入运行日志。JWT 自带的过期时间优先于更晚的手动时间。</p>

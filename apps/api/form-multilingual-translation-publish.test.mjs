@@ -14,6 +14,7 @@ import {
   TARGET_LANGUAGE_CODES,
   analyzeTranslationWorkspace,
   assertPublishedListRecord,
+  assertSourceFormDetail,
   assertTranslationWorkspace,
   buildPublicPreviewUrl,
   buildTranslationUrl,
@@ -166,6 +167,137 @@ function publicationReadyResponse(options = {}) {
   ]
   return response
 }
+
+const LEGACY_DISABLED_TRANSLATION_SECTIONS = [
+  'submission_period', 'submission_quota', 'add_to_cart_button_text',
+  'terms_of_service', 'privacy_policy', 'payment_alert',
+  'blacklist_whitelist_message', 'customized_feedback',
+]
+
+function sourceFormContractPayload(otherSections, formOverrides = {}) {
+  return { code: 0, data: {
+    form: {
+      form_id: 'contract-form', title: '翻译配置回归', source_language: 'zh_CN',
+      current_revision_no: 1, is_activity: 2,
+      ...formOverrides,
+      translation: { untranslatable_sections: {
+        form_structure: [],
+        other_translation: otherSections,
+        email_translation: [
+          'admin_form_submitted_success', 'admin_activity_submitted_success',
+          'admin_submission_audit_approving', 'user_form_submitted_success',
+          'user_activity_submitted_success', 'user_receipt_sent',
+          'user_submission_audit_rejected', 'admin_form_audit_approved',
+          'admin_form_audit_approving', 'admin_form_audit_rejected',
+        ],
+      } },
+    },
+    items: [{ item_key: 'name', type_code: 'input', label: '姓名', revision_no: 1 }],
+  } }
+}
+
+function sourceFormContractAssertions(payload, options = {}) {
+  const assertions = []
+  runWithAssertionRecorder('form-multilingual-translation-publish', (entry) => assertions.push(entry), () => {
+    assertSourceFormDetail(payload, 'contract-form', options)
+  })
+  return assertions.filter((entry) => entry.status === 'failed')
+}
+
+test('accepts the expanded disabled sections for a current ordinary form', () => {
+  const payload = sourceFormContractPayload([
+    ...LEGACY_DISABLED_TRANSLATION_SECTIONS, 'promotion_link', 'activity_location',
+  ])
+  assert.deepEqual(sourceFormContractAssertions(payload, { environmentCode: 'TEST' }), [])
+})
+
+test('keeps the verified legacy deployments strict and allows an explicit contract upgrade', () => {
+  const legacy = sourceFormContractPayload([...LEGACY_DISABLED_TRANSLATION_SECTIONS])
+  const current = sourceFormContractPayload([
+    ...LEGACY_DISABLED_TRANSLATION_SECTIONS, 'promotion_link', 'activity_location',
+  ])
+  for (const environmentCode of ['CN_PROD', 'HK_PROD']) {
+    assert.deepEqual(sourceFormContractAssertions(legacy, { environmentCode }), [])
+    assert.deepEqual(sourceFormContractAssertions(current, {
+      environmentCode, sectionContract: '20260914',
+    }), [])
+    assert.equal(sourceFormContractAssertions(current, { environmentCode }).length, 1)
+  }
+  assert.deepEqual(sourceFormContractAssertions(legacy, {
+    environmentCode: 'CUSTOM', sectionContract: 'legacy',
+  }), [])
+  assert.deepEqual(sourceFormContractAssertions(current, { environmentCode: 'CUSTOM' }), [])
+  assert.throws(() => sourceFormContractAssertions(current, { sectionContract: 'typo' }), /TRANSLATION_SECTION_CONTRACT/)
+})
+
+test('derives promotion and activity availability independently from the form settings', () => {
+  for (const enabled of [1, 2]) {
+    for (const isActivity of [1, 2]) {
+      const excluded = [...LEGACY_DISABLED_TRANSLATION_SECTIONS]
+      if (enabled === 2) excluded.push('promotion_link')
+      if (isActivity === 2) excluded.push('activity_location')
+      const payload = sourceFormContractPayload(excluded, {
+        is_activity: isActivity,
+        notification_config: { promotion_link: { enabled, button_text: '了解更多' } },
+      })
+      assert.deepEqual(sourceFormContractAssertions(payload), [])
+    }
+  }
+})
+
+test('derives existing other-translation switches and preserves the submit-button default', () => {
+  const form = {
+    is_activity: '1',
+    submit_config: { time_range_close_rule: true, submission_quota: 1, blacklist_and_whitelist: { enabled: '1' } },
+    theme_config: { submit_button: { text: '提交', enabled: null }, add_to_cart_button: { enabled: 1 } },
+    common_config: { terms_of_service: { enabled: 1 }, privacy_policy: { enabled: 1 } },
+    payment_config: { payment_method: { payment_alert: { enabled: 1 } } },
+    notification_config: { customized_feedback: { enabled: 1 }, promotion_link: { enabled: '1' } },
+  }
+  assert.deepEqual(sourceFormContractAssertions(sourceFormContractPayload([], form)), [])
+  form.theme_config.submit_button.enabled = 2
+  assert.deepEqual(sourceFormContractAssertions(sourceFormContractPayload(['submit_button_text'], form)), [])
+  assert.equal(sourceFormContractAssertions(sourceFormContractPayload([], form)).length, 1)
+})
+
+test('rejects missing, duplicate, unknown and incorrectly excluded current sections', () => {
+  const expected = [...LEGACY_DISABLED_TRANSLATION_SECTIONS, 'promotion_link', 'activity_location']
+  const invalid = [
+    [...LEGACY_DISABLED_TRANSLATION_SECTIONS],
+    [...LEGACY_DISABLED_TRANSLATION_SECTIONS, 'promotion_link'],
+    [...LEGACY_DISABLED_TRANSLATION_SECTIONS, 'activity_location'],
+    expected.slice(1),
+    [...expected, 'promotion_link'],
+    [...expected, 'unknown_section'],
+    [...expected, 'weixin_share'],
+    [...expected].reverse(),
+    null,
+  ]
+  for (const otherSections of invalid) {
+    const failures = sourceFormContractAssertions(sourceFormContractPayload(otherSections))
+    assert.equal(failures.length, 1, JSON.stringify(otherSections))
+    assert.match(failures[0].name, /other_translation/)
+  }
+  const enabledPromotion = sourceFormContractPayload(expected, {
+    notification_config: { promotion_link: { enabled: 1 } },
+  })
+  assert.equal(sourceFormContractAssertions(enabledPromotion).length, 1)
+  const activity = sourceFormContractPayload(expected, { is_activity: 1 })
+  assert.equal(sourceFormContractAssertions(activity).length, 1)
+})
+
+test('retains the source structure and email exclusion assertions', () => {
+  const payload = sourceFormContractPayload([
+    ...LEGACY_DISABLED_TRANSLATION_SECTIONS, 'promotion_link', 'activity_location',
+  ])
+  payload.data.form.translation.untranslatable_sections.form_structure = ['form']
+  payload.data.form.translation.untranslatable_sections.email_translation.pop()
+  const failures = sourceFormContractAssertions(payload)
+  assert.deepEqual(failures.map((entry) => entry.name), [
+    '多语言设置中 form_structure 的不可翻译分区应符合产品契约',
+    '多语言设置中 email_translation 的不可翻译分区应符合产品契约',
+  ])
+})
 
 test('keeps a late response-watcher rejection handled when the action fails first', async () => {
   const responseWatcher = deferredPromise()
@@ -475,6 +607,16 @@ test('accepts simplified and traditional display labels for the zh_HK target lan
   assert.match('繁体中文', languageLabelPattern('zh_HK'))
   assert.match('繁體中文', languageLabelPattern('zh_HK'))
   assert.doesNotMatch('简体中文', languageLabelPattern('zh_HK'))
+})
+
+test('recognizes the English target in Chinese interfaces without matching other language labels', () => {
+  for (const label of ['English', '英文', '英语', '英語']) {
+    assert.equal(languageCodeForDisplayLabel(label), 'en_US', label)
+    assert.match(label, languageLabelPattern('en_US'))
+  }
+  for (const label of ['简体中文', '繁體中文', 'French', '英文说明', '非英文']) {
+    assert.doesNotMatch(label, languageLabelPattern('en_US'))
+  }
 })
 
 test('excludes system fields and sorts content fields before checking the full-form baseline', () => {

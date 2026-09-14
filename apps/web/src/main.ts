@@ -1,3 +1,4 @@
+import { installOverflowTooltips } from './utils/overflow-tooltip'
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import {
@@ -72,3 +73,6 @@ app.use(createPinia())
 app.use(router)
 elementPlugins.forEach((component) => app.use(component))
 app.mount('#app')
+
+const removeOverflowTooltips = installOverflowTooltips()
+if (import.meta.hot) import.meta.hot.dispose(removeOverflowTooltips)

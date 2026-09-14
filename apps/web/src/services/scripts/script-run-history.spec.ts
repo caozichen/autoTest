@@ -47,7 +47,7 @@ describe('restoreLatestScriptRuns', () => {
 
     expect(restored[0]).toMatchObject({
       status: 'passed',
-      lastRunAt: '2026-09-08 18:41',
+      lastRunAt: '2026-09-08 18:41:00',
       lastDuration: '01:05',
     })
     expect(scripts[0]).toMatchObject({

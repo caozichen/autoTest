@@ -288,6 +288,71 @@ test('terminal persistence failure retains the completed result and cancellation
   assert.equal((await records.get(input().executionId)).status, 'interrupted'); assert.equal(calls.length, 3)
 })
 
+for (const failCancellationWrite of [false, true]) {
+  test(`stop during terminal disk write is durable${failCancellationWrite ? ' after a save retry' : ''} without replaying steps`, async t => {
+    const { runner, records, calls, directory } = await fixture(t)
+    const writing = deferred(); const release = deferred()
+    t.after(() => release.resolve())
+    const writeFile = records.fileSystem.writeFile.bind(records.fileSystem)
+    let blocked = false; let rejected = false
+    records.fileSystem = { ...records.fileSystem, writeFile: async (path, serialized, options) => {
+      const record = JSON.parse(serialized)
+      if (record.status === 'passed' && !blocked) {
+        blocked = true; writing.resolve(); await release.promise
+      }
+      if (failCancellationWrite && record.status === 'interrupted' && !rejected) {
+        rejected = true
+        throw new Error('fixture cancellation write unavailable')
+      }
+      return writeFile(path, serialized, options)
+    } }
+    const data = input()
+    await runner.start(data)
+    const execution = runner.active.get(data.executionId)
+    await writing.promise
+    assert.equal(runner.list()[0].phase, 'saving')
+    assert.equal(runner.cancel(data.executionId, 'fixture stop during disk write'), true)
+    release.resolve()
+    await execution.completion
+    if (failCancellationWrite) {
+      assert.equal(rejected, true)
+      assert.equal(runner.list()[0].phase, 'saving')
+      assert.equal((await records.get(data.executionId)).status, 'running')
+      assert.equal((await records.list())[0].status, 'running')
+      await Promise.all([runner.maintain(), runner.maintain()])
+    }
+    const record = await records.get(data.executionId)
+    assert.equal(record.status, 'interrupted')
+    assert.match(record.error, /停止/)
+    assert.equal(record.counts.passed, 3)
+    assert.equal(calls.length, 3)
+    assert.equal(runner.list().length, 0)
+    assert.equal(runner.cancel(data.executionId, 'too late'), false)
+    const reloaded = new RunRecordFileStore({ directory })
+    assert.equal((await reloaded.get(data.executionId)).status, 'interrupted')
+    assert.equal((await runner.start(data)).accepted, false)
+    assert.equal(calls.length, 3)
+  })
+}
+
+test('stop after terminal commit is rejected even before the coordinator releases its lease', async t => {
+  const { runner, records, calls } = await fixture(t)
+  const save = records.finishRunnerPipeline.bind(records)
+  let cancellationAccepted
+  records.finishRunnerPipeline = async (...args) => {
+    const record = await save(...args)
+    assert.equal(runner.active.has(input().executionId), true)
+    assert.equal(runner.list().length, 0)
+    cancellationAccepted = runner.cancel(input().executionId, 'stop after commit')
+    return record
+  }
+  const { record } = await finish(runner, records)
+  assert.equal(cancellationAccepted, false)
+  assert.equal(record.status, 'passed')
+  assert.equal(calls.length, 3)
+  assert.equal(runner.list().length, 0)
+})
+
 test('a failed save retry in one environment cannot starve another batch or replay either one', async t => {
   const f = await fixture(t)
   const save = f.records.finishRunnerPipeline.bind(f.records)
@@ -377,6 +442,65 @@ test('HTTP cancel before registration and cancel during login persist interrupti
   assert.equal(cancelled.pipelineFound, true)
   assert.equal((await f.records.get(data.executionId)).status, 'interrupted')
 })
+
+test('HTTP stop accepted during terminal write persists interruption and stays idempotent', async t => {
+  const f = await apiFixture(t, { cancellationWaitTimeoutMs: 10 })
+  const writing = deferred(); const release = deferred()
+  t.after(() => release.resolve())
+  const writeFile = f.records.fileSystem.writeFile.bind(f.records.fileSystem)
+  f.records.fileSystem = { ...f.records.fileSystem, writeFile: async (path, serialized, options) => {
+    if (JSON.parse(serialized).status === 'passed') {
+      writing.resolve(); await release.promise
+    }
+    return writeFile(path, serialized, options)
+  } }
+  const data = input()
+  assert.equal((await f.post('/pipeline-executions', data)).status, 202)
+  await writing.promise
+  const stop = await f.post(`/executions/${data.executionId}/cancel`)
+  assert.equal(stop.status, 200)
+  assert.equal((await stop.json()).status, 'interrupted')
+  release.resolve()
+  const record = await f.records.get(data.executionId)
+  assert.equal(record.status, 'interrupted')
+  assert.equal(record.counts.passed, 3)
+  assert.equal((await f.post(`/executions/${data.executionId}/cancel`)).status, 200)
+})
+
+test('HTTP script stop rejects a committed pipeline before its coordinator has returned', async t => {
+  const f = await apiFixture(t)
+  const committed = deferred(); const release = deferred()
+  t.after(() => release.resolve())
+  const save = f.records.finishRunnerPipeline.bind(f.records)
+  f.records.finishRunnerPipeline = async (...args) => {
+    const record = await save(...args)
+    committed.resolve(); await release.promise
+    return record
+  }
+  const data = input()
+  await f.post('/pipeline-executions', data)
+  await committed.promise
+  const stop = await f.post('/scripts/first/cancel', { executionId: data.executionId })
+  assert.equal(stop.status, 404)
+  assert.match((await stop.json()).error, /没有正在运行/)
+  assert.equal((await f.post(`/executions/${data.executionId}/cancel`)).status, 409)
+  release.resolve()
+  assert.equal((await f.records.get(data.executionId)).status, 'passed')
+})
+
+for (const status of ['passed', 'partial', 'failed']) {
+  test(`HTTP stop rejects an already ${status} pipeline without changing its record`, async t => {
+    const f = await apiFixture(t, { executeScript: async () => success({ formId: 'new-form' }, status) })
+    const data = input()
+    await f.post('/pipeline-executions', data)
+    const finished = await until(() => f.records.get(data.executionId), record => record.status !== 'running')
+    assert.equal(finished.status, status)
+    const stop = await f.post(`/executions/${data.executionId}/cancel`)
+    assert.equal(stop.status, 409)
+    assert.match((await stop.json()).error, /批次已结束/)
+    assert.deepEqual(await f.records.get(data.executionId), finished)
+  })
+}
 
 test('HTTP script stop during pipeline login succeeds even without a browser step', async t => {
   const f = await apiFixture(t, { pipelineLogin: (env, session, signal) => new Promise((resolve, reject) => {

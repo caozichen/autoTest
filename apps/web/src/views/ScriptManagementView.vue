@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/date-time'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import {
@@ -715,7 +716,9 @@ onBeforeUnmount(() => {
         <el-table-column label="创建时间" width="180">
           <template #default="scope">{{ formatScriptCreatedAt(scope.row.createdAt) }}</template>
         </el-table-column>
-        <el-table-column label="更新时间" prop="updatedAt" width="180" />
+        <el-table-column label="更新时间" width="190">
+          <template #default="scope">{{ formatDateTime(scope.row.updatedAt) }}</template>
+        </el-table-column>
         <el-table-column label="操作" width="238" fixed="right">
           <template #default="scope">
             <div class="row-actions">

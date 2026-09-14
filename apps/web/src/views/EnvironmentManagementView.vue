@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/date-time'
 import { computed, onMounted, ref, watch } from 'vue'
 import {
   CircleCheck,
@@ -320,7 +321,9 @@ onMounted(() => loadEnvironments())
             <el-tag :type="scope.row.enabled ? 'success' : 'info'" size="small" effect="light">{{ scope.row.enabled ? '启用' : '停用' }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="更新时间" prop="updatedAt" width="180" />
+        <el-table-column label="更新时间" width="190">
+          <template #default="scope">{{ formatDateTime(scope.row.updatedAt) }}</template>
+        </el-table-column>
         <el-table-column label="操作" width="202" fixed="right">
           <template #default="scope">
             <div class="row-actions">

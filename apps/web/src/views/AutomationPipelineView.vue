@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { formatDateTime as formatUpdatedAt } from '@/utils/date-time'
+
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import {
@@ -250,10 +252,7 @@ function mappingCount(pipeline: AutomationPipeline): number {
   return pipeline.steps.reduce((total, step) => total + step.parameterMappings.length, 0)
 }
 
-function formatUpdatedAt(value: string): string {
-  const date = new Date(value)
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN', { hour12: false })
-}
+
 
 onMounted(() => {
   void loadData()

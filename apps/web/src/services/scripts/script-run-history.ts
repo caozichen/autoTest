@@ -1,3 +1,4 @@
+import { formatDateTime } from '@/utils/date-time'
 import type { RunRecordStatus, RunScriptStatus } from '@/domain/run-record'
 import type { AutomationScript, ScriptRunStatus } from '@/domain/script'
 
@@ -26,20 +27,7 @@ interface RestoreLatestScriptRunsOptions {
   preserveRuntimeState?: boolean
 }
 
-function formatDateTime(value: string): string {
-  const date = new Date(value)
-  if (!Number.isFinite(date.getTime())) return value
-  const datePart = [
-    date.getFullYear(),
-    String(date.getMonth() + 1).padStart(2, '0'),
-    String(date.getDate()).padStart(2, '0'),
-  ].join('-')
-  const timePart = [
-    String(date.getHours()).padStart(2, '0'),
-    String(date.getMinutes()).padStart(2, '0'),
-  ].join(':')
-  return `${datePart} ${timePart}`
-}
+
 
 function formatDuration(durationMs: number): string {
   const totalSeconds = Math.max(0, Math.round(durationMs / 1_000))

@@ -974,6 +974,10 @@ export function createRunnerServer({
       if (!pipelineFound) {
         const record = await storedRunRecords.get?.(executionId)
         if (record?.execution?.kind === 'pipeline') {
+          if (!['running', 'interrupted'].includes(record.status)) {
+            sendJson(response, 409, { ok: false, error: '运行批次已结束，无法强制停止', record }, origin)
+            return
+          }
           pipelineFound = true
           await storedRunRecords.finishRunnerPipeline(executionId, { status: 'interrupted', error: reason })
         }

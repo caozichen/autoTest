@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/date-time'
+
 import { computed, onMounted, ref } from 'vue'
 import { CircleCheck, Clock, Connection, RefreshRight, Warning } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
@@ -10,6 +12,19 @@ import { services } from '@/services/container'
 
 const snapshot = ref<DashboardSnapshot | null>(null)
 const loading = ref(true)
+const loadFailed = ref(false)
+const unavailableSourceLabels = {
+  scripts: '脚本配置',
+  environments: '环境配置',
+  runRecords: '运行记录',
+}
+const dataErrorMessage = computed(() => {
+  const sources = snapshot.value?.unavailableSources ?? []
+  return sources.length
+    ? `${sources.map((source) => unavailableSourceLabels[source]).join('、')}加载失败，相关数据暂不可用，请重试。`
+    : ''
+})
+const runRecordsUnavailable = computed(() => snapshot.value?.unavailableSources.includes('runRecords') ?? false)
 const greetingDate = computed(() => new Intl.DateTimeFormat('zh-CN', {
   month: 'long',
   day: 'numeric',
@@ -32,17 +47,20 @@ function formatDuration(durationMs: number | null): string {
   return minutes ? `${minutes} 分 ${seconds % 60} 秒` : `${seconds} 秒`
 }
 
-function formatDateTime(value: string): string {
-  const date = new Date(value)
-  return Number.isNaN(date.getTime()) ? '暂无数据' : date.toLocaleString('zh-CN', { hour12: false })
-}
+
 
 async function loadDashboard(showSuccess = false): Promise<void> {
   loading.value = true
+  loadFailed.value = false
   try {
     snapshot.value = await services.dashboard.getSnapshot()
-    if (showSuccess) ElMessage.success('数据已刷新')
+    if (showSuccess) {
+      if (dataErrorMessage.value) ElMessage.warning(dataErrorMessage.value)
+      else ElMessage.success('数据已刷新')
+    }
   } catch {
+    snapshot.value = null
+    loadFailed.value = true
     ElMessage.error('主页数据加载失败')
   } finally {
     loading.value = false
@@ -78,6 +96,7 @@ onMounted(() => loadDashboard())
     </section>
 
     <template v-if="snapshot">
+      <el-alert v-if="dataErrorMessage" :title="dataErrorMessage" type="warning" :closable="false" show-icon />
       <div class="section-heading">
         <h2>统计指标</h2>
         <span>当前工作区概况</span>
@@ -96,7 +115,7 @@ onMounted(() => loadDashboard())
             <span class="panel__badge">7 DAYS</span>
           </header>
           <TrendChart v-if="snapshot.trend.length" :data="snapshot.trend" />
-          <el-empty v-else description="暂无数据" :image-size="72" class="panel-empty" />
+          <el-empty v-else :description="runRecordsUnavailable ? '运行记录加载失败，请重试' : '暂无数据'" :image-size="72" class="panel-empty" />
         </article>
 
         <article class="panel runner-panel">
@@ -129,7 +148,7 @@ onMounted(() => loadDashboard())
             <p>最新测试执行记录</p>
           </div>
         </header>
-        <el-table :data="snapshot.recentRuns" class="runs-table" empty-text="暂无数据">
+        <el-table :data="snapshot.recentRuns" class="runs-table" :empty-text="runRecordsUnavailable ? '运行记录加载失败，请重试' : '暂无数据'">
           <el-table-column prop="id" label="任务编号" min-width="160" />
           <el-table-column label="任务名称" min-width="240">
             <template #default="scope">
@@ -165,7 +184,7 @@ onMounted(() => loadDashboard())
       <el-skeleton v-for="index in 4" :key="index" :rows="3" animated />
     </div>
 
-    <el-empty v-else description="暂无主页数据" />
+    <el-empty v-else :description="loadFailed ? '主页数据加载失败，请重试' : '暂无主页数据'" />
   </div>
 </template>
 

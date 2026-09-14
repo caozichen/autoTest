@@ -610,25 +610,41 @@ export class RunRecordFileStore {
     })
   }
 
-  async finishRunnerPipeline(id, { status, error, stage = 'runner' } = {}) {
+  async finishRunnerPipeline(id, finalState = {}, { onCommitted } = {}) {
     return this.mutate(async () => {
       const source = this.records.get(id)
-      if (!source || source.status !== 'running') return source ? structuredClone(source) : null
-      const record = structuredClone(source)
-      record.status = status ?? recoveredTerminalStatus(record.scripts)
-      if (error) { record.error = error; record.failureStage = stage }
-      record.scripts = record.scripts.map(script => ['queued', 'running'].includes(script.status)
-        ? { ...script, status: 'skipped', error: error || '前序步骤失败，未执行' } : script)
-      record.finishedAt = this.now().toISOString()
-      record.updatedAt = record.finishedAt
-      record.durationMs = durationBetween(record.startedAt, record.finishedAt)
-      record.revision += 1
-      record.counts = recoveredCounts(record.scripts)
-      record.logs.push({ id: this.logIdFactory(), timestamp: record.finishedAt, level: record.status === 'passed' ? 'success' : 'warning',
-        scope: 'runner', message: error || 'Runner 已完成全部流水线步骤并保存结果' })
-      record.analysis = recoveredAnalysis(record.scripts, record.logs)
-      await this.writeRecord(record)
-      return structuredClone(record)
+      const readFinalState = typeof finalState === 'function' ? finalState : () => finalState
+      if (!source || source.status !== 'running') {
+        if (source) onCommitted?.()
+        return source ? structuredClone(source) : null
+      }
+      let revision = source.revision
+      while (true) {
+        const terminal = readFinalState()
+        const { status, error, stage = 'runner' } = terminal
+        const record = structuredClone(source)
+        record.status = status ?? recoveredTerminalStatus(record.scripts)
+        if (error) { record.error = error; record.failureStage = stage }
+        record.scripts = record.scripts.map(script => ['queued', 'running'].includes(script.status)
+          ? { ...script, status: 'skipped', error: error || '前序步骤失败，未执行' } : script)
+        record.finishedAt = this.now().toISOString()
+        record.updatedAt = record.finishedAt
+        record.durationMs = durationBetween(record.startedAt, record.finishedAt)
+        record.revision = ++revision
+        record.counts = recoveredCounts(record.scripts)
+        record.logs.push({ id: this.logIdFactory(), timestamp: record.finishedAt, level: record.status === 'passed' ? 'success' : 'warning',
+          scope: 'runner', message: error || 'Runner 已完成全部流水线步骤并保存结果' })
+        record.analysis = recoveredAnalysis(record.scripts, record.logs)
+        // A failed corrective write must leave the published snapshot running.
+        await this.writeRecord(record, { publish: false })
+        // Hold the mutation queue and the execution lease until a stop received
+        // during disk I/O is durable, so readers cannot observe the superseded result.
+        if (readFinalState() === terminal) {
+          this.records.set(record.id, record)
+          onCommitted?.()
+          return structuredClone(record)
+        }
+      }
     })
   }
 
@@ -798,7 +814,7 @@ export class RunRecordFileStore {
     return pending
   }
 
-  async writeRecord(record) {
+  async writeRecord(record, { publish = true } = {}) {
     const serialized = `${JSON.stringify(record)}\n`
     const targetPath = join(this.directory, `${record.id}.json`)
     const temporaryPath = join(
@@ -816,6 +832,6 @@ export class RunRecordFileStore {
       await this.fileSystem.unlink(temporaryPath).catch(() => undefined)
       throw error
     }
-    this.records.set(record.id, record)
+    if (publish) this.records.set(record.id, record)
   }
 }

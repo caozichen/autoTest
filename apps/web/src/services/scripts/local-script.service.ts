@@ -1,3 +1,4 @@
+import { formatDateTime as formatUpdatedAt } from '@/utils/date-time'
 import {
   MAX_SCRIPT_TIMEOUT_MS,
   MIN_SCRIPT_TIMEOUT_MS,
@@ -49,21 +50,7 @@ function cloneScripts(scripts: AutomationScript[]): AutomationScript[] {
   return structuredClone(scripts)
 }
 
-function formatUpdatedAt(value: string): string {
-  const timestamp = new Date(value)
-  if (!Number.isFinite(timestamp.getTime())) return value
-  const date = timestamp.toLocaleDateString('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).replace(/\//g, '-')
-  const time = timestamp.toLocaleTimeString('zh-CN', {
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  })
-  return `${date} ${time}`
-}
+
 
 function formatDuration(durationMs: number): string {
   const totalSeconds = Math.max(0, Math.round(durationMs / 1000))

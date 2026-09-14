@@ -36,7 +36,7 @@ const LANGUAGE_LABELS = Object.freeze({
 const LANGUAGE_LABEL_ALIASES = Object.freeze({
   zh_CN: Object.freeze(['简体中文', '簡體中文']),
   zh_HK: Object.freeze(['繁体中文', '繁體中文']),
-  en_US: Object.freeze(['English']),
+  en_US: Object.freeze(['English', '英文', '英语', '英語']),
 })
 const HTML_LANGS = Object.freeze({
   zh_CN: 'zh-CN',
@@ -45,18 +45,19 @@ const HTML_LANGS = Object.freeze({
 })
 const SWITCH_LANGUAGE_PATTERN = /切换语言|切換語言|Switch language/i
 const AUTHENTICATED_API_PATH_PREFIXES = ['/api/be/', '/api/base/', '/be/', '/base/']
+const OTHER_TRANSLATION_CONFIG_PATHS = Object.freeze({
+  submission_period: 'submit_config.time_range_close_rule',
+  submission_quota: 'submit_config.submission_quota',
+  submit_button_text: 'theme_config.submit_button',
+  add_to_cart_button_text: 'theme_config.add_to_cart_button',
+  terms_of_service: 'common_config.terms_of_service',
+  privacy_policy: 'common_config.privacy_policy',
+  payment_alert: 'payment_config.payment_method.payment_alert',
+  blacklist_whitelist_message: 'submit_config.blacklist_and_whitelist',
+  customized_feedback: 'notification_config.customized_feedback',
+})
 const EXPECTED_UNTRANSLATABLE_SECTIONS = Object.freeze({
   form_structure: Object.freeze([]),
-  other_translation: Object.freeze([
-    'submission_period',
-    'submission_quota',
-    'add_to_cart_button_text',
-    'terms_of_service',
-    'privacy_policy',
-    'payment_alert',
-    'blacklist_whitelist_message',
-    'customized_feedback',
-  ]),
   email_translation: Object.freeze([
     'admin_form_submitted_success',
     'admin_activity_submitted_success',
@@ -1286,7 +1287,42 @@ function orderedContentFormItems(items) {
     .sort((left, right) => numericValue(left.sort) - numericValue(right.sort))
 }
 
-function assertSourceFormDetail(payload, formId) {
+function resolveTranslationSectionContract(environmentCode, configuredContract) {
+  // Verified deployment split on 2026-09-14; override when an environment is upgraded.
+  // The response under test cannot select its own baseline: missing new keys must fail.
+  const contract = String(configuredContract ?? '').trim()
+    || (['CN_PROD', 'HK_PROD'].includes(String(environmentCode ?? '').trim().toUpperCase()) ? 'legacy' : '20260914')
+  if (!['legacy', '20260914'].includes(contract)) {
+    throw new Error('TRANSLATION_SECTION_CONTRACT 仅支持 legacy 或 20260914')
+  }
+  return contract
+}
+
+function translationConfigEnabled(config) {
+  if (typeof config === 'boolean') return config
+  if (typeof config === 'number') return config === 1
+  return isRecord(config) && Number(config.enabled ?? 2) === 1
+}
+
+function expectedOtherUntranslatableSections(form, contract) {
+  const excluded = Object.entries(OTHER_TRANSLATION_CONFIG_PATHS)
+    .filter(([section, path]) => {
+      let config = path.split('.').reduce((value, key) => value?.[key], form)
+      // Backend theme defaults treat an absent/null submit-button enabled flag as yes().
+      if (section === 'submit_button_text') config = { enabled: config?.enabled ?? 1 }
+      return !translationConfigEnabled(config)
+    })
+    .map(([section]) => section)
+  if (contract === '20260914') {
+    if (!translationConfigEnabled(form.notification_config?.promotion_link)) excluded.push('promotion_link')
+    if (Number(form.is_activity) !== 1) excluded.push('activity_location')
+    // weixin_share has no enable switch and is never excluded by this contract.
+  }
+  return excluded
+}
+
+function assertSourceFormDetail(payload, formId, { environmentCode, sectionContract } = {}) {
+  const contract = resolveTranslationSectionContract(environmentCode, sectionContract)
   const { data, form, items } = unwrapFormPayload(payload)
   expect(String(form.form_id ?? form.id ?? ''), '翻译前表单详情应属于目标表单 ID').toBe(formId)
   expect(form.source_language, '表单原文语言应为 zh_CN').toBe('zh_CN')
@@ -1300,7 +1336,12 @@ function assertSourceFormDetail(payload, formId) {
   expect(isRecord(translation), '表单详情应明确包含多语言配置').toBe(true)
   const untranslatable = isRecord(translation) ? translation.untranslatable_sections : null
   expect(isRecord(untranslatable), '多语言配置应明确包含不可翻译分区').toBe(true)
-  for (const [group, expectedSections] of Object.entries(EXPECTED_UNTRANSLATABLE_SECTIONS)) {
+  const expectedUntranslatable = {
+    form_structure: EXPECTED_UNTRANSLATABLE_SECTIONS.form_structure,
+    other_translation: expectedOtherUntranslatableSections(form, contract),
+    email_translation: EXPECTED_UNTRANSLATABLE_SECTIONS.email_translation,
+  }
+  for (const [group, expectedSections] of Object.entries(expectedUntranslatable)) {
     expect(
       isRecord(untranslatable) && Object.prototype.hasOwnProperty.call(untranslatable, group),
       `多语言设置应明确包含 ${group} 不可翻译分组`,
@@ -2817,6 +2858,7 @@ async function screenshotFailure(page, formId, artifactWriter) {
 export async function run({
   siteBaseUrl,
   apiBaseUrl,
+  environmentCode,
   requestPath = DEFAULT_REQUEST_PATH,
   variables = {},
   extraHTTPHeaders,
@@ -2837,6 +2879,7 @@ export async function run({
   if (!authorization) throw new Error('多语言翻译必须使用环境登录后的 Token')
   const translationUrl = buildTranslationUrl(siteBaseUrl, requestPath, variables)
   const formId = new URL(translationUrl).searchParams.get('id')
+  const sectionContract = resolveTranslationSectionContract(environmentCode, variables.TRANSLATION_SECTION_CONTRACT)
   const customExpectations = parseTranslationExpectations(variables.TRANSLATION_EXPECTATIONS)
   const aiTimeoutMs = scaleTimeout(resolveAiTimeout(variables.AI_TRANSLATION_TIMEOUT_MS))
   const siteOrigin = new URL(siteBaseUrl).origin
@@ -2869,6 +2912,7 @@ export async function run({
       formId,
       translationUrl,
       targetLanguages: TARGET_LANGUAGES,
+      translationSectionContract: sectionContract,
       aiTimeoutMs,
     })
     browser = await launchGoogleChrome()
@@ -2934,7 +2978,7 @@ export async function run({
 
     const detailOutcome = await inspectBusinessResponse(detailResponse, '多语言翻译前表单详情')
     flowExpect(detailOutcome.succeeded, '表单详情接口必须成功，才能执行 AI 翻译或发布').toBe(true)
-    const source = assertSourceFormDetail(detailOutcome.body, formId)
+    const source = assertSourceFormDetail(detailOutcome.body, formId, { sectionContract })
     flowExpect(String(source.form.form_id ?? source.form.id ?? ''), '发布门禁必须确认表单详情属于目标 FORM_ID')
       .toBe(formId)
     flowExpect(source.form.source_language, '发布门禁必须确认原文语言为 zh_CN').toBe('zh_CN')
@@ -3367,6 +3411,7 @@ export {
   TARGET_LANGUAGES,
   analyzeTranslationWorkspace,
   assertPublishedListRecord,
+  assertSourceFormDetail,
   assertTranslationWorkspace,
   buildPublicPreviewUrl,
   buildTranslationUrl,

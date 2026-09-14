@@ -95,6 +95,7 @@ describe('LocalDashboardService', () => {
       browser: null,
       activeEnvironment: '测试环境',
     })
+    expect(snapshot.unavailableSources).toEqual([])
   })
 
   it('derives metrics, trend and recent runs from persisted run records', async () => {
@@ -130,5 +131,49 @@ describe('LocalDashboardService', () => {
     })
 
     expect((await service.getSnapshot()).runner.status).toBe('offline')
+  })
+
+  it('reports offline and unavailable data when Runner-backed lists also fail', async () => {
+    const { scripts, environments, runRecords } = dependencies()
+    vi.mocked(scripts.list).mockRejectedValue(new TypeError('connection refused'))
+    vi.mocked(runRecords.list).mockRejectedValue(new TypeError('connection refused'))
+    const service = new LocalDashboardService(scripts, environments, runRecords, {
+      fetcher: vi.fn(async () => { throw new TypeError('connection refused') }) as typeof fetch,
+    })
+
+    const snapshot = await service.getSnapshot()
+
+    expect(snapshot.runner).toMatchObject({ status: 'offline', activeEnvironment: '测试环境' })
+    expect(snapshot.unavailableSources).toEqual(['scripts', 'runRecords'])
+    expect(snapshot.metrics.every((metric) => metric.value === null)).toBe(true)
+    expect(snapshot.metrics.every((metric) => metric.delta.includes('加载失败'))).toBe(true)
+    expect(snapshot.trend).toEqual([])
+    expect(snapshot.recentRuns).toEqual([])
+  })
+
+  it('preserves healthy data sources and clears failure markers after recovery', async () => {
+    const { scripts, environments, runRecords } = dependencies([completedRecord()])
+    vi.mocked(scripts.list).mockRejectedValueOnce(new Error('script config unavailable'))
+    vi.mocked(environments.list).mockRejectedValueOnce(new Error('environment storage unavailable'))
+    const service = new LocalDashboardService(scripts, environments, runRecords, {
+      fetcher: vi.fn(async () => new Response(JSON.stringify({ ok: true }))) as typeof fetch,
+      now: () => new Date('2026-08-12T08:00:00.000Z'),
+    })
+
+    const partial = await service.getSnapshot()
+
+    expect(partial.runner).toMatchObject({ status: 'online', activeEnvironment: null })
+    expect(partial.unavailableSources).toEqual(['scripts', 'environments'])
+    expect(partial.metrics.find((metric) => metric.id === 'scripts')?.value).toBeNull()
+    expect(partial.metrics.find((metric) => metric.id === 'pass-rate')?.value).toBe(50)
+    expect(partial.metrics.find((metric) => metric.id === 'failed')?.value).toBe(1)
+    expect(partial.recentRuns).toHaveLength(1)
+    expect(partial.trend).toEqual([{ date: '08/11', passed: 1, partial: 0, failed: 1 }])
+
+    const recovered = await service.getSnapshot()
+
+    expect(recovered.unavailableSources).toEqual([])
+    expect(recovered.metrics.find((metric) => metric.id === 'scripts')?.value).toBe(1)
+    expect(recovered.runner.activeEnvironment).toBe('测试环境')
   })
 })

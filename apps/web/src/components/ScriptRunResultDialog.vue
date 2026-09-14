@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { formatDateTime as formatTime } from '@/utils/date-time'
+
 import { computed } from 'vue'
 import { CircleCheck, CircleClose, Clock, Document, VideoPause, Warning } from '@element-plus/icons-vue'
 
@@ -25,12 +27,7 @@ const logTypeMap: Record<ScriptLogLevel, 'success' | 'warning' | 'danger' | 'inf
   error: 'danger',
 }
 
-function formatTime(timestamp: string): string {
-  const date = new Date(timestamp)
-  return Number.isNaN(date.getTime())
-    ? timestamp
-    : date.toLocaleTimeString('zh-CN', { hour12: false })
-}
+
 
 function formatDetails(details?: Record<string, unknown>): string {
   return details ? JSON.stringify(details, null, 2) : ''
@@ -130,7 +127,7 @@ function formatDetails(details?: Record<string, unknown>): string {
 .run-logs__heading .el-icon { color: var(--color-primary, #2563eb); }
 .run-logs__heading span { margin-left: auto; color: var(--color-text-muted, #94a3b8); font-size: var(--font-caption); }
 .run-logs__body { overflow-y: auto; border: 1px solid var(--color-border, #e5ebf3); border-radius: 5px; background: var(--color-bg-subtle, #f8fafc); }
-.log-row { display: grid; grid-template-columns: 72px 66px 1fr; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--color-border-light, #eef2f7); }
+.log-row { display: grid; grid-template-columns: 155px 66px minmax(0, 1fr); gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--color-border-light, #eef2f7); }
 .log-row:last-child { border-bottom: 0; }
 .log-row time { color: var(--color-text-muted, #94a3b8); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: var(--font-caption); }
 .log-row p { margin: 0; color: var(--color-text-primary, #1f2a44); font-size: var(--font-sm); line-height: 1.5; }
@@ -140,7 +137,7 @@ function formatDetails(details?: Record<string, unknown>): string {
   .result-summary { grid-template-columns: 32px 1fr; }
   .result-summary p { grid-column: 2; }
   .result-output { grid-template-columns: 1fr; }
-  .log-row { grid-template-columns: 64px 1fr; }
+  .log-row { grid-template-columns: 155px minmax(0, 1fr); }
   .log-row > div { grid-column: 1 / -1; }
 }
 </style>

@@ -1,3 +1,4 @@
+import { formatDateTime as formatScriptCreatedAt } from '@/utils/date-time'
 import type { AutomationScript } from '@/domain/script'
 
 type CreatedScript = Pick<AutomationScript, 'id' | 'createdAt'>
@@ -16,13 +17,6 @@ export function sortScriptsByCreatedAtDesc<T extends CreatedScript>(scripts: rea
   })
 }
 
-export function formatScriptCreatedAt(value: string): string {
-  const timestamp = createdAtTimestamp(value)
-  if (!Number.isFinite(timestamp)) return value
-  const date = new Date(timestamp)
-  return [
-    date.getFullYear(),
-    String(date.getMonth() + 1).padStart(2, '0'),
-    String(date.getDate()).padStart(2, '0'),
-  ].join('-') + ` ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
-}
+
+
+export { formatScriptCreatedAt }

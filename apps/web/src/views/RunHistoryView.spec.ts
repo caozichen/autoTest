@@ -345,6 +345,49 @@ describe('RunHistoryView', () => {
     expect(resetButton.disabled).toBe(true)
   })
 
+  it('finds script errors without a batch error and combines them with the other filters', async () => {
+    const record = runRecord('partial-error', 'partial', { environmentId: 'environment-two' })
+    record.scripts = [{
+      recordId: `${record.id}:script-one`,
+      id: 'script-one',
+      name: '编辑提报',
+      directory: 'scripts',
+      entryFile: 'example.mjs',
+      tags: [],
+      status: 'partial',
+      durationMs: 1_000,
+      logs: [],
+      assertions: [],
+      apiResponses: [],
+      resourceResponses: [],
+      networkSummary: {
+        api: { observed: 0, recorded: 0, dropped: 0, passed: 0, failed: 0, warnings: 0 },
+        resources: { observed: 0, recorded: 0, dropped: 0, passed: 0, failed: 0, warnings: 0 },
+      },
+      artifacts: [],
+      error: '脚本已执行完成，共有 3 条断言失败：Expected true',
+    }]
+    const root = await mountView([record, runRecord('unrelated', 'partial')])
+    const keywordInput = root.querySelector<HTMLInputElement>('[aria-label="搜索运行记录"]')!
+    const environmentSelect = root.querySelector<HTMLSelectElement>('[aria-label="筛选运行环境"]')!
+    const statusSelect = root.querySelector<HTMLSelectElement>('[aria-label="筛选运行状态"]')!
+
+    changeValue(keywordInput, '3 条断言失败')
+    await nextTick()
+    expect(root.querySelector('.toolbar__result')?.textContent).toBe('1 个批次')
+    expect(root.querySelector('[data-label="批次"]')?.textContent).toContain('RUN-PARTIAL-ERROR')
+
+    changeValue(keywordInput, '  expected TRUE  ')
+    changeValue(statusSelect, 'partial')
+    changeValue(environmentSelect, 'environment-two')
+    await nextTick()
+    expect(root.querySelector('.toolbar__result')?.textContent).toBe('1 个批次')
+
+    changeValue(environmentSelect, 'environment-one')
+    await nextTick()
+    expect(root.querySelector('.toolbar__result')?.textContent).toBe('0 个批次')
+  })
+
   it('uses saved tab order and combines environment, status and keyword filters', async () => {
     localStorage.setItem('autotest.run-history-tabs.v1', JSON.stringify(['environment-two', 'environment-one']))
     const root = await mountView([

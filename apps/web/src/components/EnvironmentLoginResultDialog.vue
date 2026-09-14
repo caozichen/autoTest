@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/date-time'
 import { computed, reactive, watch } from 'vue'
 import { Check, CopyDocument, Key, Warning } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
@@ -150,7 +151,7 @@ async function copyResponse(): Promise<void> {
         </div>
         <div>
           <dt>接收时间</dt>
-          <dd>{{ result.receivedAt }}</dd>
+          <dd>{{ formatDateTime(result.receivedAt) }}</dd>
         </div>
         <div>
           <dt>业务结果</dt>
@@ -227,7 +228,7 @@ async function copyResponse(): Promise<void> {
 
         <div class="variable-extractor__footer">
           <span v-if="appliedVariable">
-            已写入 {{ appliedVariable.key }} · {{ appliedVariable.updatedAt }}
+            已写入 {{ appliedVariable.key }} · {{ formatDateTime(appliedVariable.updatedAt) }}
           </span>
           <span v-else>尚未写入运行时变量</span>
           <el-button type="primary" :disabled="!canApply" @click="emit('apply', { ...binding })">

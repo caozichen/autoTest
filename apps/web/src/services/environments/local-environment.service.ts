@@ -1,3 +1,4 @@
+import { formatDateTime } from '@/utils/date-time'
 import {
   defaultSessionCheck,
   formatEnvironmentRequestBody,
@@ -62,10 +63,7 @@ function cloneEnvironments(environments: TestEnvironment[]): TestEnvironment[] {
 }
 
 function formatNow(): string {
-  const now = new Date()
-  const date = now.toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' }).replace(/\//g, '-')
-  const time = now.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
-  return `${date} ${time}`
+  return formatDateTime(new Date())
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

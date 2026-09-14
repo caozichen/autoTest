@@ -45,7 +45,7 @@ export class PipelineRunner {
     this.admission = Promise.resolve()
   }
   list() {
-    return [...this.active.values()].map(execution => ({ id: execution.id, pipelineId: execution.pipelineId,
+    return [...this.active.values()].filter(execution => !execution.finishCommitted).map(execution => ({ id: execution.id, pipelineId: execution.pipelineId,
       environment: execution.environment, pipelineName: execution.pipelineName,
       phase: execution.phase, currentScriptId: execution.currentScriptId, scriptIds: execution.scriptIds }))
   }
@@ -54,7 +54,7 @@ export class PipelineRunner {
   }
   cancel(id, reason) {
     const execution = this.active.get(id)
-    if (!execution) return false
+    if (!execution || execution.finishCommitted) return false
     execution.reason = reason
     execution.controller.abort(reason)
     if (execution.phase === 'saving') execution.pendingFinish = { status: 'interrupted', error: '用户已停止流水线' }
@@ -221,7 +221,9 @@ export class PipelineRunner {
       await this.records.saveRunnerStepResult(execution.id, execution.pendingStep.scriptId, execution.pendingStep.result, { replace: true })
       execution.pendingStep = null
     }
-    await this.records.finishRunnerPipeline(execution.id, execution.pendingFinish)
+    await this.records.finishRunnerPipeline(execution.id, () => execution.pendingFinish, {
+      onCommitted: () => { execution.finishCommitted = true },
+    })
     this.active.delete(execution.id)
   }
   async maintain() {

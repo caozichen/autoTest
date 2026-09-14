@@ -31,12 +31,21 @@ export class LocalDashboardService implements DashboardService {
   }
 
   async getSnapshot(): Promise<DashboardSnapshot> {
-    const [scripts, environments, records, runnerOnline] = await Promise.all([
+    const [scriptResult, environmentResult, recordResult, healthResult] = await Promise.allSettled([
       this.scripts.list(),
       this.environments.list(),
       this.runRecords.list(),
       this.isRunnerOnline(),
     ])
+    const scripts = scriptResult.status === 'fulfilled' ? scriptResult.value : []
+    const environments = environmentResult.status === 'fulfilled' ? environmentResult.value : []
+    const records = recordResult.status === 'fulfilled' ? recordResult.value : []
+    const runnerOnline = healthResult.status === 'fulfilled' && healthResult.value
+    const unavailableSources: DashboardSnapshot['unavailableSources'] = []
+    if (scriptResult.status === 'rejected') unavailableSources.push('scripts')
+    if (environmentResult.status === 'rejected') unavailableSources.push('environments')
+    if (recordResult.status === 'rejected') unavailableSources.push('runRecords')
+    const recordsUnavailable = recordResult.status === 'rejected'
     const completedScripts = records.reduce(
       (total, record) => total + record.counts.passed + record.counts.partial + record.counts.failed,
       0,
@@ -49,12 +58,15 @@ export class LocalDashboardService implements DashboardService {
     const hasRecords = records.length > 0
 
     return {
+      unavailableSources,
       metrics: [
         {
           id: 'scripts',
           label: '自动化脚本',
-          value: scripts.length,
-          delta: `${scripts.filter((script) => script.status !== 'disabled').length} 个已启用`,
+          value: scriptResult.status === 'rejected' ? null : scripts.length,
+          delta: scriptResult.status === 'rejected'
+            ? '脚本配置加载失败'
+            : `${scripts.filter((script) => script.status !== 'disabled').length} 个已启用`,
           tone: 'cyan',
         },
         {
@@ -62,14 +74,18 @@ export class LocalDashboardService implements DashboardService {
           label: '脚本通过率',
           value: completedScripts === 0 ? null : Math.round((passedScripts / completedScripts) * 1_000) / 10,
           suffix: '%',
-          delta: completedScripts === 0 ? '暂无已完成脚本' : `${completedScripts} 个已完成脚本`,
+          delta: recordsUnavailable
+            ? '运行记录加载失败'
+            : completedScripts === 0 ? '暂无已完成脚本' : `${completedScripts} 个已完成脚本`,
           tone: 'green',
         },
         {
           id: 'running',
           label: '正在执行',
           value: hasRecords ? records.filter((record) => record.status === 'running').length : null,
-          delta: hasRecords ? `${queuedScripts} 个脚本排队` : '暂无运行记录',
+          delta: recordsUnavailable
+            ? '运行记录加载失败'
+            : hasRecords ? `${queuedScripts} 个脚本排队` : '暂无运行记录',
           tone: 'amber',
         },
         {
@@ -78,7 +94,9 @@ export class LocalDashboardService implements DashboardService {
           value: hasRecords
             ? records.filter((record) => record.status === 'failed' || record.status === 'interrupted').length
             : null,
-          delta: hasRecords ? '执行失败或中断批次' : '暂无运行记录',
+          delta: recordsUnavailable
+            ? '运行记录加载失败'
+            : hasRecords ? '执行失败或中断批次' : '暂无运行记录',
           tone: 'red',
         },
       ],

@@ -23,7 +23,7 @@ describe('script management list', () => {
   it('formats creation time consistently and preserves an invalid source value', () => {
     const localTime = new Date(2026, 8, 9, 10, 8, 30)
 
-    expect(formatScriptCreatedAt(localTime.toISOString())).toBe('2026-09-09 10:08')
+    expect(formatScriptCreatedAt(localTime.toISOString())).toBe('2026-09-09 10:08:30')
     expect(formatScriptCreatedAt('not-a-date')).toBe('not-a-date')
   })
 })

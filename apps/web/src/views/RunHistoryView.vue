@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/date-time'
+
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   CircleCheck,
@@ -92,7 +94,7 @@ const filteredRecords = computed(() => {
       record.environment.name,
       record.environment.code,
       record.error ?? '',
-      ...record.scripts.flatMap((script) => [script.name, script.entryFile]),
+      ...record.scripts.flatMap((script) => [script.name, script.entryFile, script.error ?? '']),
     ].some((value) => value.toLowerCase().includes(search))
     return matchesStatus && matchesEnvironment && matchesSearch
   })
@@ -265,11 +267,7 @@ async function confirmForceStop(record: RunRecord): Promise<void> {
   }
 }
 
-function formatDateTime(value: string): string {
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleString('zh-CN', { hour12: false })
-}
+
 
 function formatDuration(durationMs: number | null): string {
   if (durationMs === null) return '执行中'

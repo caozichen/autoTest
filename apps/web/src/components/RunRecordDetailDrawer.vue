@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { formatDateTime, formatDateTime as formatTime } from '@/utils/date-time'
+
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import {
   ArrowDownBold,
@@ -476,18 +478,9 @@ function setAssertionGroupPage(group: RunAssertionGroup, page: number): void {
   assertionGroupPages.value = next
 }
 
-function formatDateTime(value: string | null): string {
-  if (!value) return '-'
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleString('zh-CN', { hour12: false })
-}
 
-function formatTime(value: string): string {
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleTimeString('zh-CN', { hour12: false })
-}
+
+
 
 function formatDuration(durationMs: number | null): string {
   if (durationMs === null) return '-'
@@ -1209,7 +1202,7 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
 .distribution-legend .is-pending { background: var(--color-border, #e5ebf3); }
 
 .event-timeline { border-top: 1px solid var(--color-border, #e5ebf3); }
-.event-row { display: grid; grid-template-columns: 88px 92px 80px 1fr; align-items: start; gap: 9px; min-height: 48px; padding: 9px 4px; border-bottom: 1px solid var(--color-border-light, #eef2f7); }
+.event-row { display: grid; grid-template-columns: 155px 92px 80px minmax(0, 1fr); align-items: start; gap: 9px; min-height: 48px; padding: 9px 4px; border-bottom: 1px solid var(--color-border-light, #eef2f7); }
 .event-row__level { display: inline-flex; align-items: center; gap: 6px; margin-top: 3px; color: var(--color-text-secondary, #64748b); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: var(--font-caption); font-weight: 700; }
 .event-row__level i { width: 8px; height: 8px; flex: 0 0 8px; border-radius: 50%; background: var(--color-text-muted, #94a3b8); }
 .event-row__level.is-success { color: var(--color-success, #16a34a); }
@@ -1313,7 +1306,7 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
 .log-toolbar { display: grid; grid-template-columns: minmax(240px, 1fr) 160px auto; align-items: center; gap: 10px; margin-bottom: 12px; }
 .log-toolbar > span { color: var(--color-text-secondary, #64748b); font-size: var(--font-sm); }
 .log-stream { max-height: calc(100dvh - 330px); min-height: 380px; overflow: auto; border: 1px solid #334155; border-radius: 5px; background: #172033; }
-.log-line { display: grid; grid-template-columns: 92px 84px 76px 1fr; gap: 10px; padding: 9px 12px; color: #cbd5e1; border-bottom: 1px solid rgb(255 255 255 / 7%); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: var(--font-xs); line-height: 1.5; }
+.log-line { display: grid; grid-template-columns: 155px 84px 76px minmax(0, 1fr); gap: 10px; padding: 9px 12px; color: #cbd5e1; border-bottom: 1px solid rgb(255 255 255 / 7%); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: var(--font-xs); line-height: 1.5; }
 .log-line:last-child { border-bottom: 0; }
 .log-line time { color: #94a3b8; }
 .log-line__level { font-weight: 700; }
@@ -1420,7 +1413,7 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
   .analysis-metrics > div:nth-last-child(-n + 2) { border-bottom: 0; }
   .assertion-charts, .assertion-columns { grid-template-columns: 1fr; }
   .assertion-chart-section--outcome { border-left: 0; padding-left: 0; }
-  .event-row { grid-template-columns: 82px 82px 72px 1fr; }
+  .event-row { grid-template-columns: 155px 82px 72px minmax(0, 1fr); }
   .network-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .network-metrics > div:nth-child(3n) { border-right: 0; }
   .network-metrics > div:nth-child(-n + 3) { border-bottom: 1px solid var(--color-border-light, #eef2f7); }
@@ -1443,7 +1436,7 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
   .metadata-grid, .analysis-metrics { grid-template-columns: 1fr; }
   .metadata-grid > div, .metadata-grid > div:nth-child(2n), .metadata-grid > div:nth-last-child(-n + 2), .analysis-metrics > div, .analysis-metrics > div:nth-child(2n), .analysis-metrics > div:nth-last-child(-n + 2) { border-right: 0; border-bottom: 1px solid var(--color-border-light, #eef2f7); }
   .metadata-grid > div:last-child, .analysis-metrics > div:last-child { border-bottom: 0; }
-  .event-row { grid-template-columns: 82px 80px 1fr; }
+  .event-row { grid-template-columns: 155px 80px minmax(0, 1fr); }
   .event-row .el-tag { display: none; }
   .network-category-switch { display: grid; width: 100%; }
   .network-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }

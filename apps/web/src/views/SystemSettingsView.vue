@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/date-time'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { Connection, VideoPlay } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
@@ -22,7 +23,7 @@ const buttonLabel = computed(() => {
 const checkedAt = computed(() => {
   if (!runner.value) return '尚未检查'
   const value = new Date(runner.value.checkedAt)
-  return Number.isNaN(value.getTime()) ? '尚未检查' : value.toLocaleString('zh-CN', { hour12: false })
+  return Number.isNaN(value.getTime()) ? '尚未检查' : formatDateTime(value)
 })
 
 async function refreshStatus(): Promise<RunnerServiceState> {

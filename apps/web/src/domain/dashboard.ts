@@ -29,6 +29,7 @@ export interface RecentRun {
 }
 
 export interface DashboardSnapshot {
+  unavailableSources: Array<'scripts' | 'environments' | 'runRecords'>
   metrics: DashboardMetric[]
   trend: TrendPoint[]
   recentRuns: RecentRun[]
