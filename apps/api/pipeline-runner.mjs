@@ -145,7 +145,7 @@ export class PipelineRunner {
       secrets.push(token, `${scheme} ${token}`)
       if (execution.controller.signal.aborted) throw error('执行已取消')
       await this.records.appendRunnerLog(execution.id, { level: 'success', scope: 'login',
-        message: environment.auth.strategy === 'reuse-session' ? 'Runner 已加载当前环境的登录态' : 'Runner 环境登录成功，已提取 Token' })
+        message: environment.auth.strategy === 'reuse-session' ? 'Runner 当前环境登录态校验成功，已复用保存的 Token' : 'Runner 环境登录成功，已提取 Token' })
       const variables = Object.fromEntries(environment.variables.filter(variable => variable.enabled).map(variable => [variable.key, variable.value]))
       Object.assign(variables, Object.fromEntries(runtimeVariables.map(variable => [variable.key, variable.value])))
       variables[environment.auth.tokenVariable.trim()] = token

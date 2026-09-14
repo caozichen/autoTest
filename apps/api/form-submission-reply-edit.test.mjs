@@ -239,7 +239,7 @@ test('matches same-origin submission mutations and rejects reads or cross-origin
   ), false)
 })
 
-test('keeps an unreadable successful mutation body from becoming an assertion failure', async () => {
+test('does not report successful editing when the mutation response body is unavailable', async () => {
   const assertions = []
   const outcome = await runWithAssertionRecorder(
     'form-submission-reply-edit',
@@ -251,8 +251,8 @@ test('keeps an unreadable successful mutation body from becoming an assertion fa
     }),
   )
 
-  assert.deepEqual(outcome, { body: null, succeeded: true })
-  assert.equal(assertions.filter((assertion) => assertion.status === 'failed').length, 0)
+  assert.deepEqual(outcome, { body: null, succeeded: false })
+  assert.equal(assertions.filter((assertion) => assertion.status === 'failed').length, 1)
 })
 
 test('edits a local submission reply through Google Chrome and restores the detail state', async () => {
@@ -313,6 +313,11 @@ test('edits a local submission reply through Google Chrome and restores the deta
         message: 'editSaveSuccess',
         data: { submission_id: 'lpXAWZ' },
       },
+      submissionAssertions: {
+        title: '活动提报详情', status: '已提交', texts: ['提報資訊'],
+        fields: { '姓名[1]': '初始值' }, editFields: { '姓名[1]': '初始值' },
+      },
+      updateRequestCount: 1, createRequestCount: 0, reloaded: false,
     })
     assert.deepEqual(mutations, [{
       authorization: 'Bearer reply-edit-token',

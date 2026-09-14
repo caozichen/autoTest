@@ -158,7 +158,7 @@ test('accepts the registered all-fields form script', () => {
   assert.equal(result.scriptId, 'form-all-fields-publish')
 })
 
-test('accepts the registered public all-fields submission script', () => {
+test('accepts the registered existing-submission editor script', () => {
   const result = validateRunRequest({
     scriptId: 'form-all-fields-submit',
     context: {

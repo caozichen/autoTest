@@ -41,7 +41,14 @@ const responseText = computed(() => {
   return props.result.rawResponse || (typeof props.result.responseBody === 'string' ? props.result.responseBody : '')
 })
 
+const isSessionCheck = computed(() => props.environment?.auth.strategy === 'reuse-session')
+
 const statusLabel = computed(() => {
+  if (isSessionCheck.value) {
+    if (!props.result) return '等待登录态校验结果'
+    if (props.result.error) return '登录态校验未完成'
+    return props.result.businessSuccess ? '当前登录态有效' : '登录态校验未通过'
+  }
   if (!props.result) return '等待登录结果'
   if (props.result.businessSuccess) return '业务登录成功'
   return props.result.ok ? '请求成功，业务登录未通过' : '登录请求未通过'
@@ -110,7 +117,7 @@ async function copyResponse(): Promise<void> {
     <template #header>
       <div class="dialog-heading">
         <span class="dialog-heading__eyebrow">ENVIRONMENT AUTHENTICATION</span>
-        <strong>登录调用结果</strong>
+        <strong>{{ isSessionCheck ? '登录态校验结果' : '登录调用结果' }}</strong>
         <span v-if="environment" class="dialog-heading__environment">
           {{ environment.name }} / {{ environment.code }}
         </span>
@@ -125,6 +132,7 @@ async function copyResponse(): Promise<void> {
         <div class="status-banner__content">
           <strong>{{ statusLabel }}</strong>
           <span v-if="result.error">{{ result.error }}</span>
+          <span v-else-if="isSessionCheck">{{ result.businessSuccess ? '校验接口响应符合配置的有效条件。' : '校验接口响应未满足有效条件，请检查响应内容或更新 Token。' }}</span>
           <span v-else-if="result.businessSuccess && appliedVariable">响应满足成功规则，已按当前配置更新全局运行变量。</span>
           <span v-else-if="result.businessSuccess">业务登录成功，但当前路径没有提取到可用变量，旧变量未覆盖。</span>
           <span v-else>{{ result.ok ? 'HTTP 请求成功，但响应未满足业务成功规则，旧变量不会被覆盖。' : '请求未获得 HTTP 成功状态，旧变量不会被覆盖。' }}</span>
@@ -180,7 +188,7 @@ async function copyResponse(): Promise<void> {
         <pre class="code-block code-block--response">{{ responseText || '响应体为空' }}</pre>
       </section>
 
-      <section class="variable-extractor">
+      <section v-if="!isSessionCheck" class="variable-extractor">
         <div class="variable-extractor__heading">
           <div>
             <span class="variable-extractor__icon"><el-icon><Key /></el-icon></span>

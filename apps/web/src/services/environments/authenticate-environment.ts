@@ -13,7 +13,7 @@ interface AuthenticationDependencies {
 
 export function authenticationSuccessMessage(environment: TestEnvironment): string {
   return environment.auth.strategy === 'reuse-session'
-    ? `${environment.name}已加载保存的登录态，本次未调用登录接口；有效性以业务服务校验为准`
+    ? `${environment.name}登录态校验成功，已复用保存的 Token`
     : `${environment.name}登录成功，运行时 Token 已刷新`
 }
 
@@ -24,13 +24,19 @@ export async function authenticateEnvironment(
 ): Promise<RuntimeVariable | null> {
   if (environment.auth.strategy === 'reuse-session') {
     const session = dependencies.environmentSessions?.get(environment)
-    if (!session) throw new Error(`“${environment.name}”没有匹配的登录态，请到环境管理 → 管理登录态导入；环境地址变更后需要重新导入`)
+    if (!session) throw new Error(`“${environment.name}”没有匹配的登录态，请到环境管理 → 编辑环境 → 登录与 Token 导入；环境地址变更后需要重新导入`)
     if (session.expiresAt !== null && session.expiresAt <= Date.now()) {
       throw new Error(`“${environment.name}”的登录态已过期，请手动登录后到环境管理更新登录态`)
     }
     const key = environment.auth.tokenVariable.trim()
     if (!key) throw new Error(`环境“${environment.name}”未配置 Token 变量名`)
     if (isCancelled()) return null
+    const result = await dependencies.environmentLogin.login(environment, session)
+    if (isCancelled()) return null
+    if (!result.businessSuccess) {
+      const status = result.status ? `HTTP ${result.status}` : '未收到 HTTP 响应'
+      throw new Error(`环境登录态校验失败（${status}），已停止运行，请检查校验配置或更新 Token`)
+    }
     return dependencies.runtimeVariables.upsert({
       key,
       value: session.token,

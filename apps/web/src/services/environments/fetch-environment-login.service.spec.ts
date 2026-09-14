@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import type { TestEnvironment } from '@/domain/environment'
+import { defaultSessionCheck, type TestEnvironment } from '@/domain/environment'
 import { FetchEnvironmentLoginService } from './fetch-environment-login.service'
 
 function testEnvironment(): TestEnvironment {
@@ -163,5 +163,78 @@ describe('FetchEnvironmentLoginService', () => {
     expect(result.ok).toBe(false)
     expect(result.status).toBe(200)
     expect(result.error).toContain('stream closed')
+  })
+})
+
+
+describe('reused session validation', () => {
+  function fixture() {
+    const environment = testEnvironment()
+    environment.auth.strategy = 'reuse-session'
+    environment.auth.sessionCheck = { ...defaultSessionCheck(), path: '/user/info', successPath: 'data.loggedIn', successValue: 'true' }
+    const session = { environmentId: environment.id, siteUrl: environment.baseUrl.replace(/\/+$/, ''),
+      apiUrl: environment.apiBaseUrl, token: 'existing-token', scheme: 'Bearer', accountLabel: '', savedAt: '', expiresAt: null }
+    return { environment, session }
+  }
+
+  it.each([
+    [200, '{"data":{"loggedIn":true,"token":"do-not-extract"}}', true],
+    [200, '{"data":{"loggedIn":false}}', false],
+    [200, '{"code":0}', false],
+    [200, '<html>Login</html>', false],
+    [401, '{"data":{"loggedIn":true}}', false],
+    [500, '{"data":{"loggedIn":true}}', false],
+  ])('requires both HTTP success and the configured response rule (%s, %s)', async (status, body, valid) => {
+    const { environment, session } = fixture()
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(body, { status }))
+    const result = await new FetchEnvironmentLoginService({ fetcher }).login(environment, session)
+    expect(fetcher).toHaveBeenCalledExactlyOnceWith(environment.apiBaseUrl + '/user/info', expect.objectContaining({
+      method: 'GET', headers: expect.objectContaining({ Authorization: 'Bearer existing-token' }), redirect: 'error',
+    }))
+    expect(fetcher.mock.calls[0]![1]?.body).toBeUndefined()
+    expect(result.businessSuccess).toBe(valid)
+    expect(result.extractedToken).toBeUndefined()
+    expect(result.rawResponse).toBe(body)
+    expect(session.token).toBe('existing-token')
+  })
+
+  it('sends the configured validation body instead of login credentials', async () => {
+    const { environment, session } = fixture()
+    environment.auth.sessionCheck!.method = 'POST'
+    environment.auth.sessionCheck!.requestBody = '{"scope":"profile"}'
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response('{"data":{"loggedIn":true}}'))
+    await new FetchEnvironmentLoginService({ fetcher }).login(environment, session)
+    expect(fetcher.mock.calls[0]![1]?.body).toBe('{"scope":"profile"}')
+  })
+
+  it('does not send requests for missing configuration, missing or expired sessions', async () => {
+    const { environment, session } = fixture()
+    const fetcher = vi.fn<typeof fetch>()
+    const service = new FetchEnvironmentLoginService({ fetcher })
+    await expect(service.login(environment)).rejects.toThrow('Token')
+    await expect(service.login(environment, { ...session, expiresAt: 1 })).rejects.toThrow('已过期')
+    environment.auth.sessionCheck!.path = ''
+    await expect(service.login(environment, session)).rejects.toThrow('配置接口')
+    expect(fetcher).not.toHaveBeenCalled()
+  })
+
+  it('reports network and timeout failures without validating the session', async () => {
+    const { environment, session } = fixture()
+    const fetcher = vi.fn<typeof fetch>().mockRejectedValue(new Error('network unavailable'))
+    expect(await new FetchEnvironmentLoginService({ fetcher }).login(environment, session)).toMatchObject({
+      businessSuccess: false, status: null, error: 'network unavailable',
+    })
+    vi.useFakeTimers()
+    try {
+      environment.auth.sessionCheck!.timeoutMs = 5000
+      fetcher.mockImplementation((_url, options) => new Promise((_resolve, reject) => {
+        options?.signal?.addEventListener('abort', () => reject(new Error('aborted')))
+      }))
+      const pending = new FetchEnvironmentLoginService({ fetcher }).login(environment, session)
+      await vi.advanceTimersByTimeAsync(5000)
+      expect(await pending).toMatchObject({ businessSuccess: false, status: null, error: expect.stringContaining('5 秒') })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

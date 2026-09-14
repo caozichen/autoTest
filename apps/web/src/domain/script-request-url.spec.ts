@@ -22,7 +22,9 @@ describe('script request URL', () => {
     expect(supportsScriptRequestPath('form-multilingual-translation-publish')).toBe(true)
     expect(supportsScriptRequestPath('form-all-fields-publish')).toBe(false)
     expect(defaultRequestPathForScript('form-lpxavn-submit')).toBe('/form/?id={{FORM_ID}}')
-    expect(defaultRequestPathForScript('form-all-fields-submit')).toBe('/form/?id={{FORM_ID}}')
+    expect(defaultRequestPathForScript('form-all-fields-submit')).toBe(
+      '/form-activity/submission/preview/reply/{{SUBMISSION_ID}}?fid={{FORM_ID}}',
+    )
     expect(defaultRequestPathForScript('form-submission-reply-edit')).toBe(
       '/form-activity/submission/preview/reply/{{SUBMISSION_ID}}?fid={{FORM_ID}}',
     )
@@ -53,21 +55,21 @@ describe('script request URL', () => {
     ['https://prodtest.admin.lxi.hk', 'https://prodtest.lxi.hk'],
     ['https://lx.admin.lingxi.tech', 'https://lx.lingxi.tech'],
   ])('uses public and admin routes consistently for all five scripts in %s', (adminOrigin, publicOrigin) => {
-    for (const scriptId of ['form-lpxavn-submit', 'form-all-fields-submit']) {
+    for (const scriptId of ['form-lpxavn-submit']) {
       expect(buildScriptRequestUrl(scriptId, adminOrigin, defaultRequestPathForScript(scriptId), { FORM_ID: 'linked' }))
         .toBe(`${publicOrigin}/form/?id=linked`)
     }
-    for (const scriptId of ['form-submission-reply-create', 'form-submission-list-check', 'form-multilingual-translation-publish']) {
-      const url = new URL(buildScriptRequestUrl(scriptId, adminOrigin, defaultRequestPathForScript(scriptId), { FORM_ID: 'linked' }))
+    for (const scriptId of ['form-all-fields-submit', 'form-submission-reply-create', 'form-submission-list-check', 'form-multilingual-translation-publish']) {
+      const url = new URL(buildScriptRequestUrl(scriptId, adminOrigin, defaultRequestPathForScript(scriptId), { FORM_ID: 'linked', SUBMISSION_ID: 'existing-submission' }))
       expect(url.origin).toBe(adminOrigin)
-      expect(url.searchParams.get(scriptId === 'form-submission-reply-create' ? 'fid' : 'id')).toBe('linked')
+      expect(url.searchParams.get(['form-all-fields-submit', 'form-submission-reply-create'].includes(scriptId) ? 'fid' : 'id')).toBe('linked')
     }
   })
 
   it('uses the admin origin for submission list checking, reply creation, editing, and multilingual translation', () => {
     const siteBaseUrl = 'https://lx.admin.lingxi.tech/console'
     expect(requestOriginForScript('form-lpxavn-submit', siteBaseUrl)).toBe('https://lx.lingxi.tech')
-    expect(requestOriginForScript('form-all-fields-submit', siteBaseUrl)).toBe('https://lx.lingxi.tech')
+    expect(requestOriginForScript('form-all-fields-submit', siteBaseUrl)).toBe('https://lx.admin.lingxi.tech')
     expect(requestOriginForScript('form-submission-reply-edit', siteBaseUrl)).toBe(
       'https://lx.admin.lingxi.tech',
     )

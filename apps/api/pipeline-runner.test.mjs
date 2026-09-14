@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
 import { once } from 'node:events'
+import { createServer } from 'node:http'
+import { authenticatePipeline } from './pipeline-login.mjs'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -450,4 +452,65 @@ test('three environments concurrently execute registered fixture modules through
     assert.equal(record.scripts[2].output.environmentCode, code)
     assert.match(record.scripts[0].logs[0].message, /registered fixture/)
   }))
+})
+
+
+for (const scenario of ['valid', 'business-failed', 'unauthorized', 'invalid-json', 'timeout', 'unconfigured']) {
+  test(`reused session preflight ${scenario} gates every Runner step`, async t => {
+    const requests = []
+    const server = createServer((req, res) => {
+      requests.push({ url: req.url, method: req.method, authorization: req.headers.authorization })
+      if (scenario === 'timeout') return
+      res.writeHead(scenario === 'unauthorized' ? 401 : 200)
+      res.end(scenario === 'invalid-json' ? '<html>login</html>' : JSON.stringify({ code: scenario === 'business-failed' ? 1 : 0 }))
+    })
+    server.listen(0, '127.0.0.1'); await once(server, 'listening')
+    t.after(() => { server.closeAllConnections(); server.close() })
+    const { runner, records, calls } = await fixture(t, { login: authenticatePipeline })
+    const data = input()
+    data.environment.baseUrl = `http://127.0.0.1:${server.address().port}`
+    data.environment.apiBaseUrl = data.environment.baseUrl + '/api'
+    data.environment.auth.strategy = 'reuse-session'
+    data.environment.auth.sessionCheck = { method: 'GET', path: '/session/check', successPath: 'code', successValue: '0', timeoutMs: 50 }
+    if (scenario === 'unconfigured') delete data.environment.auth.sessionCheck
+    data.session = { environmentId: data.environment.id, siteUrl: data.environment.baseUrl,
+      apiUrl: data.environment.apiBaseUrl, token: 'saved-preflight-token', scheme: 'Bearer', expiresAt: null }
+    const { record } = await finish(runner, records, data)
+    assert.equal(requests.length, scenario === 'unconfigured' ? 0 : 1)
+    if (requests.length) assert.deepEqual(requests[0], { url: '/api/session/check', method: 'GET', authorization: 'Bearer saved-preflight-token' })
+    if (scenario === 'valid') {
+      assert.equal(record.status, 'passed')
+      assert.equal(calls.length, 3)
+      assert.equal(calls[0].context.extraHTTPHeaders.Authorization, 'Bearer saved-preflight-token')
+    } else {
+      assert.equal(calls.length, 0)
+      assert.equal(record.status, 'failed')
+      assert.equal(record.failureStage, 'login')
+      assert.equal(record.counts.skipped, 3)
+    }
+    assert.ok(!JSON.stringify(record).includes('saved-preflight-token'))
+  })
+}
+
+test('Runner waits for reused session validation before starting any script', async t => {
+  const entered = deferred()
+  const release = deferred()
+  t.after(() => release.resolve())
+  const { runner, records, calls } = await fixture(t, {
+    login: (env, session, signal) => authenticatePipeline(env, session, signal, async () => {
+      entered.resolve(); await release.promise; return { code: 0 }
+    }),
+  })
+  const data = input()
+  data.environment.auth.strategy = 'reuse-session'
+  data.environment.auth.sessionCheck = { method: 'POST', path: '/session', requestBody: '{}', successPath: 'code', successValue: '0', timeoutMs: 100 }
+  data.session = { environmentId: data.environment.id, siteUrl: data.environment.baseUrl,
+    apiUrl: data.environment.apiBaseUrl, token: 'saved-token', scheme: 'Bearer', expiresAt: null }
+  await runner.start(data)
+  await entered.promise
+  assert.equal(calls.length, 0)
+  release.resolve()
+  await runner.active.get(data.executionId)?.completion
+  assert.equal((await records.get(data.executionId)).status, 'passed')
+  assert.equal(calls.length, 3)
 })

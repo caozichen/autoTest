@@ -1,14 +1,14 @@
 {
   "schemaVersion": 1,
-  "revision": 3,
+  "revision": 4,
   "id": "form-all-fields-submit",
   "name": "检查并编辑提报信息",
-  "description": "通过运行时 FORM_ID 定位前序发布的全题型公开表单，并可使用 FORM_CONTRACT 校验动态字段契约；逐题填写三页内容、上传附件、完成签名并提交。",
+  "description": "打开已有提报详情，点击编辑并等待题目与原答案加载完成，保留答案提交一次更新；校验提报 ID 不变、没有新增请求，并刷新核对详情回显。",
   "directory": "scripts",
   "entryFile": "form-all-fields-submit.ui.spec.mjs",
   "timeoutMs": 300000,
   "enabled": true,
-  "requestPath": "/form/?id={{FORM_ID}}",
+  "requestPath": "/form-activity/submission/preview/reply/{{SUBMISSION_ID}}?fid={{FORM_ID}}",
   "inputParameters": [],
   "responseVariableBindings": [
     {
@@ -34,10 +34,10 @@
     "Playwright",
     "UI",
     "Headless Chrome",
-    "表单填写",
-    "全题型",
+    "提报编辑",
+    "原答案保存",
     "P0"
   ],
   "createdAt": "2026-08-31T08:00:00.000Z",
-  "updatedAt": "2026-09-09T06:35:14.000Z"
+  "updatedAt": "2026-09-11T10:03:33.290Z"
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
+import { cloneEnvironmentDraft, defaultSessionCheck } from '@/domain/environment'
 import { LocalEnvironmentService } from './local-environment.service'
 
 class MemoryStorage implements Storage {
@@ -31,6 +32,22 @@ class MemoryStorage implements Storage {
 }
 
 describe('LocalEnvironmentService', () => {
+  it('persists validation configuration across reloads and isolates unsaved edits', async () => {
+    const storage = new MemoryStorage()
+    const service = new LocalEnvironmentService(storage)
+    const current = (await service.list())[0]!
+    current.auth.strategy = 'reuse-session'
+    current.auth.sessionCheck = { ...defaultSessionCheck(), method: 'POST', path: '/session/check',
+      requestBody: '{"scope":"profile"}', successPath: 'data.active', successValue: 'true', timeoutMs: 15000 }
+    await service.update(current.id, cloneEnvironmentDraft(current))
+    const restored = (await new LocalEnvironmentService(storage).list())[0]!
+    expect(restored.auth.sessionCheck).toEqual(current.auth.sessionCheck)
+    const draft = cloneEnvironmentDraft(restored)
+    draft.auth.sessionCheck!.path = '/unsaved'
+    expect(restored.auth.sessionCheck!.path).toBe('/session/check')
+    expect((await new LocalEnvironmentService(storage).list())[0]!.auth.sessionCheck!.path).toBe('/session/check')
+  })
+
   it('starts with only the real Lingxi testing environment', async () => {
     const environments = await new LocalEnvironmentService(new MemoryStorage()).list()
 

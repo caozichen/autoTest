@@ -1,358 +1,136 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import test from 'node:test'
-
-import { createFormLinkContract } from '../../scripts/support/form-link-contract.mjs'
 import { executeRegisteredScript } from './script-runner.mjs'
-import {
-  ONE_PIXEL_PNG,
-  createFullRunFormHtml,
-} from './support/form-all-fields-submit-full-run-fixture.mjs'
-import {
-  createPublishedFormFixture,
-  remapFixtureKeys,
-} from './support/form-lpxavn-fixtures.mjs'
-import {
-  SCRIPT_ID,
-  run,
-} from '../../scripts/form-all-fields-submit.ui.spec.mjs'
+import { SCRIPT_ID, run } from '../../scripts/form-all-fields-submit.ui.spec.mjs'
+import { resolvePipelinePath } from './pipeline-values.mjs'
 
-const SCRIPT_NAME = '检查并编辑提报信息'
-
-async function listen(server) {
-  await new Promise((resolveListen, reject) => {
-    server.once('error', reject)
-    server.listen(0, '127.0.0.1', resolveListen)
-  })
-  const address = server.address()
-  if (!address || typeof address === 'string') throw new Error('测试服务器没有可用端口')
-  return `http://127.0.0.1:${address.port}`
-}
-
-async function close(server) {
-  await new Promise((resolveClose, reject) => {
-    server.close((error) => error ? reject(error) : resolveClose())
-  })
-}
-
-test('requires the dynamic FORM_ID request path instead of falling back to a fixed form', async () => {
-  await assert.rejects(
-    () => run(),
-    /必须通过 FORM_ID 解析出公开表单路径/,
-  )
-  for (const requestPath of ['/form/', '/form/?id=', '/form/?id={{FORM_ID}}']) {
-    await assert.rejects(
-      () => run({ requestPath }),
-      /必须通过 FORM_ID 解析出非空表单 ID/,
-    )
-  }
+test('registered editor requires an existing submission and rejects public or creation paths', async () => {
+  await assert.rejects(() => run(), /必须通过 FORM_ID 和 SUBMISSION_ID/)
+  for (const requestPath of [
+    '/form/?id=linked-form',
+    '/form-activity/submission/preview/reply/create?fid=linked-form',
+    '/form-activity/submission/preview/reply/{{SUBMISSION_ID}}?fid=linked-form',
+    '/form-activity/submission/preview/reply/linked-submission?fid={{FORM_ID}}',
+    '/form-activity/submission/preview/reply/linked-submission',
+  ]) await assert.rejects(() => run({ requestPath }), /提报编辑 URL|提报详情 URL/)
+  await assert.rejects(() => run({
+    requestPath: '/form-activity/submission/preview/reply/linked-submission?fid=linked-form',
+    variables: { SUBMISSION_ID: 'another-submission' },
+  }), /SUBMISSION_ID.*不一致/)
 })
 
-test('production run delegates to the dynamic contract flow and attributes failure artifacts to itself', async (t) => {
-  const artifactRoot = await mkdtemp(join(tmpdir(), 'autotest-all-fields-artifacts-'))
+test('registered fifth step waits for original answers, updates once, and reloads the same submission', async (t) => {
+  const formId = 'linked-form'
+  const submissionId = 'existing-submission'
+  const original = { username: '原提报姓名', groupUsername: '原题组姓名' }
+  let saved = { ...original }
   const requests = []
-  const server = createServer((request, response) => {
-    requests.push(request.url || '/')
-    if (request.url === '/f/form/delegated-id') {
-      response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' })
-      response.end(JSON.stringify({ code: 0, data: {} }))
+  const mutations = []
+  let answersLoaded = false
+  const artifactRootDirectory = await mkdtemp(join(tmpdir(), 'autotest-existing-reply-'))
+  const detailPath = `/form-activity/submission/preview/reply/${submissionId}?fid=${formId}`
+  const apiPath = `/api/be/form/${formId}/submission/${submissionId}`
+  const server = createServer(async (request, response) => {
+    const url = new URL(request.url, 'http://fixture.local')
+    requests.push({ method: request.method, path: url.pathname })
+    const json = (body) => {
+      response.writeHead(200, { 'Content-Type': 'application/json' })
+      response.end(JSON.stringify(body))
+    }
+    if (request.method === 'GET' && url.pathname === apiPath) {
+      if (url.searchParams.has('editing')) {
+        // An enabled submit button and empty inputs appear before the answer body finishes.
+        response.writeHead(200, { 'Content-Type': 'application/json' })
+        response.flushHeaders()
+        setTimeout(() => {
+          answersLoaded = true
+          response.end(JSON.stringify({ code: 0, data: saved }))
+        }, 900)
+      } else json({ code: 0, data: saved })
       return
     }
-    if (request.url === '/form/?id=delegated-id') {
+    if (request.method === 'PUT' && url.pathname === apiPath) {
+      const chunks = []
+      for await (const chunk of request) chunks.push(chunk)
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+      mutations.push({ body, answersLoaded, authorization: request.headers.authorization })
+      saved = body.answers
+      json({ code: 0, data: { submission_id: submissionId } })
+      return
+    }
+    if (url.pathname === new URL(detailPath, 'http://fixture.local').pathname) {
       response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
-      response.end(`<!doctype html>
-        <html lang="zh-CN">
-          <head><title>动态全题型表单</title></head>
-          <body>
-            <main>contract loading</main>
-            <script>fetch('/f/form/delegated-id')</script>
-          </body>
-        </html>`)
+      response.end(`<!doctype html><html><head><link rel="icon" href="data:,"></head><body><main></main><script>
+        const main = document.querySelector('main')
+        const apiPath = ${JSON.stringify(apiPath)}
+        const headers = { 'Content-Type': 'application/json', Authorization: localStorage.getItem('token') }
+        const labels = ['username', 'groupUsername']
+        const escape = text => String(text).replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;')
+        const shell = body => { main.innerHTML = '<h2>联动表单</h2><span><span aria-hidden="true"></span> 已提交 </span><h3>提报信息</h3>' + body }
+        async function detail() {
+          const result = await fetch(apiPath, { headers }).then(r => r.json())
+          shell(labels.map(key => '<div class="reply-kv__row"><span class="reply-kv__label">姓名</span><span class="reply-kv__value">' + escape(result.data[key]) + '</span></div>').join('') + '<button id="edit">编辑</button>')
+          document.querySelector('#edit').onclick = edit
+        }
+        async function edit() {
+          shell('<button id="cancel">取消编辑</button><button id="submit">提交</button>' + labels.map(key => '<section class="fb-p-4 fb-px-6"><div class="fb-runtime-field-heading">姓名</div><input name="' + key + '" value=""></section>').join(''))
+          document.querySelector('#cancel').onclick = detail
+          document.querySelector('#submit').onclick = async () => {
+            const answers = Object.fromEntries(labels.map(key => [key, document.querySelector('[name="' + key + '"]').value]))
+            await fetch(apiPath, { method: 'PUT', headers, body: JSON.stringify({ answers }) }).then(r => r.json())
+            await detail()
+          }
+          const result = await fetch(apiPath + '?editing=1', { headers }).then(r => r.json())
+          labels.forEach(key => { document.querySelector('[name="' + key + '"]').value = result.data[key] })
+        }
+        detail()
+      </script></body></html>`)
       return
     }
     response.writeHead(404)
     response.end('not found')
   })
-  const siteBaseUrl = await listen(server)
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   t.after(async () => {
-    await close(server)
-    await rm(artifactRoot, { recursive: true, force: true })
+    await new Promise(resolve => server.close(resolve))
+    await rm(artifactRootDirectory, { recursive: true, force: true })
   })
-
+  const origin = `http://127.0.0.1:${server.address().port}`
+  const config = JSON.parse(await readFile(new URL('../../config/scripts/form-all-fields-submit.json', import.meta.url), 'utf8'))
+  const submissionAssertions = {
+    title: '联动表单', primaryContactName: original.username, groupContactName: original.groupUsername,
+    fields: { '姓名[1]': original.username, '姓名[2]': original.groupUsername },
+  }
+  const variables = {
+    FORM_ID: formId, SUBMISSION_ID: submissionId, SUBMISSION_ASSERTIONS: JSON.stringify(submissionAssertions),
+    SUBMISSION_EDIT_VALUES: JSON.stringify({ '姓名[1]': '不应应用的会话旧值' }),
+  }
   const result = await executeRegisteredScript({
-    runId: 'attempt-001',
-    executionId: 'execution-001',
-    scriptId: SCRIPT_ID,
+    runId: 'edit-attempt-001', executionId: 'edit-execution-001', scriptId: SCRIPT_ID,
     context: {
-      siteBaseUrl,
-      apiBaseUrl: `${siteBaseUrl}/api`,
-      requestPath: '/form/?id=delegated-id',
-      variables: {},
-      authorizationOrigin: siteBaseUrl,
-      extraHTTPHeaders: { Authorization: 'Bearer test-token' },
+      siteBaseUrl: origin, apiBaseUrl: `${origin}/api`, authorizationOrigin: origin,
+      requestPath: resolvePipelinePath(config.requestPath, variables), variables,
+      extraHTTPHeaders: { Authorization: 'Bearer registered-edit-token' },
     },
-  }, { artifactRootDirectory: artifactRoot })
-
-  assert.equal(result.ok, false)
-  assert.match(result.error, /locator\.click: Timeout \d+ms exceeded/)
-  assert.match(result.error, /fb-runtime-pagination-buttons/)
-
-  const missingFormAssertion = result.assertions.find(({ name }) => (
-    name === '公开表单配置接口响应应包含 form 对象'
-  ))
-  assert.ok(missingFormAssertion)
-  assert.equal(missingFormAssertion.status, 'failed')
-  assert.match(missingFormAssertion.error, /Expected: true/)
-  assert.ok(
-    result.assertions.some(({ sequence }) => sequence > missingFormAssertion.sequence),
-    '配置结构断言失败后应继续执行后续断言，直到页面操作被真实阻塞',
-  )
-
-  assert.ok(requests.includes('/form/?id=delegated-id'))
-  assert.ok(requests.includes('/f/form/delegated-id'))
-  const identityLog = result.logs.find(({ level, message }) => (
-    level === 'info' && message === '已根据所选环境域名拼接公开表单地址'
-  ))
-  assert.deepEqual(
-    { scriptId: identityLog?.details?.scriptId, scriptName: identityLog?.details?.scriptName },
-    { scriptId: SCRIPT_ID, scriptName: SCRIPT_NAME },
-  )
-
-  const failureLog = result.logs.find(({ level, message }) => (
-    level === 'error' && message.includes('已保存当前页面全页截图')
-  ))
-  assert.ok(failureLog)
-  assert.match(failureLog.message, new RegExp(SCRIPT_NAME))
-  assert.doesNotMatch(failureLog.message, /lpXAVN/)
-  assert.equal(failureLog.details.scriptId, SCRIPT_ID)
-  assert.equal(failureLog.details.scriptName, SCRIPT_NAME)
-
-  const expectedAttemptDirectory = resolve(
-    artifactRoot,
-    'execution-001',
-    SCRIPT_ID,
-    'attempt-001',
-  )
-  const screenshotPath = failureLog.details.screenshotPath
-  assert.equal(screenshotPath.startsWith(`${expectedAttemptDirectory}/`), true)
-  assert.equal((await stat(screenshotPath)).size > 0, true)
-  assert.deepEqual(
-    [...(await readFile(screenshotPath)).subarray(0, 8)],
-    [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
-  )
-
-  const artifacts = result.artifacts
-  assert.equal(artifacts.length, 3)
-  assert.deepEqual(
-    artifacts.map((artifact) => artifact.type).sort(),
-    ['fixture', 'fixture', 'screenshot'],
-  )
-  assert.ok(artifacts.every((artifact) => artifact.stepId === SCRIPT_ID))
-  assert.ok(artifacts.every((artifact) => artifact.absolutePath.startsWith(`${expectedAttemptDirectory}/`)))
-})
-
-test('registered production entry uses formId for public GET, validation, submission and result', async (t) => {
-  const formId = 'full-run-form-id'
-  const formCode = 'legacy-full-run-code'
-  assert.notEqual(formId, formCode)
-  const token = 'Bearer full-run-sensitive-token'
-  const fixture = createPublishedFormFixture()
-  fixture.data.form.form_id = formId
-  fixture.data.form.form_code = formCode
-  remapFixtureKeys(fixture)
-  const linkedContract = createFormLinkContract({
-    formId,
-    formCode,
-    title: fixture.data.form.title,
-    revisionNo: fixture.data.revision_no,
-    items: fixture.data.items,
-  })
-  const artifactRoot = await mkdtemp(join(tmpdir(), 'autotest-all-fields-full-run-'))
-  const observedRequests = []
-  let submittedPayload = null
-  let siteBaseUrl = ''
-  let documents = 0
-  let initialLoadsFinished = 0
-  let loadsFinishedBeforeReload = null
-
-  const server = createServer(async (request, response) => {
-    const requestUrl = new URL(request.url || '/', 'http://fixture.local')
-    observedRequests.push({
-      method: request.method || 'GET',
-      path: `${requestUrl.pathname}${requestUrl.search}`,
-      authorization: request.headers.authorization,
-    })
-
-    try {
-      if (request.method === 'GET' && requestUrl.pathname === '/form/' && requestUrl.searchParams.get('id') === formId) {
-        documents++
-        if (documents === 2) loadsFinishedBeforeReload = initialLoadsFinished
-        response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
-        let html = createFullRunFormHtml({
-          origin: siteBaseUrl,
-          formId,
-          title: fixture.data.form.title,
-          fieldKeys: linkedContract.fieldKeys,
-        })
-        if (documents === 1) html = html.replace('</body>', '<img src="/slow-initial.png"><script>fetch("/api/area/tree")</script></body>')
-        response.end(html)
-        return
-      }
-      if (requestUrl.pathname === '/slow-initial.png' || requestUrl.pathname === '/api/area/tree') {
-        const isImage = requestUrl.pathname.endsWith('.png')
-        response.writeHead(200, { 'Content-Type': isImage ? 'image/png' : 'application/json' })
-        response.flushHeaders()
-        setTimeout(() => {
-          initialLoadsFinished++
-          response.end(isImage ? ONE_PIXEL_PNG : '{"code":0,"data":[]}')
-        }, 2500)
-        return
-      }
-      if (request.method === 'GET' && requestUrl.pathname === `/f/form/${formId}`) {
-        response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' })
-        response.end(JSON.stringify(fixture))
-        return
-      }
-      if (request.method === 'POST' && requestUrl.pathname === `/f/form/${formId}/submission/validate-page`) {
-        for await (const _chunk of request) {
-          // Consume the request before replying so Chrome observes a normal completed mutation.
-        }
-        response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' })
-        response.end(JSON.stringify({ code: 0, data: {} }))
-        return
-      }
-      if (request.method === 'POST' && requestUrl.pathname === `/f/form/${formId}/submission`) {
-        const chunks = []
-        for await (const chunk of request) chunks.push(chunk)
-        submittedPayload = JSON.parse(Buffer.concat(chunks).toString('utf8'))
-        response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' })
-        response.end(JSON.stringify({
-          code: 0,
-          data: { submission_id: 'full-run-submission-001' },
-        }))
-        return
-      }
-      if (request.method === 'GET' && requestUrl.pathname === '/fixture-assets/radio-option.png') {
-        response.writeHead(200, { 'Content-Type': 'image/png' })
-        response.end(ONE_PIXEL_PNG)
-        return
-      }
-      if (request.method === 'GET' && requestUrl.pathname === '/favicon.ico') {
-        response.writeHead(200, { 'Content-Type': 'image/png' })
-        response.end(ONE_PIXEL_PNG)
-        return
-      }
-      response.writeHead(404)
-      response.end('not found')
-    } catch (error) {
-      response.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' })
-      response.end(JSON.stringify({ code: 500, message: error instanceof Error ? error.message : String(error) }))
-    }
-  })
-  siteBaseUrl = await listen(server)
-  t.after(async () => {
-    await close(server)
-    await rm(artifactRoot, { recursive: true, force: true })
-  })
-
-  const result = await executeRegisteredScript({
-    runId: 'attempt-full-run-001',
-    executionId: 'execution-full-run-001',
-    scriptId: SCRIPT_ID,
-    context: {
-      siteBaseUrl,
-      apiBaseUrl: `${siteBaseUrl}/api`,
-      requestPath: `/form/?id=${formId}`,
-      variables: { FORM_CONTRACT: JSON.stringify(linkedContract) },
-      authorizationOrigin: siteBaseUrl,
-      extraHTTPHeaders: { Authorization: token },
-    },
-  }, { artifactRootDirectory: artifactRoot })
-
-  assert.equal(
-    result.ok,
-    true,
-    [
-      result.error,
-      ...result.assertions
-        .filter(({ status }) => status === 'failed')
-        .map(({ module, name, error }) => `[${module}] ${name}: ${error ?? '无错误详情'}`),
-    ].filter(Boolean).join('\n'),
-  )
-  assert.equal(loadsFinishedBeforeReload, 2, '主动刷新前必须完成旧文档的地区树正文和图片加载')
+  }, { artifactRootDirectory })
+  assert.equal(result.ok, true, [result.error, ...result.assertions.filter(a => a.status === 'failed').map(a => `${a.name}: ${a.error}`)].filter(Boolean).join('\n'))
+  assert.deepEqual(saved, original)
+  assert.deepEqual(mutations, [{ body: { answers: original }, answersLoaded: true, authorization: 'Bearer registered-edit-token' }])
+  assert.equal(requests.filter(r => r.method === 'POST').length, 0)
+  assert.ok(requests.filter(r => r.method === 'GET' && r.path === apiPath).length >= 4)
   assert.equal(result.result.scriptId, SCRIPT_ID)
-  assert.equal(result.result.status, 'submitted')
   assert.equal(result.result.formId, formId)
-  assert.equal(result.result.submissionId, 'full-run-submission-001')
-  assert.equal(result.result.submissionAssertions.title, fixture.data.form.title)
-  assert.match(result.result.submissionAssertions.primaryContactName, /^自动化测试用户\d{4}$/)
-  assert.match(result.result.submissionAssertions.groupContactName, /^题组联系人\d{4}$/)
-  assert.match(result.result.submissionAssertions.fields['姓名[1]'], /^自动化测试用户\d{4}$/)
-  assert.match(result.result.submissionAssertions.fields['姓名[2]'], /^题组联系人\d{4}$/)
-  assert.equal(
-    result.result.submissionAssertions.primaryContactName,
-    result.result.submissionAssertions.fields['姓名[1]'],
-  )
-  assert.equal(
-    result.result.submissionAssertions.groupContactName,
-    result.result.submissionAssertions.fields['姓名[2]'],
-  )
-  assert.notEqual(
-    result.result.submissionAssertions.fields['姓名[1]'],
-    result.result.submissionAssertions.fields['姓名[2]'],
-  )
-  assert.equal(result.result.pageCount, 3)
-  assert.equal(result.result.linkedContractUsed, true)
-  assert.equal(result.result.pageValidationRequestCount, 3)
-  assert.equal(result.result.submissionRequestCount, 1)
-  assert.equal(result.result.assertedAnswerFieldCount, 27)
-  assert.equal(result.result.authorizationLeakCount, 0)
-  assert.equal(result.assertions.some(({ status }) => status === 'failed'), false)
-
-  const validationRequests = observedRequests.filter(({ method, path }) => (
-    method === 'POST' && path === `/f/form/${formId}/submission/validate-page`
-  ))
-  const submissionRequests = observedRequests.filter(({ method, path }) => (
-    method === 'POST' && path === `/f/form/${formId}/submission`
-  ))
-  assert.equal(validationRequests.length, 3)
-  assert.equal(submissionRequests.length, 1)
-  for (const [method, path] of [
-    ['GET', `/f/form/${formId}`],
-    ['POST', `/f/form/${formId}/submission/validate-page`],
-    ['POST', `/f/form/${formId}/submission`],
-  ]) {
-    assert.ok(
-      observedRequests.some((request) => request.method === method && request.path === path),
-      `${method} ${path} should use formId`,
-    )
-  }
-  assert.ok(observedRequests.every(({ path }) => !path.includes(`/f/form/${formCode}`)))
-  assert.ok(observedRequests.every(({ authorization }) => authorization === undefined))
-  assert.doesNotMatch(JSON.stringify(result), /full-run-sensitive-token/)
-
-  assert.ok(submittedPayload)
-  const serializedSubmission = JSON.stringify(submittedPayload)
-  for (const name of [
-    'username', 'mobile', 'email', 'idCard', 'landlinePhone', 'address', 'birthday',
-    'input', 'textarea', 'radio', 'checkbox', 'select', 'number', 'date', 'time',
-    'imageUpload', 'fileUpload', 'cascader', 'signature', 'groupUsername',
-    'groupMobile', 'groupEmail', 'matrix', 'matrixChoice', 'ranking', 'rating', 'nps',
-  ]) {
-    assert.match(serializedSubmission, new RegExp(linkedContract.fieldKeys[name]))
-  }
-
-  const expectedAttemptDirectory = resolve(
-    artifactRoot,
-    'execution-full-run-001',
-    SCRIPT_ID,
-    'attempt-full-run-001',
-  )
+  assert.equal(result.result.submissionId, submissionId)
+  assert.equal(result.result.updateRequestCount, 1)
+  assert.equal(result.result.createRequestCount, 0)
+  assert.equal(result.result.reloaded, true)
+  assert.deepEqual(result.result.appliedEditFields, [])
+  assert.deepEqual(result.result.submissionAssertions, submissionAssertions)
   assert.equal(result.artifacts.length, 2)
-  assert.ok(result.artifacts.every(({ type }) => type === 'fixture'))
-  assert.ok(result.artifacts.every(({ stepId }) => stepId === SCRIPT_ID))
-  assert.ok(result.artifacts.every(({ absolutePath }) => absolutePath.startsWith(`${expectedAttemptDirectory}/`)))
+  assert.ok(result.artifacts.every(artifact => artifact.stepId === SCRIPT_ID && artifact.type === 'screenshot'))
+  assert.doesNotMatch(JSON.stringify(result), /registered-edit-token/)
 })

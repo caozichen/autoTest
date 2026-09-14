@@ -1,4 +1,5 @@
 import {
+  defaultSessionCheck,
   formatEnvironmentRequestBody,
   parseEnvironmentRequestBody,
   type EnvironmentDraft,
@@ -156,6 +157,17 @@ function normalizeEnvironment(value: unknown, applyLingxiDefaults: boolean): Tes
     active: value.active,
     auth: {
       mode,
+      ...(isRecord(value.auth.sessionCheck) ? { sessionCheck: {
+        ...defaultSessionCheck(),
+        method: (['GET', 'POST', 'PUT', 'PATCH'].includes(String(value.auth.sessionCheck.method))
+          ? value.auth.sessionCheck.method : 'GET') as 'GET' | 'POST' | 'PUT' | 'PATCH',
+        path: stringValue(value.auth.sessionCheck.path),
+        requestBody: stringValue(value.auth.sessionCheck.requestBody) || '{}',
+        successPath: stringValue(value.auth.sessionCheck.successPath),
+        successValue: stringValue(value.auth.sessionCheck.successValue),
+        timeoutMs: typeof value.auth.sessionCheck.timeoutMs === 'number' && Number.isFinite(value.auth.sessionCheck.timeoutMs)
+          ? Math.min(120_000, Math.max(5_000, value.auth.sessionCheck.timeoutMs)) : 30_000,
+      } } : {}),
       ...(value.auth.strategy === 'reuse-session' ? { strategy: 'reuse-session' as const } : {}),
       method,
       timeoutMs: typeof value.auth.timeoutMs === 'number' && value.auth.timeoutMs >= 5_000

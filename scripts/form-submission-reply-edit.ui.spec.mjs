@@ -1,5 +1,6 @@
 import { scaleTimeout } from './support/environment-timeouts.mjs'
 import { expect as flowExpect } from './support/environment-timeouts.mjs'
+import { clickWhenReady, observeUiReadiness, waitForUiReady } from './support/ui-readiness.mjs'
 
 import { attachNetworkObserver } from './support/api-response-recorder.mjs'
 import { launchGoogleChrome } from './support/google-chrome.mjs'
@@ -132,7 +133,7 @@ function parseSubmissionAssertions(value) {
   const fields = normalizeFieldAssertions(parsed.fields)
   const editFields = normalizeEditFieldAssertions(parsed.editFields)
   const unknownKeys = Object.keys(parsed).filter((key) => (
-    !['title', 'status', 'texts', 'fields', 'editFields'].includes(key)
+    !['title', 'status', 'texts', 'fields', 'editFields', 'primaryContactName', 'groupContactName'].includes(key)
   ))
   if (unknownKeys.length > 0) {
     throw new Error(`SUBMISSION_ASSERTIONS 包含不支持的配置项：${unknownKeys.join(', ')}`)
@@ -169,11 +170,15 @@ function parseSubmissionEditValues(value) {
 
 function resolveSubmissionContext(detailUrl, variables = {}) {
   const url = new URL(detailUrl)
-  const pathSegments = url.pathname.split('/').filter(Boolean)
-  const replyIndex = pathSegments.lastIndexOf('reply')
-  const rawPathSubmissionId = replyIndex >= 0 ? pathSegments[replyIndex + 1] : ''
-  const pathSubmissionId = rawPathSubmissionId ? decodeURIComponent(rawPathSubmissionId) : ''
+  const pathMatch = url.pathname.match(/^\/form-activity\/submission\/preview\/reply\/([a-zA-Z0-9_-]+)$/)
+  const pathSubmissionId = pathMatch?.[1] ?? ''
+  if (!pathSubmissionId || pathSubmissionId === 'create') {
+    throw new Error('提报编辑 URL 必须指向已有提报详情，不能使用公开填写页或创建页')
+  }
   const queryFormId = String(url.searchParams.get('fid') || '').trim()
+  if (!/^[a-zA-Z0-9_-]+$/.test(queryFormId)) {
+    throw new Error('提报详情 URL 必须包含已解析的非空 fid')
+  }
   const variableSubmissionId = String(variables.SUBMISSION_ID || '').trim()
   const variableFormId = String(variables.FORM_ID || '').trim()
   if (variableSubmissionId && pathSubmissionId && variableSubmissionId !== pathSubmissionId) {
@@ -187,13 +192,6 @@ function resolveSubmissionContext(detailUrl, variables = {}) {
   if (!submissionId) throw new Error('无法从 SUBMISSION_ID 或提报详情路径解析 submissionId')
   if (!formId) throw new Error('无法从 FORM_ID 或提报详情地址 fid 参数解析 formId')
   return { submissionId, formId }
-}
-
-function submissionIdLocator(page, submissionId) {
-  const pattern = new RegExp(
-    `(?:提報|填报|提交)\\s*ID\\s*[：:]\\s*${escapeRegExp(submissionId)}`,
-  )
-  return page.getByText(pattern).first()
 }
 
 function fieldHeading(page, reference) {
@@ -261,12 +259,10 @@ async function assertInitialDetailStructure(page, {
 }) {
   const title = page.getByRole('heading', { level: 2 }).first()
   await expect(title, '提报详情初始态应显示 h2 标题').toBeVisible()
+  expect(new URL(page.url()).pathname, '详情地址必须属于当前提报 ID')
+    .toBe(`/form-activity/submission/preview/reply/${encodeURIComponent(submissionId)}`)
   await expect(
-    submissionIdLocator(page, submissionId),
-    `提报详情初始态应显示提报 ID：${submissionId}`,
-  ).toBeVisible()
-  await expect(
-    page.getByText(/^(?:已提交|已提交成功)$/).first(),
+    page.getByText(/^\s*(?:已提交|已提交成功)\s*$/).first(),
     '提报详情初始态应显示“已提交”状态',
   ).toBeVisible()
   await expect(
@@ -375,8 +371,11 @@ async function assertEditStructure(page, editFields) {
 
   const editHeadings = page.locator('.fb-runtime-field-heading')
   await expect(editHeadings, '编辑态应至少显示一个字段标题').not.toHaveCount(0)
+  await flowExpect(editHeadings, '提交前必须等待编辑题目挂载完成').not.toHaveCount(0)
   const editableControls = simpleTextControls(page.locator('.fb-p-4.fb-px-6'))
   await expect(editableControls, '编辑态应至少显示一个可编辑的简单文本控件').not.toHaveCount(0)
+  await flowExpect(editableControls, '提交前必须等待原答案控件加载完成').not.toHaveCount(0)
+  await waitForUiReady(page, { timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) })
   for (const field of editFields) {
     const control = await resolveEditableControl(page, field.label, { required: false })
     await expect(control, `编辑态字段“${field.label}”应显示唯一可编辑控件`).toBeTruthy()
@@ -443,9 +442,15 @@ async function inspectMutationResponse(response) {
     (text) => ({ text }),
     (error) => ({ error }),
   )
-  if ('error' in responseOutcome) return { body: null, succeeded: httpSucceeded }
+  if ('error' in responseOutcome) {
+    expect(false, '保存提报修改接口响应正文必须可读取，才能确认业务成功').toBe(true)
+    return { body: null, succeeded: false }
+  }
   const responseText = 'text' in responseOutcome ? responseOutcome.text : ''
-  if (!responseText.trim()) return { body: null, succeeded: httpSucceeded }
+  if (!responseText.trim()) {
+    expect(false, '保存提报修改接口应返回非空 JSON 响应').toBe(true)
+    return { body: null, succeeded: false }
+  }
   let body
   try {
     body = JSON.parse(responseText)
@@ -456,7 +461,9 @@ async function inspectMutationResponse(response) {
   const objectBody = Boolean(body && typeof body === 'object' && !Array.isArray(body))
   expect(objectBody, '保存提报修改接口返回的 JSON 应为对象').toBe(true)
   if (!objectBody) return { body: null, succeeded: false }
-  let businessSucceeded = true
+  const hasBusinessStatus = Object.hasOwn(body, 'code') || Object.hasOwn(body, 'success')
+  expect(hasBusinessStatus, '保存提报修改接口应返回明确的业务成功状态').toBe(true)
+  let businessSucceeded = hasBusinessStatus
   if (Object.prototype.hasOwnProperty.call(body, 'code')) {
     businessSucceeded = Number(body.code) === 0
     expect(businessSucceeded, `保存提报修改接口业务码应为 0，实际 ${body.code}`).toBe(true)
@@ -491,6 +498,18 @@ async function screenshotFailure(page, submissionId, artifactWriter) {
   )
 }
 
+async function detailAnswersSnapshot(page) {
+  await flowExpect(page.locator('.reply-kv__row'), '详情答案必须加载完成').not.toHaveCount(0)
+  return page.locator('.reply-kv__row').evaluateAll((rows) => rows.map((row) => ({
+    label: row.querySelector('.reply-kv__label')?.textContent?.trim() ?? '',
+    value: row.querySelector('.reply-kv__value')?.textContent?.replace(/\s+/g, ' ').trim() ?? '',
+    images: [...row.querySelectorAll('img[src]')].map((image) => {
+      const url = new URL(image.src)
+      return `${url.origin}${url.pathname}`
+    }),
+  })))
+}
+
 export async function run({
   siteBaseUrl,
   apiBaseUrl,
@@ -504,6 +523,8 @@ export async function run({
   recordApiResponse,
   recordResourceResponse,
   captureFailureScreenshot = true,
+  captureSuccessScreenshots = false,
+  verifyPersistence = false,
 }) {
   if (!siteBaseUrl) throw new Error('运行环境必须提供 Web 基址')
   if (!apiBaseUrl) throw new Error('运行环境必须提供 API 基址')
@@ -518,6 +539,7 @@ export async function run({
   const { submissionId, formId } = resolveSubmissionContext(detailUrl, variables)
   const assertions = parseSubmissionAssertions(variables.SUBMISSION_ASSERTIONS)
   const editValues = parseSubmissionEditValues(variables.SUBMISSION_EDIT_VALUES)
+  const submissionAssertions = parseJsonObject(variables.SUBMISSION_ASSERTIONS, 'SUBMISSION_ASSERTIONS')
 
   let browser
   let context
@@ -556,13 +578,23 @@ export async function run({
     })
     await networkObserver.ready
     page = await context.newPage()
+    observeUiReadiness(page)
     page.setDefaultTimeout(scaleTimeout(ACTION_TIMEOUT_MS))
     page.setDefaultNavigationTimeout(scaleTimeout(NAVIGATION_TIMEOUT_MS))
 
     let businessRequestCount = 0
     let authenticatedRequestCount = 0
     const tokenViolations = []
+    let updateRequestCount = 0
+    let createRequestCount = 0
     page.on('request', (request) => {
+      const url = new URL(request.url())
+      if (url.origin === apiUrl.origin && isSubmissionMutation({ request: () => request, url: () => request.url() }, {
+        origin: apiUrl.origin, formId, submissionId,
+      })) updateRequestCount += 1
+      if (request.method() === 'POST' && /\/(?:be|f)\/form\/[^/]+\/submission\/?$/.test(url.pathname)) {
+        createRequestCount += 1
+      }
       if (!isApiBusinessRequest(request, apiUrl.origin, apiPathPrefix)) return
       businessRequestCount += 1
       if (request.headers().authorization === authorization) {
@@ -576,16 +608,25 @@ export async function run({
     networkObserver.setPhase('提报详情加载')
     await page.goto(detailUrl, { waitUntil: 'domcontentloaded' })
     await flowExpect(page, 'Token 生效后不应跳转登录页').not.toHaveURL(/\/login(?:[/?#]|$)/)
+    await flowExpect(page, '编辑前必须定位本次提报的精确详情地址').toHaveURL(detailUrl)
+    await waitForUiReady(page, { timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) })
     const editButton = await assertInitialDetailStructure(page, { submissionId, assertions })
+    const originalAnswers = verifyPersistence ? await detailAnswersSnapshot(page) : null
 
     networkObserver.setPhase('进入编辑态')
     logger('info', '提报详情初始态断言执行完成，进入编辑态')
-    await editButton.click()
+    await clickWhenReady(editButton)
     const { submitButton } = await assertEditStructure(page, assertions.editFields)
+    await flowExpect(page, '进入编辑态后必须保持原提报地址').toHaveURL(detailUrl)
     networkObserver.setPhase('编辑字段')
     const appliedEditFields = await applyEditValues(page, editValues)
+    if (captureSuccessScreenshots && artifactWriter?.captureScreenshot) {
+      await artifactWriter.captureScreenshot(page, 'screenshots/submission-edit-ready.png', { fullPage: true })
+    }
 
     throwIfRunAborted(signal)
+    flowExpect(updateRequestCount, '点击提交前不得提前发送提报更新请求').toBe(0)
+    flowExpect(createRequestCount, '已有提报编辑流程不得发送新增提报请求').toBe(0)
     networkObserver.setPhase('保存提报修改')
     logger('info', '编辑态结构和字段值断言执行完成，提交提报修改', { appliedEditFields })
     const updateResponsePromise = page.waitForResponse((response) => isSubmissionMutation(response, {
@@ -593,16 +634,28 @@ export async function run({
       formId,
       submissionId,
     }), { timeout: scaleTimeout(ACTION_TIMEOUT_MS) })
-    await submitButton.click()
-    const updateResponseObject = await updateResponsePromise
-    const updateOutcome = await inspectMutationResponse(updateResponseObject)
+      .then(async (response) => ({ response, outcome: await inspectMutationResponse(response) }))
+      .then(value => ({ value }), error => ({ error }))
+    await clickWhenReady(submitButton)
+    const capturedUpdate = await updateResponsePromise
+    if (capturedUpdate.error) throw capturedUpdate.error
+    const { response: updateResponseObject, outcome: updateOutcome } = capturedUpdate.value
     const updateResponse = updateOutcome.body
     expect(
       updateResponseObject.request().headers().authorization,
       '保存提报修改请求必须携带环境 Token',
     ).toBe(authorization)
+    expect(updateRequestCount, '整个编辑流程应恰好发送一次原提报 PUT 更新请求').toBe(1)
+    expect(createRequestCount, '编辑保存不得新增提报记录').toBe(0)
+    const returnedId = updateResponse?.data?.submission_id ?? updateResponse?.data?.id
+    if (returnedId !== undefined) {
+      expect(String(returnedId), '保存响应中的提报 ID 必须保持不变').toBe(submissionId)
+    }
 
     networkObserver.setPhase('保存后验证')
+    await flowExpect(page.getByRole('button', { name: /^(?:编辑|編輯)$/ }), '保存后必须恢复详情态').toBeVisible()
+    await flowExpect(page, '保存后必须仍在原提报详情地址').toHaveURL(detailUrl)
+    await waitForUiReady(page, { timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) })
     await assertInitialDetailStructure(page, {
       submissionId,
       assertions,
@@ -610,6 +663,20 @@ export async function run({
       requireEditButton: false,
     })
     await assertAppliedDetailValues(page, editValues)
+    if (verifyPersistence) {
+      networkObserver.setPhase('刷新核对原提报')
+      await page.reload({ waitUntil: 'domcontentloaded' })
+      await flowExpect(page, '刷新后应仍然打开原提报').toHaveURL(detailUrl)
+      await waitForUiReady(page, { timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) })
+      await assertInitialDetailStructure(page, { submissionId, assertions, verifyConfiguredAssertions: false })
+      await assertAppliedDetailValues(page, editValues)
+      if (appliedEditFields.length === 0) {
+        expect(await detailAnswersSnapshot(page), '原答案直接提交并刷新后，全部详情值和图片应保持一致').toEqual(originalAnswers)
+      }
+    }
+    if (captureSuccessScreenshots && artifactWriter?.captureScreenshot) {
+      await artifactWriter.captureScreenshot(page, 'screenshots/submission-edit-saved.png', { fullPage: true })
+    }
     expect(tokenViolations, '所有 API 业务请求都必须携带环境 Token').toEqual([])
     expect(authenticatedRequestCount, '至少应观察到一个携带 Token 的 API 业务请求').toBeGreaterThan(0)
     expect(authenticatedRequestCount, '携带 Token 的请求数应等于全部 API 业务请求数').toBe(businessRequestCount)
@@ -620,6 +687,9 @@ export async function run({
       formId,
       appliedEditFields,
       businessRequestCount,
+      updateRequestCount,
+      createRequestCount,
+      reloaded: verifyPersistence,
     })
 
     networkObserver.setPhase('运行结果汇总')
@@ -631,6 +701,10 @@ export async function run({
       appliedEditFields,
       configuredAssertionCount: assertions.configuredAssertionCount,
       updateResponse,
+      submissionAssertions,
+      updateRequestCount,
+      createRequestCount,
+      reloaded: verifyPersistence,
     }
   } catch (error) {
     if (signal?.aborted) {

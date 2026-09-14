@@ -33,7 +33,7 @@ test('registers the submission list checker with bounded admin-list inputs', asy
   )
 })
 
-test('publishes the current form, submission, and contact assertion outputs from filling scripts', async () => {
+test('preserves form, submission, and contact assertion outputs through filling and editing', async () => {
   for (const scriptId of ['form-lpxavn-submit', 'form-all-fields-submit']) {
     const config = await registeredConfig(scriptId)
     assert.deepEqual(

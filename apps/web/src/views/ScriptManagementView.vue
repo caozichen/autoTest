@@ -386,7 +386,7 @@ async function runScripts(targets: AutomationScript[]): Promise<void> {
     })
 
     ElMessage.info(environment.auth.strategy === 'reuse-session'
-      ? `正在加载${environment.name}的已有登录态`
+      ? `正在测试${environment.name}的已有登录态`
       : `正在登录${environment.name}并刷新 Token`)
     const runtimeToken = await authenticateEnvironment(environment, services)
     if (!runtimeToken) throw new Error('认证已取消')

@@ -10,7 +10,21 @@ export interface EnvironmentVariable {
 export type EnvironmentLoginMode = 'password' | 'mobile-code'
 export type EnvironmentLoginMethod = 'POST' | 'PUT' | 'PATCH'
 
+export interface EnvironmentSessionCheckConfig {
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH'
+  path: string
+  requestBody: string
+  successPath: string
+  successValue: string
+  timeoutMs: number
+}
+
+export function defaultSessionCheck(): EnvironmentSessionCheckConfig {
+  return { method: 'GET', path: '', requestBody: '{}', successPath: 'code', successValue: '0', timeoutMs: 30_000 }
+}
+
 export interface EnvironmentAuthConfig {
+  sessionCheck?: EnvironmentSessionCheckConfig
   strategy?: 'login' | 'reuse-session'
   mode: EnvironmentLoginMode
   method: EnvironmentLoginMethod
@@ -77,7 +91,7 @@ export function cloneEnvironmentDraft(environment: EnvironmentDraft): Environmen
     apiBaseUrl: environment.apiBaseUrl,
     ignoreHTTPSErrors: environment.ignoreHTTPSErrors,
     enabled: environment.enabled,
-    auth: { ...environment.auth },
+    auth: { ...environment.auth, ...(environment.auth.sessionCheck ? { sessionCheck: { ...environment.auth.sessionCheck } } : {}) },
     variables: environment.variables.map((variable) => ({ ...variable })),
   }
 }

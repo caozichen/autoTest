@@ -31,10 +31,16 @@ for (const [name, response, message] of [
   await assert.rejects(authenticatePipeline(environment(), null, signal(), async () => response), message)
 })
 
-test('reused session checks exact environment, origins and expiry without logging in', async () => {
+test('reused session checks exact environment, origins and expiry before testing the saved token', async () => {
   const env = environment(); env.auth.strategy = 'reuse-session'
   const session = { environmentId: env.id, siteUrl: env.baseUrl, apiUrl: env.apiBaseUrl, token: 'fixture', scheme: 'Bearer', expiresAt: null }
-  const request = () => { throw new Error('must not authenticate') }
+  env.auth.sessionCheck = { method: 'GET', path: '/session', successPath: 'code', successValue: '0', timeoutMs: 50 }
+  const request = async (url, options) => {
+    assert.equal(url.href, env.apiBaseUrl + '/session')
+    assert.equal(options.headers.Authorization, 'Bearer fixture')
+    assert.equal(options.body, undefined)
+    return { code: 0 }
+  }
   assert.deepEqual(await authenticatePipeline(env, session, signal(), request), { token: 'fixture', scheme: 'Bearer' })
   for (const changes of [{ environmentId: 'other' }, { siteUrl: 'http://other.test' }, { apiUrl: 'http://other.test/api' }, { expiresAt: 1 }, { token: 'has spaces' }]) {
     await assert.rejects(authenticatePipeline(env, { ...session, ...changes }, signal(), request), /登录态/)

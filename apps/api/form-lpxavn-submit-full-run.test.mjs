@@ -1,0 +1,237 @@
+import assert from 'node:assert/strict'
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
+import { createServer } from 'node:http'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
+import test from 'node:test'
+
+import { createFormLinkContract } from '../../scripts/support/form-link-contract.mjs'
+import { executeRegisteredScript } from './script-runner.mjs'
+import {
+  ONE_PIXEL_PNG,
+  createFullRunFormHtml,
+} from './support/form-all-fields-submit-full-run-fixture.mjs'
+import {
+  createPublishedFormFixture,
+  remapFixtureKeys,
+} from './support/form-lpxavn-fixtures.mjs'
+const SCRIPT_ID = 'form-lpxavn-submit'
+
+async function listen(server) {
+  await new Promise((resolveListen, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolveListen)
+  })
+  const address = server.address()
+  if (!address || typeof address === 'string') throw new Error('测试服务器没有可用端口')
+  return `http://127.0.0.1:${address.port}`
+}
+
+async function close(server) {
+  await new Promise((resolveClose, reject) => {
+    server.close((error) => error ? reject(error) : resolveClose())
+  })
+}
+
+test('registered production entry uses formId for public GET, validation, submission and result', async (t) => {
+  const formId = 'full-run-form-id'
+  const formCode = 'legacy-full-run-code'
+  assert.notEqual(formId, formCode)
+  const token = 'Bearer full-run-sensitive-token'
+  const fixture = createPublishedFormFixture()
+  fixture.data.form.form_id = formId
+  fixture.data.form.form_code = formCode
+  remapFixtureKeys(fixture)
+  const linkedContract = createFormLinkContract({
+    formId,
+    formCode,
+    title: fixture.data.form.title,
+    revisionNo: fixture.data.revision_no,
+    items: fixture.data.items,
+  })
+  const artifactRoot = await mkdtemp(join(tmpdir(), 'autotest-all-fields-full-run-'))
+  const observedRequests = []
+  let submittedPayload = null
+  let siteBaseUrl = ''
+  let documents = 0
+  let initialLoadsFinished = 0
+  let loadsFinishedBeforeReload = null
+
+  const server = createServer(async (request, response) => {
+    const requestUrl = new URL(request.url || '/', 'http://fixture.local')
+    observedRequests.push({
+      method: request.method || 'GET',
+      path: `${requestUrl.pathname}${requestUrl.search}`,
+      authorization: request.headers.authorization,
+    })
+
+    try {
+      if (request.method === 'GET' && requestUrl.pathname === '/form/' && requestUrl.searchParams.get('id') === formId) {
+        documents++
+        if (documents === 2) loadsFinishedBeforeReload = initialLoadsFinished
+        response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+        let html = createFullRunFormHtml({
+          origin: siteBaseUrl,
+          formId,
+          title: fixture.data.form.title,
+          fieldKeys: linkedContract.fieldKeys,
+        })
+        if (documents === 1) html = html.replace('</body>', '<img src="/slow-initial.png"><script>fetch("/api/area/tree")</script></body>')
+        response.end(html)
+        return
+      }
+      if (requestUrl.pathname === '/slow-initial.png' || requestUrl.pathname === '/api/area/tree') {
+        const isImage = requestUrl.pathname.endsWith('.png')
+        response.writeHead(200, { 'Content-Type': isImage ? 'image/png' : 'application/json' })
+        response.flushHeaders()
+        setTimeout(() => {
+          initialLoadsFinished++
+          response.end(isImage ? ONE_PIXEL_PNG : '{"code":0,"data":[]}')
+        }, 2500)
+        return
+      }
+      if (request.method === 'GET' && requestUrl.pathname === `/f/form/${formId}`) {
+        response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' })
+        response.end(JSON.stringify(fixture))
+        return
+      }
+      if (request.method === 'POST' && requestUrl.pathname === `/f/form/${formId}/submission/validate-page`) {
+        for await (const _chunk of request) {
+          // Consume the request before replying so Chrome observes a normal completed mutation.
+        }
+        response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' })
+        response.end(JSON.stringify({ code: 0, data: {} }))
+        return
+      }
+      if (request.method === 'POST' && requestUrl.pathname === `/f/form/${formId}/submission`) {
+        const chunks = []
+        for await (const chunk of request) chunks.push(chunk)
+        submittedPayload = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+        response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' })
+        response.end(JSON.stringify({
+          code: 0,
+          data: { submission_id: 'full-run-submission-001' },
+        }))
+        return
+      }
+      if (request.method === 'GET' && requestUrl.pathname === '/fixture-assets/radio-option.png') {
+        response.writeHead(200, { 'Content-Type': 'image/png' })
+        response.end(ONE_PIXEL_PNG)
+        return
+      }
+      if (request.method === 'GET' && requestUrl.pathname === '/favicon.ico') {
+        response.writeHead(200, { 'Content-Type': 'image/png' })
+        response.end(ONE_PIXEL_PNG)
+        return
+      }
+      response.writeHead(404)
+      response.end('not found')
+    } catch (error) {
+      response.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' })
+      response.end(JSON.stringify({ code: 500, message: error instanceof Error ? error.message : String(error) }))
+    }
+  })
+  siteBaseUrl = await listen(server)
+  t.after(async () => {
+    await close(server)
+    await rm(artifactRoot, { recursive: true, force: true })
+  })
+
+  const result = await executeRegisteredScript({
+    runId: 'attempt-full-run-001',
+    executionId: 'execution-full-run-001',
+    scriptId: SCRIPT_ID,
+    context: {
+      siteBaseUrl,
+      apiBaseUrl: `${siteBaseUrl}/api`,
+      requestPath: `/form/?id=${formId}`,
+      variables: { FORM_CONTRACT: JSON.stringify(linkedContract) },
+      authorizationOrigin: siteBaseUrl,
+      extraHTTPHeaders: { Authorization: token },
+    },
+  }, { artifactRootDirectory: artifactRoot })
+
+  assert.equal(
+    result.ok,
+    true,
+    [
+      result.error,
+      ...result.assertions
+        .filter(({ status }) => status === 'failed')
+        .map(({ module, name, error }) => `[${module}] ${name}: ${error ?? '无错误详情'}`),
+    ].filter(Boolean).join('\n'),
+  )
+  assert.equal(loadsFinishedBeforeReload, 2, '主动刷新前必须完成旧文档的地区树正文和图片加载')
+  assert.equal(result.result.scriptId, SCRIPT_ID)
+  assert.equal(result.result.status, 'submitted')
+  assert.equal(result.result.formId, formId)
+  assert.equal(result.result.submissionId, 'full-run-submission-001')
+  assert.equal(result.result.submissionAssertions.title, fixture.data.form.title)
+  assert.match(result.result.submissionAssertions.primaryContactName, /^自动化测试用户\d{4}$/)
+  assert.match(result.result.submissionAssertions.groupContactName, /^题组联系人\d{4}$/)
+  assert.match(result.result.submissionAssertions.fields['姓名[1]'], /^自动化测试用户\d{4}$/)
+  assert.match(result.result.submissionAssertions.fields['姓名[2]'], /^题组联系人\d{4}$/)
+  assert.equal(
+    result.result.submissionAssertions.primaryContactName,
+    result.result.submissionAssertions.fields['姓名[1]'],
+  )
+  assert.equal(
+    result.result.submissionAssertions.groupContactName,
+    result.result.submissionAssertions.fields['姓名[2]'],
+  )
+  assert.notEqual(
+    result.result.submissionAssertions.fields['姓名[1]'],
+    result.result.submissionAssertions.fields['姓名[2]'],
+  )
+  assert.equal(result.result.pageCount, 3)
+  assert.equal(result.result.linkedContractUsed, true)
+  assert.equal(result.result.pageValidationRequestCount, 3)
+  assert.equal(result.result.submissionRequestCount, 1)
+  assert.equal(result.result.assertedAnswerFieldCount, 27)
+  assert.equal(result.result.authorizationLeakCount, 0)
+  assert.equal(result.assertions.some(({ status }) => status === 'failed'), false)
+
+  const validationRequests = observedRequests.filter(({ method, path }) => (
+    method === 'POST' && path === `/f/form/${formId}/submission/validate-page`
+  ))
+  const submissionRequests = observedRequests.filter(({ method, path }) => (
+    method === 'POST' && path === `/f/form/${formId}/submission`
+  ))
+  assert.equal(validationRequests.length, 3)
+  assert.equal(submissionRequests.length, 1)
+  for (const [method, path] of [
+    ['GET', `/f/form/${formId}`],
+    ['POST', `/f/form/${formId}/submission/validate-page`],
+    ['POST', `/f/form/${formId}/submission`],
+  ]) {
+    assert.ok(
+      observedRequests.some((request) => request.method === method && request.path === path),
+      `${method} ${path} should use formId`,
+    )
+  }
+  assert.ok(observedRequests.every(({ path }) => !path.includes(`/f/form/${formCode}`)))
+  assert.ok(observedRequests.every(({ authorization }) => authorization === undefined))
+  assert.doesNotMatch(JSON.stringify(result), /full-run-sensitive-token/)
+
+  assert.ok(submittedPayload)
+  const serializedSubmission = JSON.stringify(submittedPayload)
+  for (const name of [
+    'username', 'mobile', 'email', 'idCard', 'landlinePhone', 'address', 'birthday',
+    'input', 'textarea', 'radio', 'checkbox', 'select', 'number', 'date', 'time',
+    'imageUpload', 'fileUpload', 'cascader', 'signature', 'groupUsername',
+    'groupMobile', 'groupEmail', 'matrix', 'matrixChoice', 'ranking', 'rating', 'nps',
+  ]) {
+    assert.match(serializedSubmission, new RegExp(linkedContract.fieldKeys[name]))
+  }
+
+  const expectedAttemptDirectory = resolve(
+    artifactRoot,
+    'execution-full-run-001',
+    SCRIPT_ID,
+    'attempt-full-run-001',
+  )
+  assert.equal(result.artifacts.length, 2)
+  assert.ok(result.artifacts.every(({ type }) => type === 'fixture'))
+  assert.ok(result.artifacts.every(({ stepId }) => stepId === SCRIPT_ID))
+  assert.ok(result.artifacts.every(({ absolutePath }) => absolutePath.startsWith(`${expectedAttemptDirectory}/`)))
+})

@@ -9,11 +9,11 @@ export function httpUrl(value, label) {
   return url
 }
 
-export function requestLoginJson(url, { method, body, timeoutMs, signal, ignoreHTTPSErrors }) {
+export function requestLoginJson(url, { method, body, timeoutMs, signal, ignoreHTTPSErrors, headers = {} }) {
   return new Promise((resolve, reject) => {
     const request = (url.protocol === 'https:' ? httpsRequest : httpRequest)(url, {
       method, signal, rejectUnauthorized: !ignoreHTTPSErrors,
-      headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      headers: { Accept: 'application/json', ...(body === undefined ? {} : { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }), ...headers },
     })
     const timer = setTimeout(() => request.destroy(new Error(`登录请求超过 ${timeoutMs} ms`)), timeoutMs)
     request.on('error', reject)
@@ -54,6 +54,34 @@ export async function authenticatePipeline(environment, session, signal, request
     if (session.expiresAt !== null && (!Number.isFinite(session.expiresAt) || session.expiresAt <= Date.now())) {
       throw new Error('登录态已过期，请手动登录后更新')
     }
+    const check = auth.sessionCheck
+    if (!check || typeof check.path !== 'string' || !check.path.trim()
+      || typeof check.successPath !== 'string' || !check.successPath.trim()
+      || typeof check.successValue !== 'string' || !check.successValue.trim()) {
+      throw new Error('请先在环境管理的“登录态校验”中配置接口路径、响应判定路径和期望值')
+    }
+    const path = check.path.trim()
+    if (!path.startsWith('/') || path.startsWith('//') || path.includes('\\')) throw new Error('校验接口必须是当前 API 的相对路径')
+    if (!['GET', 'POST', 'PUT', 'PATCH'].includes(check.method)) throw new Error('登录态校验请求方法无效')
+    if (!Number.isFinite(check.timeoutMs) || check.timeoutMs <= 0 || check.timeoutMs > 120000) throw new Error('登录态校验超时配置无效')
+    let body
+    if (check.method !== 'GET') {
+      try { body = JSON.parse(check.requestBody) } catch { throw new Error('登录态校验请求体不是有效 JSON') }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('登录态校验请求体必须是 JSON 对象')
+    }
+    const apiUrl = httpUrl(environment.apiBaseUrl, 'API 地址')
+    const checkUrl = httpUrl(`${environment.apiBaseUrl.replace(/\/+$/, '')}/${path.replace(/^\/+/, '')}`, '登录态校验地址')
+    if (checkUrl.origin !== apiUrl.origin) throw new Error('校验接口必须与 API 同源')
+    const response = await request(checkUrl, {
+      method: check.method, body: body === undefined ? undefined : JSON.stringify(body),
+      headers: { Authorization: `${session.scheme} ${session.token}` },
+      timeoutMs: check.timeoutMs, signal,
+      ignoreHTTPSErrors: environment.ignoreHTTPSErrors ?? apiUrl.hostname === 'lx.admin.lingxi.tech',
+    })
+    if (signal.aborted) throw new Error('认证已取消')
+    const actual = valueAtPath(response, check.successPath)
+    const matches = typeof actual === 'string' ? actual === check.successValue : JSON.stringify(actual) === check.successValue
+    if (!matches) throw new Error('环境登录态校验失败，已停止运行，请检查校验配置或更新 Token')
     return { token: session.token, scheme: session.scheme }
   }
   const apiUrl = httpUrl(environment.apiBaseUrl, 'API 地址')

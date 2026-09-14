@@ -3,7 +3,9 @@ import { computed, reactive, ref, watch } from 'vue'
 import { Delete, Plus } from '@element-plus/icons-vue'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 
+import EnvironmentSessionDialog from './EnvironmentSessionDialog.vue'
 import {
+  defaultSessionCheck,
   cloneEnvironmentDraft,
   formatEnvironmentRequestBody,
   parseEnvironmentRequestBody,
@@ -19,11 +21,20 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   'update:modelValue': [value: boolean]
-  save: [draft: EnvironmentDraft, manageSession?: boolean]
+  save: [draft: EnvironmentDraft]
+  sessionChanged: []
 }>()
 
 const formRef = ref<FormInstance>()
 const activeTab = ref('basic')
+const sessionVisible = ref(false)
+const sessionEnvironment = ref<TestEnvironment | null>(null)
+
+function openSession(): void {
+  if (!props.environment) return
+  sessionEnvironment.value = { ...props.environment, ...cloneEnvironmentDraft(form) }
+  sessionVisible.value = true
+}
 const title = computed(() => props.environment ? '编辑环境' : '新增环境')
 
 function emptyDraft(): EnvironmentDraft {
@@ -96,6 +107,8 @@ watch(
     if (!visible) return
     const source = environment ? cloneEnvironmentDraft(environment) : emptyDraft()
     source.auth.strategy ??= 'login'
+    source.auth.sessionCheck ??= defaultSessionCheck()
+    sessionVisible.value = false
     Object.assign(form, source)
     activeTab.value = 'basic'
     formRef.value?.clearValidate()
@@ -118,7 +131,7 @@ function removeVariable(id: string): void {
   form.variables = form.variables.filter((variable) => variable.id !== id)
 }
 
-async function submit(manageSession = false): Promise<void> {
+async function submit(): Promise<void> {
   const valid = await formRef.value?.validate().catch(() => false)
   if (!valid) {
     activeTab.value = 'basic'
@@ -146,6 +159,21 @@ async function submit(manageSession = false): Promise<void> {
     return
   }
 
+  if (form.auth.strategy === 'reuse-session' && form.auth.sessionCheck?.path.trim()) {
+    const check = form.auth.sessionCheck
+    try {
+      if (!check.path.trim().startsWith('/') || check.path.trim().startsWith('//') || check.path.includes('\\')) {
+        throw new Error('校验接口请填写以 / 开头的当前 API 相对路径')
+      }
+      if (!check.successPath.trim() || !check.successValue.trim()) throw new Error('请填写响应判定路径和有效期望值')
+      if (check.method !== 'GET') parseEnvironmentRequestBody(check.requestBody)
+    } catch (error) {
+      activeTab.value = 'session-check'
+      ElMessage.warning(error instanceof Error ? error.message : '校验配置无效')
+      return
+    }
+  }
+
   const enabledVariables = form.variables.filter((variable) => variable.enabled)
   if (enabledVariables.some((variable) => !variable.key.trim())) {
     activeTab.value = 'variables'
@@ -169,7 +197,7 @@ async function submit(manageSession = false): Promise<void> {
     draft.auth.mobile = ''
     draft.auth.verifyCode = ''
   }
-  emit('save', draft, manageSession)
+  emit('save', draft)
 }
 </script>
 
@@ -230,8 +258,8 @@ async function submit(manageSession = false): Promise<void> {
           </el-form-item>
           <div v-if="form.auth.strategy === 'reuse-session'" class="auth-hint">
             <p>脚本使用你保存的 Token。Token 变化或失效后，在这里更新即可，后续运行会使用新的值。</p>
-            <el-button type="primary" :loading="saving" @click="submit(true)">配置／更新 Token</el-button>
-            <p>点击后先保存当前环境配置，再打开 Token 管理窗口，可更新或清除登录态。</p>
+            <el-button type="primary" :disabled="!environment || saving" @click="openSession">配置／更新 Token</el-button>
+            <p>{{ environment ? '打开弹窗后修改并保存 Token，即可更新登录态。' : '新增环境请先保存环境，再配置 Token。' }}</p>
           </div>
           <template v-else>
             <div class="auth-hint">
@@ -300,6 +328,35 @@ async function submit(manageSession = false): Promise<void> {
           </div>
         </el-tab-pane>
 
+        <el-tab-pane v-if="form.auth.strategy === 'reuse-session' && form.auth.sessionCheck" label="登录态校验" name="session-check">
+          <div class="auth-hint">测试登录及运行脚本、自动化配置前，携带已保存的 Token 调用此接口。HTTP 请求成功且响应字段符合期望值，才判定登录态有效。</div>
+          <div class="form-grid">
+            <el-form-item label="校验请求方法">
+              <el-select v-model="form.auth.sessionCheck.method" aria-label="校验请求方法">
+                <el-option v-for="method in ['GET', 'POST', 'PUT', 'PATCH']" :key="method" :label="method" :value="method" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="校验超时（毫秒）">
+              <el-input-number v-model="form.auth.sessionCheck.timeoutMs" :min="5000" :max="120000" :step="5000" controls-position="right" />
+            </el-form-item>
+          </div>
+          <el-form-item label="校验接口路径">
+            <el-input v-model="form.auth.sessionCheck.path" aria-label="校验接口路径" placeholder="例如：/user/info（相对于 API 基础地址）" />
+          </el-form-item>
+          <el-form-item v-if="form.auth.sessionCheck.method !== 'GET'" label="校验请求体（JSON）">
+            <el-input v-model="form.auth.sessionCheck.requestBody" type="textarea" :rows="6" :spellcheck="false" placeholder="{}" />
+          </el-form-item>
+          <div class="form-grid">
+            <el-form-item label="响应判定路径">
+              <el-input v-model="form.auth.sessionCheck.successPath" aria-label="响应判定路径" placeholder="例如：code 或 data.loggedIn" />
+            </el-form-item>
+            <el-form-item label="有效期望值">
+              <el-input v-model="form.auth.sessionCheck.successValue" aria-label="有效期望值" placeholder="例如：0 或 true" />
+            </el-form-item>
+          </div>
+          <p>保存环境后，可点击列表中的“测试登录”查看结果；运行前校验失败将直接停止，不执行脚本。</p>
+        </el-tab-pane>
+
         <el-tab-pane :label="`环境变量（${form.variables.length}）`" name="variables">
           <div class="variable-toolbar">
             <p>变量会在脚本运行时注入当前执行上下文。</p>
@@ -331,6 +388,11 @@ async function submit(manageSession = false): Promise<void> {
       <el-button type="primary" :loading="saving" @click="submit()">保存环境</el-button>
     </template>
   </el-dialog>
+  <EnvironmentSessionDialog
+    v-model="sessionVisible"
+    :environment="sessionEnvironment"
+    @changed="emit('sessionChanged')"
+  />
 </template>
 
 <style scoped>

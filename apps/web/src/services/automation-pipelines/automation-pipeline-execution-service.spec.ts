@@ -1033,7 +1033,7 @@ describe('LocalAutomationPipelineExecutionService', () => {
 
 
 describe('pipeline reusable authentication', () => {
-  it('runs with an imported session, skips login, and redacts the token from records', async () => {
+  it('validates an imported session before running and redacts the token from records', async () => {
     const env = environment()
     env.auth.strategy = 'reuse-session'
     const environmentSessions = new LocalEnvironmentSessionService(new MemoryStorage())
@@ -1048,13 +1048,33 @@ describe('pipeline reusable authentication', () => {
       runRecords: new LocalRunRecordService(new MemoryStorage()),
     })
     const result = await service.run({ ...pipeline(), steps: [{ scriptId: 'create', parameterMappings: [] }] })
-    expect(environmentLogin.login).not.toHaveBeenCalled()
+    expect(environmentLogin.login).toHaveBeenCalledExactlyOnceWith(env, environmentSessions.get(env))
     expect(contexts[0]?.context.extraHTTPHeaders.Authorization).toBe('Bearer imported-secret-token')
     expect(JSON.stringify(result)).not.toContain('imported-secret-token')
-    expect(JSON.stringify(result)).toContain('已加载保存的登录态')
+    expect(JSON.stringify(result)).toContain('登录态校验成功')
   })
 
-  it('stops before executing scripts when the environment has no imported session', async () => {
+  it('stops all scripts when the imported session fails server validation', async () => {
+    const env = environment()
+    env.auth.strategy = 'reuse-session'
+    const environmentSessions = new LocalEnvironmentSessionService(new MemoryStorage())
+    environmentSessions.save(env, { token: 'rejected-token', accountLabel: '' })
+    const environmentLogin = loginService({ ...loginResult(), businessSuccess: false })
+    const scripts = fakeScriptService({}, [])
+    const service = new LocalAutomationPipelineExecutionService({
+      environments: environmentService(env), environmentLogin, environmentSessions, scripts,
+      runtimeVariables: new SessionRuntimeVariableService(new MemoryStorage()),
+      runRecords: new LocalRunRecordService(new MemoryStorage()),
+    })
+    const result = await service.run(pipeline())
+    expect(environmentLogin.login).toHaveBeenCalledOnce()
+    expect(scripts.run).not.toHaveBeenCalled()
+    expect(result.status).toBe('failed')
+    expect(result.failureStage).toBe('login')
+    expect(JSON.stringify(result)).toContain('校验失败')
+  })
+
+  it('stops before executing scripts when the environment has no imported session' , async () => {
     const env = environment()
     env.auth.strategy = 'reuse-session'
     const environmentLogin = loginService()

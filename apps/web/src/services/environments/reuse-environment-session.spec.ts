@@ -30,6 +30,7 @@ describe('reusable environment authentication', () => {
     sessions = new LocalEnvironmentSessionService(storage)
     runtimeVariables = new SessionRuntimeVariableService(new MemoryStorage())
     login.mockReset()
+    login.mockResolvedValue({ businessSuccess: true })
   })
 
   function authenticate(target = environment) {
@@ -51,16 +52,41 @@ describe('reusable environment authentication', () => {
     expect((await new LocalEnvironmentService(storage).list())[0]!.auth).toEqual(original.auth)
   })
 
-  it.each(['example-token', 'Bearer example-token'])('restores %s and skips login even with an invalid login payload', async (token) => {
+  it.each(['example-token', 'Bearer example-token'])('restores %s and validates the session even with an invalid login payload', async (token) => {
     sessions.save(environment, { token, accountLabel: '测试账号' })
     sessions = new LocalEnvironmentSessionService(storage)
     environment.auth.requestBody = 'not JSON'
     const authenticated = await authenticate()
-    expect(login).not.toHaveBeenCalled()
+    expect(login).toHaveBeenCalledExactlyOnceWith(environment, sessions.get(environment))
     expect(authenticated).toMatchObject({ value: 'example-token', secret: true, sourceEnvironmentId: environment.id })
     const context = buildScriptRunContext(environment, runtimeVariables, authenticated!)
     expect(context.extraHTTPHeaders).toEqual({ Authorization: 'Bearer example-token' })
     expect(context.variables.AUTH_TOKEN).toBe('example-token')
+  })
+
+  it.each([
+    { businessSuccess: false, status: 401 },
+    { businessSuccess: false, status: 200 },
+    { businessSuccess: false, status: null, error: 'timeout' },
+  ])('blocks runtime token injection when validation fails: %j', async (result) => {
+    sessions.save(environment, { token: 'existing-token', accountLabel: '' })
+    login.mockResolvedValue(result)
+    await expect(authenticate()).rejects.toThrow('校验失败')
+    expect(runtimeVariables.list()).toEqual([])
+  })
+
+  it('waits for validation and honours cancellation before injecting the token', async () => {
+    sessions.save(environment, { token: 'existing-token', accountLabel: '' })
+    let resolve!: (value: unknown) => void
+    login.mockImplementation(() => new Promise(done => { resolve = done }))
+    let cancelled = false
+    const pending = authenticateEnvironment(environment, { environmentSessions: sessions,
+      environmentLogin: { login }, runtimeVariables }, () => cancelled)
+    expect(runtimeVariables.list()).toEqual([])
+    cancelled = true
+    resolve({ businessSuccess: true })
+    expect(await pending).toBeNull()
+    expect(runtimeVariables.list()).toEqual([])
   })
 
   it('preserves an explicitly imported authorization scheme', async () => {
@@ -85,13 +111,14 @@ describe('reusable environment authentication', () => {
     sessions.save(second, { token: 'token-two', accountLabel: '账号二' })
     expect((await authenticate(second))?.value).toBe('token-two')
     expect((await authenticate())?.value).toBe('token-one')
-    expect(login).not.toHaveBeenCalled()
+    expect(login).toHaveBeenCalledTimes(2)
   })
 
   it('does not fall back to a stale runtime token when saved state is missing or cleared', async () => {
     sessions.save(environment, { token: 'token-one', accountLabel: '' })
     await authenticate()
     sessions.clear(environment.id)
+    login.mockClear()
     expect(runtimeVariables.get('AUTH_TOKEN')).not.toBeNull()
     await expect(authenticate()).rejects.toThrow('没有匹配的登录态')
     expect(login).not.toHaveBeenCalled()
