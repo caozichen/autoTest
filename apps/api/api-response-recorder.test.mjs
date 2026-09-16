@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict'
-import { EventEmitter } from 'node:events'
+import { EventEmitter, getEventListeners } from 'node:events'
 import test from 'node:test'
 
 import {
   attachApiResponseRecorder,
   attachNetworkObserver,
 } from '../../scripts/support/api-response-recorder.mjs'
+import { withEnvironmentTimeouts } from '../../scripts/support/environment-timeouts.mjs'
 
 class FakeNetworkTarget extends EventEmitter {}
 
@@ -125,6 +126,90 @@ test('legacy recorder keeps API response and callable stop contract', async () =
   assert.equal(Object.hasOwn(responses[1], 'requestBody'), false)
   assert.equal(typeof stop.stop, 'function')
 })
+
+for (const terminal of ['response', 'failed', 'without-response', 'seal']) {
+  test(`records the final forwarded request body at ${terminal}`, async () => {
+    const target = new FakeNetworkTarget()
+    const observer = attachNetworkObserver(target, { responseDrainTimeoutMs: 0 })
+    const request = fakeRequest({ method: 'PUT', body: '{"language":"zh_cn","content":"完整正文"}' })
+    target.emit('request', request)
+    request.postData = () => '{"language":"zh_CN","content":"完整正文"}'
+    if (terminal === 'response') {
+      target.emit('response', fakeResponse(request))
+      target.emit('requestfinished', request)
+    } else if (terminal === 'failed') {
+      target.emit('requestfailed', request)
+    } else if (terminal === 'without-response') {
+      target.emit('requestfinished', request)
+    }
+    const result = await observer.stop()
+    assert.deepEqual(result.api[0].requestBody, { language: 'zh_CN', content: '完整正文' })
+  })
+}
+
+for (const unavailable of [() => null, () => { throw new Error('request disposed') }]) {
+  test('retains the original request snapshot when the final body is unavailable', async () => {
+    const target = new FakeNetworkTarget()
+    const observer = attachNetworkObserver(target, { responseDrainTimeoutMs: 0 })
+    const request = fakeRequest({ method: 'PUT', body: '{"content":"原始正文"}' })
+    target.emit('request', request)
+    request.postData = unavailable
+    const result = await observer.stop()
+    assert.deepEqual(result.api[0].requestBody, { content: '原始正文' })
+  })
+}
+
+for (const attach of [attachNetworkObserver, attachApiResponseRecorder]) {
+  test(`${attach.name} lets Hong Kong requests finish after six seconds while other environments retain two seconds`, async t => {
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    const flush = () => new Promise(resolve => setImmediate(resolve))
+    const runs = await Promise.all(['HK_PROD', 'prod_hk', 'TEST', 'CN_PROD', undefined].map(code => withEnvironmentTimeouts(code, async () => {
+      await Promise.resolve()
+      const target = new FakeNetworkTarget()
+      const observer = attach(target, { onApiResponse: () => {} })
+      await observer.ready
+      const request = fakeRequest({ url: 'https://example.test/api/area/tree' })
+      const response = fakeResponse(request)
+      target.emit('request', request)
+      target.emit('response', response)
+      return { target, observer, request, result: null }
+    })))
+    // Stop outside the environment scope: each observer must retain its own deadline.
+    const stops = runs.map(run => run.observer.stop().then(result => { run.result = result }))
+    t.mock.timers.tick(1999)
+    await flush()
+    assert.ok(runs.every(run => run.result === null))
+    t.mock.timers.tick(1)
+    await flush()
+    for (const run of runs.slice(2)) {
+      assert.equal(run.result.api[0].ok, false)
+      assert.equal(run.result.api[0].failureKind, 'timeout')
+      assert.match(run.result.api[0].error, /已等待 2000ms/)
+    }
+    t.mock.timers.tick(4001)
+    await flush()
+    assert.equal(runs[0].result, null)
+    assert.equal(runs[1].result, null)
+
+    runs[0].target.emit('requestfinished', runs[0].request)
+    await flush()
+    assert.equal(runs[0].result.api[0].ok, true)
+    assert.deepEqual(runs[0].result.api[0].responseBody, { code: 0, data: { id: 'form-1' } })
+    assert.equal(runs[0].result.summary.api.incomplete, 0)
+
+    t.mock.timers.tick(8998)
+    await flush()
+    assert.equal(runs[1].result, null)
+    t.mock.timers.tick(1)
+    await Promise.all(stops)
+    const unfinished = runs[1].result.api[0]
+    assert.equal(unfinished.status, 200)
+    assert.equal(unfinished.ok, false)
+    assert.equal(unfinished.incomplete, true)
+    assert.equal(unfinished.failureKind, 'timeout')
+    assert.match(unfinished.error, /已等待 15000ms/)
+  })
+}
 
 test('context observer separates APIs and resources and snapshots request phase and location', async () => {
   const context = new FakeNetworkTarget()
@@ -673,6 +758,53 @@ test('can discard only unfinished requests during browser teardown', async () =>
   assert.equal(result.resources.length, 0)
 })
 
+for (const attach of [attachNetworkObserver, attachApiResponseRecorder]) {
+  for (const abortBeforeStop of [true, false]) {
+    test(`${attach.name} seals immediately and keeps evidence when cancelled ${abortBeforeStop ? 'before' : 'during'} stop`, async t => {
+      t.mock.timers.enable({ apis: ['setTimeout'] })
+      const target = new FakeNetworkTarget()
+      const observer = withEnvironmentTimeouts('HK_PROD', () => attach(target, { onApiResponse: () => {} }))
+      await observer.ready
+      const completedRequest = fakeRequest({ url: 'https://example.test/api/completed' })
+      finish(target, completedRequest, fakeResponse(completedRequest))
+      const unfinishedRequest = fakeRequest({ url: 'https://example.test/api/area/tree' })
+      target.emit('request', unfinishedRequest)
+      target.emit('response', fakeResponse(unfinishedRequest))
+      await new Promise(resolve => setImmediate(resolve))
+
+      const controller = new AbortController()
+      if (abortBeforeStop) controller.abort(new Error('运行已取消'))
+      let completed = false
+      // Exercise the callable legacy wrapper as well as the observer's stop method.
+      const stop = typeof observer === 'function' ? observer : observer.stop
+      const stopping = stop({ signal: controller.signal }).then(() => { completed = true })
+      if (!abortBeforeStop) {
+        assert.equal(getEventListeners(controller.signal, 'abort').length, 1)
+        controller.abort(new Error('运行已取消'))
+      }
+      await new Promise(resolve => setImmediate(resolve))
+      assert.equal(completed, true, 'cancellation must finish without advancing the 15-second deadline')
+      await stopping
+      const result = await observer.stop()
+      assert.equal(await observer.stop(), result)
+      assert.equal(result.api.find(entry => entry.url.endsWith('/completed')).ok, true)
+      const unfinished = result.api.find(entry => entry.url.endsWith('/area/tree'))
+      assert.equal(unfinished.status, 200)
+      assert.equal(unfinished.ok, false)
+      assert.equal(unfinished.incomplete, true)
+      assert.equal(unfinished.failureKind, 'aborted')
+      assert.match(unfinished.error, /运行取消时网络请求仍未完成/)
+      assert.doesNotMatch(unfinished.error, /已等待|15000/)
+      assert.equal(result.summary.pendingAtSeal, 1)
+      assert.equal(result.summary.discardedPending, 0)
+      assert.equal(getEventListeners(controller.signal, 'abort').length, 0)
+      for (const event of ['request', 'response', 'requestfinished', 'requestfailed']) {
+        assert.equal(target.listenerCount(event), 0)
+      }
+    })
+  }
+}
+
 test('waiting before navigation drains API bodies and images without sealing subsequent evidence', async () => {
   const context = new FakeNetworkTarget()
   const observer = attachNetworkObserver(context)
@@ -685,13 +817,16 @@ test('waiting before navigation drains API bodies and images without sealing sub
   context.emit('request', image)
   await new Promise(resolve => setImmediate(resolve))
   let completed = false
-  const waiting = observer.waitForIdle({ timeoutMs: 1000 }).then(value => { completed = value; return value })
+  const controller = new AbortController()
+  const waiting = observer.waitForIdle({ timeoutMs: 1000, signal: controller.signal }).then(value => { completed = value; return value })
+  assert.equal(getEventListeners(controller.signal, 'abort').length, 1)
   finishBody('{"code":0,"data":[]}')
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(completed, false)
   const imageResponse = fakeResponse(image, { headers: { 'content-type': 'image/png' } })
   context.emit('response', imageResponse); context.emit('requestfinished', image)
   assert.equal(await waiting, true)
+  assert.equal(getEventListeners(controller.signal, 'abort').length, 0)
   assert.equal(observer.stopped, false)
   const nextRequest = fakeRequest({ url: 'https://example.test/api/after-reload' })
   finish(context, nextRequest, fakeResponse(nextRequest))
@@ -700,14 +835,152 @@ test('waiting before navigation drains API bodies and images without sealing sub
   assert.ok([...result.api, ...result.resources].every(entry => entry.ok))
 })
 
+test('scoped waits drain complete API bodies and selected images independently while retaining unrelated telemetry', async () => {
+  const target = new FakeNetworkTarget()
+  const observer = attachNetworkObserver(target, { responseDrainTimeoutMs: 1 })
+  const area = fakeRequest({ url: 'https://example.test/api/area/tree' })
+  const areaResponse = fakeResponse(area)
+  let finishAreaBody
+  areaResponse.text = () => new Promise(resolve => { finishAreaBody = resolve })
+  finish(target, area, areaResponse)
+  const image = fakeRequest({ url: 'https://example.test/preview.png', resourceType: 'image' })
+  target.emit('request', image)
+  const telemetry = fakeRequest({ url: 'https://telemetry.example/api/envelope' })
+  target.emit('request', telemetry)
+  await new Promise(resolve => setImmediate(resolve))
+
+  const controller = new AbortController()
+  const sameOrigin = ({ url }) => url.origin === 'https://example.test'
+  let pageReady = false
+  const pageWaiting = observer.waitForIdle({
+    timeoutMs: 1000,
+    signal: controller.signal,
+    shouldWaitFor: sameOrigin,
+  }).then(value => { pageReady = value; return value })
+  let apiReady = false
+  const apiWaiting = observer.waitForIdle({
+    timeoutMs: 1000,
+    shouldWaitFor: info => sameOrigin(info) && info.category === 'api',
+  }).then(value => { apiReady = value; return value })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(pageReady, false)
+  assert.equal(apiReady, false, 'HTTP 200 and requestfinished alone must not skip an unread body')
+
+  finishAreaBody('{"code":0,"data":[{"id":"hk"}]}')
+  assert.equal(await apiWaiting, true)
+  assert.equal(pageReady, false, 'the selected image must still finish')
+  target.emit('response', fakeResponse(image, { headers: { 'content-type': 'image/png' } }))
+  target.emit('requestfinished', image)
+  assert.equal(await pageWaiting, true)
+  assert.equal(observer.stopped, false)
+  assert.equal(getEventListeners(controller.signal, 'abort').length, 0)
+
+  const result = await observer.stop()
+  assert.deepEqual(result.api.find(entry => entry.url.endsWith('/area/tree')).responseBody.data, [{ id: 'hk' }])
+  assert.equal(result.resources[0].ok, true)
+  const telemetryEntry = result.api.find(entry => entry.url.startsWith('https://telemetry.example/'))
+  assert.equal(telemetryEntry.ok, false)
+  assert.equal(telemetryEntry.incomplete, true)
+  assert.equal(telemetryEntry.failureKind, 'timeout')
+  assert.equal(result.summary.pendingAtSeal, 1)
+})
+
+test('response headers release a scoped fetch stream wait without completing the global drain', async () => {
+  const target = new FakeNetworkTarget()
+  const observer = attachNetworkObserver(target)
+  const stream = fakeRequest({ url: 'https://example.test/api/events', resourceType: 'fetch' })
+  target.emit('request', stream)
+  let scopedReady = false
+  let globalReady = false
+  const scopedController = new AbortController()
+  const globalController = new AbortController()
+  const scopedWaiting = observer.waitForIdle({
+    signal: scopedController.signal,
+    shouldWaitFor: ({ url, category, resourceType, response, responseHeaders }) => {
+      assert.ok(url instanceof URL)
+      assert.equal(category, 'api')
+      assert.equal(resourceType, 'fetch')
+      if (!response) return true
+      return !/text\/event-stream/i.test(responseHeaders['content-type'] ?? '')
+    },
+  }).then(value => { scopedReady = value; return value })
+  const globalWaiting = observer.waitForIdle({ signal: globalController.signal }).then(value => { globalReady = value; return value })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(scopedReady, false)
+  const response = fakeResponse(stream, { headers: { 'content-type': 'text/event-stream' } })
+  response.text = () => new Promise(() => {})
+  target.emit('response', response)
+  assert.equal(await scopedWaiting, true)
+  assert.equal(globalReady, false)
+  assert.equal(getEventListeners(scopedController.signal, 'abort').length, 0)
+  const rejectedGlobal = assert.rejects(globalWaiting, { name: 'AbortError' })
+  globalController.abort()
+  await rejectedGlobal
+  const result = await observer.stop({ signal: globalController.signal })
+  assert.equal(result.api[0].url, stream.url())
+  assert.equal(result.api[0].incomplete, true)
+})
+
+test('scoped wait timeout and cancellation remove their predicates and abort listeners', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const target = new FakeNetworkTarget()
+  const observer = attachNetworkObserver(target)
+  const request = fakeRequest()
+  target.emit('request', request)
+  let predicateCalls = 0
+  const shouldWaitFor = () => { predicateCalls += 1; return true }
+  const timeoutController = new AbortController()
+  const cancelController = new AbortController()
+  const timedWaiting = observer.waitForIdle({ timeoutMs: 100, signal: timeoutController.signal, shouldWaitFor })
+  const cancelledWaiting = observer.waitForIdle({ timeoutMs: 15000, signal: cancelController.signal, shouldWaitFor })
+  t.mock.timers.tick(100)
+  assert.equal(await timedWaiting, false)
+  assert.equal(getEventListeners(timeoutController.signal, 'abort').length, 0)
+  const rejected = assert.rejects(cancelledWaiting, { name: 'AbortError' })
+  cancelController.abort()
+  await rejected
+  assert.equal(getEventListeners(cancelController.signal, 'abort').length, 0)
+  const callsAfterCleanup = predicateCalls
+  target.emit('response', fakeResponse(request))
+  assert.equal(predicateCalls, callsAfterCleanup)
+  const result = await observer.stop({ signal: cancelController.signal })
+  assert.equal(result.summary.pendingAtSeal, 1)
+  assert.equal(result.api[0].ok, false)
+})
+
 test('a navigation wait timeout retains the unfinished request as a failure', async () => {
   const context = new FakeNetworkTarget()
   const observer = attachNetworkObserver(context, { responseDrainTimeoutMs: 1 })
   context.emit('request', fakeRequest())
-  assert.equal(await observer.waitForIdle({ timeoutMs: 1 }), false)
+  const controller = new AbortController()
+  assert.equal(await observer.waitForIdle({ timeoutMs: 1, signal: controller.signal }), false)
+  assert.equal(getEventListeners(controller.signal, 'abort').length, 0)
   const result = await observer.stop()
   assert.equal(result.api[0].ok, false)
   assert.equal(result.api[0].failureKind, 'timeout')
+})
+
+test('cancelling a navigation wait rejects immediately and retains unfinished request evidence', async () => {
+  const target = new FakeNetworkTarget()
+  const observer = attachNetworkObserver(target, { responseDrainTimeoutMs: 1 })
+  const request = fakeRequest({ url: 'https://example.test/api/area/tree' })
+  target.emit('request', request)
+  target.emit('response', fakeResponse(request))
+  const controller = new AbortController()
+  const reason = new Error('运行已取消')
+  const waiting = observer.waitForIdle({ timeoutMs: 45000, signal: controller.signal })
+  assert.equal(getEventListeners(controller.signal, 'abort').length, 1)
+  controller.abort(reason)
+  await assert.rejects(waiting, error => error === reason)
+  assert.equal(getEventListeners(controller.signal, 'abort').length, 0)
+  assert.equal(observer.stopped, false)
+  await assert.rejects(observer.waitForIdle({ signal: controller.signal }), error => error === reason)
+
+  const result = await observer.stop()
+  assert.equal(result.api[0].status, 200)
+  assert.equal(result.api[0].ok, false)
+  assert.equal(result.api[0].failureKind, 'timeout')
+  assert.equal(result.summary.pendingAtSeal, 1)
 })
 
 test('shouldRecord and subscriber exceptions never escape network event handlers', async () => {

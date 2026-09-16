@@ -33,7 +33,7 @@ async function close(server) {
   })
 }
 
-test('registered production entry uses formId for public GET, validation, submission and result', async (t) => {
+async function runPublicSubmissionFixture(t, { withSettings = false } = {}) {
   const formId = 'full-run-form-id'
   const formCode = 'legacy-full-run-code'
   assert.notEqual(formId, formCode)
@@ -49,6 +49,36 @@ test('registered production entry uses formId for public GET, validation, submis
     revisionNo: fixture.data.revision_no,
     items: fixture.data.items,
   })
+  if (withSettings) {
+    const agreement = {
+      enabled: 1,
+      confirm_required: 2,
+      name: '自动化兼容测试协议',
+      agreements: [{ language: 'zh_CN', original: 1, content: '<p>仅用于本次自动化测试。</p>' }],
+    }
+    const feedback = {
+      enabled: 1,
+      body: '<h2>自动化测试已完成</h2><p><strong>登记成功</strong>，<em>请保留本次记录</em>。</p><ul><li>无需重复提交</li></ul>',
+    }
+    const promotion = {
+      enabled: 1,
+      button_text: '测试完成查看百度',
+      selected: 'href',
+      actions: [{ type: 'href', link: 'https://www.baidu.com' }],
+    }
+    fixture.data.form.common_config = { privacy_policy: agreement }
+    fixture.data.form.notification_config = { customized_feedback: feedback, promotion_link: promotion }
+    linkedContract.settings = {
+      schemaVersion: 1,
+      runMarker: 'fixture-settings-compatibility',
+      agreement: {
+        enabled: true, name: agreement.name, body: agreement.agreements[0].content,
+        readBeforeFill: false, configKey: 'privacy_policy', savedParameters: agreement,
+      },
+      feedback: { enabled: true, body: feedback.body },
+      promotion: { enabled: true, buttonText: promotion.button_text, type: 'href', link: promotion.actions[0].link },
+    }
+  }
   const artifactRoot = await mkdtemp(join(tmpdir(), 'autotest-all-fields-full-run-'))
   const observedRequests = []
   let submittedPayload = null
@@ -75,6 +105,7 @@ test('registered production entry uses formId for public GET, validation, submis
           formId,
           title: fixture.data.form.title,
           fieldKeys: linkedContract.fieldKeys,
+          formSettings: fixture.data.form,
         })
         if (documents === 1) html = html.replace('</body>', '<img src="/slow-initial.png"><script>fetch("/api/area/tree")</script></body>')
         response.end(html)
@@ -234,4 +265,12 @@ test('registered production entry uses formId for public GET, validation, submis
   assert.ok(result.artifacts.every(({ type }) => type === 'fixture'))
   assert.ok(result.artifacts.every(({ stepId }) => stepId === SCRIPT_ID))
   assert.ok(result.artifacts.every(({ absolutePath }) => absolutePath.startsWith(`${expectedAttemptDirectory}/`)))
+}
+
+test('registered production entry uses formId for public GET, validation, submission and result', async (t) => {
+  await runPublicSubmissionFixture(t)
+})
+
+test('public submission remains compatible with a passive agreement, rich feedback, promotion and additive settings contract', async (t) => {
+  await runPublicSubmissionFixture(t, { withSettings: true })
 })

@@ -525,6 +525,7 @@ export async function run({
   captureFailureScreenshot = true,
   captureSuccessScreenshots = false,
   verifyPersistence = false,
+  prerequisiteTimeoutMs = scaleTimeout(NAVIGATION_TIMEOUT_MS),
 }) {
   if (!siteBaseUrl) throw new Error('运行环境必须提供 Web 基址')
   if (!apiBaseUrl) throw new Error('运行环境必须提供 API 基址')
@@ -540,6 +541,9 @@ export async function run({
   const assertions = parseSubmissionAssertions(variables.SUBMISSION_ASSERTIONS)
   const editValues = parseSubmissionEditValues(variables.SUBMISSION_EDIT_VALUES)
   const submissionAssertions = parseJsonObject(variables.SUBMISSION_ASSERTIONS, 'SUBMISSION_ASSERTIONS')
+  if (!Number.isFinite(prerequisiteTimeoutMs) || prerequisiteTimeoutMs <= 0) {
+    throw new Error('前置请求等待时间必须是大于 0 的有限毫秒数')
+  }
 
   let browser
   let context
@@ -548,6 +552,26 @@ export async function run({
   let networkObserver = {
     setPhase: () => undefined,
     stop: async () => undefined,
+  }
+  const shouldWaitForPrerequisite = ({ url, category, resourceType, responseHeaders }) => {
+    if (resourceType === 'eventsource' || /text\/event-stream/i.test(responseHeaders['content-type'] ?? '')) return false
+    if (category === 'api') {
+      return url.origin === apiUrl.origin
+        && !/\/translation\/ai\/status\/?$/.test(url.pathname)
+    }
+    return ['document', 'script', 'stylesheet', 'image', 'font'].includes(resourceType)
+  }
+  const waitForPrerequisites = async (stage) => {
+    throwIfRunAborted(signal)
+    logger('info', `${stage}：等待前置接口正文和资源加载完成`, { timeoutMs: prerequisiteTimeoutMs })
+    const completed = await networkObserver.waitForIdle({
+      timeoutMs: prerequisiteTimeoutMs, signal, shouldWaitFor: shouldWaitForPrerequisite,
+    })
+    throwIfRunAborted(signal)
+    if (!completed) {
+      throw new Error(`${stage}：前置接口或资源在 ${prerequisiteTimeoutMs} ms 内未完成，已停止后续操作`)
+    }
+    logger('info', `${stage}：前置接口和资源已完成`)
   }
   try {
     throwIfRunAborted(signal)
@@ -612,10 +636,12 @@ export async function run({
     await waitForUiReady(page, { timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) })
     const editButton = await assertInitialDetailStructure(page, { submissionId, assertions })
     const originalAnswers = verifyPersistence ? await detailAnswersSnapshot(page) : null
+    await waitForPrerequisites('进入编辑前')
 
     networkObserver.setPhase('进入编辑态')
     logger('info', '提报详情初始态断言执行完成，进入编辑态')
     await clickWhenReady(editButton)
+    await waitForPrerequisites('编辑态加载后')
     const { submitButton } = await assertEditStructure(page, assertions.editFields)
     await flowExpect(page, '进入编辑态后必须保持原提报地址').toHaveURL(detailUrl)
     networkObserver.setPhase('编辑字段')
@@ -623,6 +649,7 @@ export async function run({
     if (captureSuccessScreenshots && artifactWriter?.captureScreenshot) {
       await artifactWriter.captureScreenshot(page, 'screenshots/submission-edit-ready.png', { fullPage: true })
     }
+    await waitForPrerequisites('提交提报前')
 
     throwIfRunAborted(signal)
     flowExpect(updateRequestCount, '点击提交前不得提前发送提报更新请求').toBe(0)
@@ -664,6 +691,9 @@ export async function run({
     })
     await assertAppliedDetailValues(page, editValues)
     if (verifyPersistence) {
+      // A reload can strand the previous document's pending Chrome response bodies.
+      // Keep collecting until they finish, or stop without repeating the saved update.
+      await waitForPrerequisites('刷新核对前')
       networkObserver.setPhase('刷新核对原提报')
       await page.reload({ waitUntil: 'domcontentloaded' })
       await flowExpect(page, '刷新后应仍然打开原提报').toHaveURL(detailUrl)
@@ -727,7 +757,7 @@ export async function run({
     throw error
   } finally {
     networkObserver.setPhase('结束清理')
-    await networkObserver.stop()
+    await networkObserver.stop({ signal })
     const abortCloseStarted = await stopAbortClose()
     if (!abortCloseStarted) await closePlaywrightHandles({ context, browser }, { logger })
   }

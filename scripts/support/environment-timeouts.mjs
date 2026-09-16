@@ -5,8 +5,8 @@ const timeouts = new AsyncLocalStorage()
 export function withEnvironmentTimeouts(environmentCode, action) {
   return timeouts.run(/hk/i.test(environmentCode ?? '') ? 3 : 1, action)
 }
-export function scaleTimeout(standardMs) {
-  return standardMs * (timeouts.getStore() ?? 1)
+export function scaleTimeout(standardMs, { hongKongMs = standardMs * 3 } = {}) {
+  return timeouts.getStore() === 3 ? hongKongMs : standardMs
 }
 // Configure per invocation: concurrent environments must never share mutable defaults.
 export const expect = new Proxy(baseExpect, {

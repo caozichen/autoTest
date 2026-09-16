@@ -234,7 +234,7 @@ export function createManualSubmissionFormHtml({
     html,
     `const submissionId = String(body.data && body.data.submission_id || '')
         history.pushState({}, '', '/form/submission-result/')
-        document.body.innerHTML = '<form-submission-result form-id="' + formId + '" submission-id="' + submissionId + '"></form-submission-result><main><h1>提交成功</h1></main>'`,
+        document.body.innerHTML = '<form-submission-result form-id="' + formId + '" submission-id="' + submissionId + '"></form-submission-result><main><h1>提交成功</h1>' + "" + '</main>'`,
     `const submissionId = String(body.data && body.data.submission_id || '')
         if (response.ok && Number(body.code) === 0 && submissionId) {
           const escapeDetail = (value) => String(value)

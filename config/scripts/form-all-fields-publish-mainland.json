@@ -3,10 +3,10 @@
   "revision": 1,
   "id": "form-all-fields-publish-mainland",
   "name": "创建完整表单（内地版）",
-  "description": "适配内地生产环境：直接添加联系人，无需首次收录弹窗或全局收录设置菜单。与创建完整表单共用三页全题型、必填及题型限制、头图配色、保存发布、列表校验和表单联动输出。",
+  "description": "适配内地环境联系人流程，创建三页全题型表单；共用必填及题型限制、头图配色、协议、分类标签、邮件通知、富文本反馈、推广、分享渠道和发布前预览，发布后输出联动参数。",
   "directory": "scripts",
   "entryFile": "form-all-fields-publish-mainland.ui.spec.mjs",
-  "timeoutMs": 300000,
+  "timeoutMs": 600000,
   "enabled": true,
   "inputParameters": [],
   "responseVariableBindings": [

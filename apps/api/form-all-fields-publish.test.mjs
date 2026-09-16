@@ -1019,12 +1019,59 @@ async function checkCompleteForm({ mainland, execute }) {
   let strategy = ''
   let forcedBusinessFailure = ''
   let uploadSequence = 0
+  let storedAdditionalSettings = null
+  let additionalSettingsCalls = 0
+  const workflowEvents = []
+  const notificationTemplates = {
+    customized: {
+      admin: { submitted_success: { email: {
+        subject: '自动化测试管理者邮件 fixture-settings-202',
+        body: '<p><strong>管理者测试通知</strong> fixture-settings-202</p>',
+        recipients: { users: [{ id: 2020, username: '测试管理员', is_creator: 1 }] },
+      } } },
+      user: { submitted_success: { email: {
+        subject: '自动化测试提交邮件 fixture-settings-202',
+        body: '<p>用户测试通知 fixture-settings-202</p><p><a href="https://www.baidu.com/">查看测试链接</a></p>',
+      } } },
+    },
+  }
+  const additionalSettings = {
+    schemaVersion: 1,
+    runMarker: 'fixture-settings-202',
+    environment: mainland ? 'CN_PROD' : 'TEST',
+    agreement: {
+      enabled: true, name: '自动化测试用户协议', readBeforeFill: false, configKey: 'privacy_policy',
+      savedParameters: { enabled: 1, confirm_required: 2, name: '自动化测试用户协议', agreements: [{ content: '<p>本次创建测试协议</p>' }] },
+    },
+    classificationTags: {
+      enabled: true, skipped: false, trigger: 'submitted_success',
+      categories: [{ id: 'cat-202', name: '测试分类' }], tags: [{ id: '9007199254740993', name: '测试标签' }],
+      savedParameters: { enabled: 1, user_behavior: [{ action: 'submitted_success', category: ['cat-202'], tag: ['9007199254740993'] }], item_types: [] },
+    },
+    managerNotification: { savedParameters: { enabled: 1, notifications: [{
+      ...structuredClone(notificationTemplates.customized.admin.submitted_success.email),
+      scenario_code: 'form.submitted_success', channel: 'email',
+      recipients: { users: [{ id: 2020, username: '测试管理员' }] },
+    }] } },
+    automationNotification: { savedParameters: { enabled: 1, notifications: [{
+      ...structuredClone(notificationTemplates.customized.user.submitted_success.email),
+      scenario_code: 'form.submitted_success', channel: 'email',
+    }] } },
+    feedback: { savedParameters: { enabled: 1, content: '<h2>自动化测试完成</h2><ul><li>富文本反馈</li></ul>' } },
+    promotion: { savedParameters: { enabled: 1, title: '自动化测试·访问百度', type: 'href', url: 'https://www.baidu.com/' } },
+    preview: { loaded: true, closed: true },
+  }
   const uploadIntents = new Map()
   const screenshotCaptures = []
+  const settingsArtifacts = []
   const artifactWriter = createScreenshotArtifactWriter(
     screenshotCaptures,
     'form-all-fields-publish',
   )
+  artifactWriter.writeFile = async (relativePath, content, options) => {
+    settingsArtifacts.push({ relativePath, content, options })
+    return { relativePath, type: options.type, mimeType: options.mimeType }
+  }
 
   const server = createServer(async (request, response) => {
     const url = new URL(request.url, 'http://127.0.0.1')
@@ -1130,8 +1177,29 @@ async function checkCompleteForm({ mainland, execute }) {
       sendJson(response, {
         code: 0,
         message: 'success',
-        data: { form: { id: 202, form_id: 202, form_code: '951000000000000202' } },
+        data: { form: {
+          id: 202, form_id: 202, form_code: '951000000000000202',
+          ...(storedAdditionalSettings ? {
+            common_config: { privacy_policy: storedAdditionalSettings.agreement.savedParameters },
+            submitted_config: { category_and_tag: storedAdditionalSettings.classificationTags.savedParameters },
+            notification_config: {
+              admin_notification: published ? { enabled: 1, notifications: [{
+                scenario_code: 'form.submitted_success', channel: 'email',
+                recipients: notificationTemplates.customized.admin.submitted_success.email.recipients,
+                subject: null, body: null,
+              }] } : storedAdditionalSettings.managerNotification.savedParameters,
+              user_notification: published ? { enabled: 1 } : storedAdditionalSettings.automationNotification.savedParameters,
+              customized_feedback: storedAdditionalSettings.feedback.savedParameters,
+              promotion_link: storedAdditionalSettings.promotion.savedParameters,
+            },
+          } : {}),
+        } },
       })
+      return
+    }
+    if (request.method === 'GET' && url.pathname === '/api/be/form/202/notification/template') {
+      workflowEvents.push('read-published-notification-templates')
+      sendJson(response, { code: 0, message: 'success', data: notificationTemplates })
       return
     }
     if (request.method === 'PUT' && url.pathname === '/api/be/form/202/items') {
@@ -1151,6 +1219,7 @@ async function checkCompleteForm({ mainland, execute }) {
       return
     }
     if (request.method === 'POST' && url.pathname === '/api/be/form/202/publish') {
+      workflowEvents.push('publish')
       if (forcedBusinessFailure === 'publish') {
         response.writeHead(200, {
           'Content-Type': 'application/json; charset=utf-8',
@@ -1200,16 +1269,48 @@ async function checkCompleteForm({ mainland, execute }) {
     assert.ok(address && typeof address === 'object')
     const origin = 'http://127.0.0.1:' + address.port
     const logs = []
-    const runScenario = (overrides = {}) => execute({
-      siteBaseUrl: origin + '/',
-      apiBaseUrl: origin + '/api',
-      ignoreHTTPSErrors: false,
-      extraHTTPHeaders: { Authorization: 'Bearer all-fields-token' },
-      artifactWriter,
-      logger: (level, message, details) => logs.push({ level, message, details }),
-      recordApiResponse: (response) => apiResponses.push(response),
-      ...overrides,
-    })
+    const runScenario = (overrides = {}) => {
+      const requestStart = requests.length
+      const logStart = logs.length
+      workflowEvents.length = 0
+      additionalSettingsCalls = 0
+      storedAdditionalSettings = null
+      return execute({
+        siteBaseUrl: origin + '/',
+        apiBaseUrl: origin + '/api',
+        ignoreHTTPSErrors: false,
+        extraHTTPHeaders: { Authorization: 'Bearer all-fields-token' },
+        artifactWriter,
+        logger: (level, message, details) => {
+          logs.push({ level, message, details })
+          if (message.includes(mainland ? '内地基础设置没有全局收录联系人' : '联系人收录已开启，冲突策略')) {
+            workflowEvents.push('contact-settings-complete')
+          }
+        },
+        recordApiResponse: (response) => apiResponses.push(response),
+        ...overrides,
+      }, {
+        // Keep this designer fixture focused on the surrounding workflow while
+        // verifying that the settings stage is awaited and its output survives.
+        configureAdditionalSettings: async ({ page, formId, title, artifactWriter: receivedWriter }) => {
+          additionalSettingsCalls += 1
+          assert.equal(String(formId), '202')
+          assert.equal(title, savedTitle)
+          assert.equal(receivedWriter, artifactWriter)
+          assert.match(page.url(), /\/form-activity\/settings\?id=202/)
+          assert.ok(logs.slice(logStart).some(log => log.message.includes(
+            mainland ? '内地基础设置没有全局收录联系人' : '联系人收录已开启，冲突策略',
+          )), '追加设置必须在本次联系人设置完成后调用')
+          assert.equal(requests.slice(requestStart).some(entry => entry.path.endsWith('/publish')), false,
+            '追加设置调用前不得发送发布请求')
+          workflowEvents.push('additional-settings-start')
+          await page.evaluate(() => { document.body.dataset.additionalSettings = 'complete' })
+          storedAdditionalSettings = structuredClone(additionalSettings)
+          workflowEvents.push('additional-settings-complete')
+          return structuredClone(additionalSettings)
+        },
+      })
+    }
     const result = await runScenario()
     assert.equal(screenshotCaptures.length, 0)
 
@@ -1219,6 +1320,34 @@ async function checkCompleteForm({ mainland, execute }) {
     assert.equal(result.formContract.formCode, '')
     assert.notEqual(result.formContract.formId, '951000000000000202')
     assert.equal(result.formContract.fieldKeys.radio, savedItemsPayload.items.find((item) => item.type_code === 'radio').item_key)
+    assert.equal(additionalSettingsCalls, 1, '追加设置只执行一次，不能重复保存或创建分享渠道')
+    assert.deepEqual(workflowEvents, [
+      'contact-settings-complete', 'additional-settings-start', 'additional-settings-complete',
+      'publish', 'read-published-notification-templates',
+    ], '必须等待全部追加设置完成后发布，再独立读取发布后通知模板')
+    const expectedSettings = {
+      ...additionalSettings,
+      publishedNotifications: {
+        managerNotification: {
+          scenarioCode: 'submitted_success', channel: 'email',
+          templatePath: 'customized.admin.submitted_success.email',
+          template: notificationTemplates.customized.admin.submitted_success.email,
+        },
+        automationNotification: {
+          scenarioCode: 'submitted_success', channel: 'email',
+          templatePath: 'customized.user.submitted_success.email',
+          template: notificationTemplates.customized.user.submitted_success.email,
+        },
+      },
+    }
+    assert.deepEqual(result.settings, expectedSettings, '创建输出应同时保留保存参数和发布后完整通知模板')
+    assert.deepEqual(result.formContract.settings, expectedSettings, '追加设置必须沿用原 FORM_CONTRACT 映射传给下游')
+    assert.deepEqual(JSON.parse(JSON.stringify(result.formContract)).settings, expectedSettings,
+      '邮件富文本和超出安全整数范围的标签 ID 经 FORM_CONTRACT JSON 传递不能丢失')
+    assert.equal(settingsArtifacts.length, 1, '发布后应重写最终设置记录')
+    assert.equal(settingsArtifacts[0].relativePath, 'form-settings.json')
+    assert.deepEqual(JSON.parse(settingsArtifacts[0].content), expectedSettings,
+      '设置记录文件应完整保留最终发布模板，供下游脚本读取')
     assert.equal(result.status, 'published')
     assert.equal(result.browser, 'chrome')
     assert.equal(result.headless, true)

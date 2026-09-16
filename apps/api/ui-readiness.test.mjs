@@ -35,6 +35,37 @@ test('click waits for response body and the handler installed after data arrives
   assert.deepEqual(await page.evaluate(() => [window.early, window.saved]), [0, 1])
 })
 
+test('save waits for the edit region tree body and its rendered options after HTTP 200', async t => {
+  const { page, origin } = await setup(t, (req, res) => {
+    if (req.url === '/api/area/tree?lang=zh_HK') {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.write('{"regions":')
+      setTimeout(() => res.end('["Hong Kong"]}'), 700)
+    } else {
+      res.setHeader('content-type', 'text/html; charset=utf-8')
+      res.end(`<button id="edit">编辑</button><select id="regions"></select><button id="save" onclick="window.early++">保存</button><script>
+        window.early=0; window.saved=0;
+        document.querySelector('#edit').onclick=()=>{
+          fetch('/api/area/tree?lang=zh_HK').then(r=>r.json()).then(data=>setTimeout(()=>{
+            document.querySelector('#regions').innerHTML='<option>'+data.regions[0]+'</option>';
+            document.querySelector('#save').onclick=()=>{
+              window.saved++;
+              window.savedRegion=document.querySelector('#regions').value
+            }
+          },100))
+        }
+      </script>`)
+    }
+  })
+  await page.goto(origin)
+  const responsePromise = page.waitForResponse(response => new URL(response.url()).pathname === '/api/area/tree')
+  await clickWhenReady(page.locator('#edit'))
+  assert.equal((await responsePromise).status(), 200)
+  assert.equal(await page.locator('#regions option').count(), 0)
+  await clickWhenReady(page.locator('#save'))
+  assert.deepEqual(await page.evaluate(() => [window.early, window.saved, window.savedRegion]), [0, 1, 'Hong Kong'])
+})
+
 test('visible loading mask and replacement button finish before a single click', async t => {
   const { page, origin } = await setup(t, (_req, res) => res.end(`<div class="arco-spin-mask">加载中</div><button onclick="window.early++">确认</button><script>
     window.early=0; window.saved=0;

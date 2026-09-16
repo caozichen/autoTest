@@ -1048,7 +1048,7 @@ export async function run({
     throw error
   } finally {
     networkObserver.setPhase('结束清理')
-    await networkObserver.stop()
+    await networkObserver.stop({ signal })
     const abortCloseStarted = await stopAbortClose()
     if (!abortCloseStarted) await closePlaywrightHandles({ context, browser }, { logger })
   }

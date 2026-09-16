@@ -13,6 +13,7 @@ import {
   firstFormCode,
 } from './support/form-link-contract.mjs'
 import { launchGoogleChrome } from './support/google-chrome.mjs'
+import { configurePostCollectionSettings, assertStoredSettings } from './support/form-post-collection-settings.mjs'
 
 import {
   closePlaywrightHandles,
@@ -343,8 +344,9 @@ function waitForExactResponse(page, method, pathnameSuffix) {
   }, { timeout: scaleTimeout(ACTION_TIMEOUT_MS) })
 }
 
-async function fetchFormDetail(page, apiBaseUrl, formId, authorization) {
-  const detailUrl = new URL(`be/form/${encodeURIComponent(formId)}`, `${apiBaseUrl.replace(/\/+$/, '')}/`).toString()
+async function fetchFormDetail(page, apiBaseUrl, formId, authorization, resource = '') {
+  const label = resource === 'notification/template' ? '发布后通知模板' : '表单详情'
+  const detailUrl = new URL(`be/form/${encodeURIComponent(formId)}${resource ? `/${resource}` : ''}`, `${apiBaseUrl.replace(/\/+$/, '')}/`).toString()
   const result = await page.evaluate(async ({ url, token }) => {
     try {
       const response = await fetch(url, { headers: { Authorization: token } })
@@ -364,12 +366,12 @@ async function fetchFormDetail(page, apiBaseUrl, formId, authorization) {
   }, { url: detailUrl, token: authorization })
   expect(
     result.ok,
-    `读取已发布表单详情接口应成功，实际 HTTP ${result.status}${result.error ? `：${result.error}` : ''}`,
+    `读取${label}接口应成功，实际 HTTP ${result.status}${result.error ? `：${result.error}` : ''}`,
   ).toBe(true)
   const validBody = Boolean(result.body && typeof result.body === 'object' && !Array.isArray(result.body))
-  expect(validBody, '读取已发布表单详情接口应返回有效 JSON').toBe(true)
+  expect(validBody, `读取${label}接口应返回有效 JSON`).toBe(true)
   const body = validBody ? result.body : {}
-  expect(Number(body.code), `读取已发布表单详情接口业务码应为 0，实际 ${String(body.code)}`).toBe(0)
+  expect(Number(body.code), `读取${label}接口业务码应为 0，实际 ${String(body.code)}`).toBe(0)
   return body
 }
 
@@ -1146,6 +1148,7 @@ export async function run({
   createPath = '/form-activity/index',
   prepareContactFields = initializeContactFields,
   configureContactSettings = ensureIgnoreStrategyInSettings,
+  configureAdditionalSettings = configurePostCollectionSettings,
 } = {}) {
   if (!siteBaseUrl) throw new Error('运行环境必须提供 Web 基址')
   if (!apiBaseUrl) throw new Error('运行环境必须提供 API 基址')
@@ -1312,6 +1315,17 @@ export async function run({
     networkObserver.setPhase('联系人设置')
     await configureContactSettings(page, logger)
 
+    const settings = await configureAdditionalSettings({
+      page, formId, title, siteBaseUrl, logger, artifactWriter, imagePath, signal,
+      uploadImage: uploadImageThroughBrowser,
+      inspectBusinessResponse,
+      readForm: async () => {
+        const detail = await fetchFormDetail(page, apiBaseUrl, formId, authorization)
+        return detail?.data?.form ?? detail?.data
+      },
+      setPhase: phase => networkObserver.setPhase(phase),
+    })
+
     networkObserver.setPhase('发布表单')
     logger('info', '点击设置页“发布”按钮')
     const publishButton = page.getByRole('button', { name: /^(发布|發佈)$/ })
@@ -1371,6 +1385,14 @@ export async function run({
 
     networkObserver.setPhase('读取发布契约')
     const formDetailResponse = await fetchFormDetail(page, apiBaseUrl, formId, authorization)
+    if (settings) {
+      const templates = await fetchFormDetail(page, apiBaseUrl, formId, authorization, 'notification/template')
+      settings.publishedNotifications = assertStoredSettings(formDetailResponse?.data?.form ?? formDetailResponse?.data,
+        settings, { published: true, notificationTemplates: templates.data })
+      if (artifactWriter) await artifactWriter.writeFile('form-settings.json', JSON.stringify(settings, null, 2), {
+        encoding: 'utf8', type: 'attachment', mimeType: 'application/json',
+      })
+    }
     const formCode = firstFormCode(publishBody, publishedRecord, formDetailResponse)
     const formContract = createFormLinkContract({
       formId,
@@ -1379,6 +1401,7 @@ export async function run({
       revisionNo: savedRevisionNo,
       items: formDetailResponse?.data?.items || formDetailResponse?.data?.form?.items || itemsPayload?.items || [],
     })
+    if (settings) formContract.settings = settings
     logger('success', '已生成可供后续填写脚本使用的表单联动参数', {
       formId,
       legacyFormCode: formCode || undefined,
@@ -1400,6 +1423,7 @@ export async function run({
       formId,
       formCode,
       formContract,
+      ...(settings ? { settings } : {}),
       title,
       status: 'published',
       browser: 'chrome',
@@ -1442,7 +1466,7 @@ export async function run({
     throw error
   } finally {
     networkObserver.setPhase('结束清理')
-    await networkObserver.stop()
+    await networkObserver.stop({ signal })
     const abortCloseStarted = await stopAbortClose()
     if (!abortCloseStarted) await closePlaywrightHandles({ context, browser }, { logger })
   }
@@ -1474,6 +1498,7 @@ export {
   inspectBusinessResponse,
   requireGroupKey,
   timestampTitle,
+  uploadImageThroughBrowser,
 }
 
 export { waitForDesignerBootstrap }

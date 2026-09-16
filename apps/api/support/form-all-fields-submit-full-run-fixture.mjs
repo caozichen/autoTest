@@ -48,8 +48,36 @@ export function createFullRunFormHtml({
   formId,
   title,
   fieldKeys,
+  formSettings = {},
 }) {
   const imageUrl = `${origin}/fixture-assets/radio-option.png`
+  const agreement = formSettings.common_config?.privacy_policy
+  const agreementBody = agreement?.content
+    || agreement?.agreements?.find((entry) => entry.language === 'zh_CN')?.content
+    || ''
+  const agreementVisible = Number(agreement?.enabled) === 1 && Boolean(agreementBody.trim())
+  // Observed in form-renderer v0.0.5 (8266d580): with confirm_required=2,
+  // the agreement is a passive notice/link, with an aria-hidden circle, not a checkbox.
+  const agreementHtml = agreementVisible ? `
+    <div data-fixture-agreement hidden>
+      <span aria-hidden="true">●</span>
+      <span>我已阅读并同意</span>
+      <button type="button" data-fixture-agreement-open>《${escapeHtml(agreement.name)}》</button>
+      <section role="dialog" aria-modal="true" aria-labelledby="privacy-agreement-title" hidden>
+        <h2 id="privacy-agreement-title">${escapeHtml(agreement.name)}</h2>
+        <div class="fb-richtext-view">${agreementBody}</div>
+        <button type="button" data-fixture-agreement-close>确认</button>
+      </section>
+    </div>` : ''
+  const feedback = formSettings.notification_config?.customized_feedback
+  const promotion = formSettings.notification_config?.promotion_link
+  const promotionAction = promotion?.actions?.find((action) => action.type === promotion.selected)
+  const resultExtraHtml = [
+    Number(feedback?.enabled) === 1 ? `<div class="fb-richtext-view">${feedback.body || ''}</div>` : '',
+    Number(promotion?.enabled) === 1 && promotionAction?.link
+      ? `<button type="button" data-submit-promotion-link-button>${escapeHtml(promotion.button_text)}</button>`
+      : '',
+  ].join('')
   const pageOne = pageSection(1, [
     card(fieldKeys.username, '姓名', `
       ${combobox('name-title', '请选择称谓', ['Mr.（先生）', 'Ms.（女士）', 'Mrs.（太太）', 'Dr.（医生/博士）'])}
@@ -194,6 +222,7 @@ export function createFullRunFormHtml({
       ${pageTwo}
       ${pageThree}
       <div class="fb-runtime-pagination-buttons"></div>
+      ${agreementHtml}
       <div class="fb-runtime-submit-button-wrap" hidden>
         <button class="fb-runtime-submit-button" type="button">提交</button>
       </div>
@@ -226,6 +255,13 @@ export function createFullRunFormHtml({
       }
       const clearErrors = () => document.querySelectorAll('.fb-runtime-field-error').forEach((error) => error.remove())
 
+      const agreementNotice = document.querySelector('[data-fixture-agreement]')
+      if (agreementNotice) {
+        const agreementDialog = agreementNotice.querySelector('[role="dialog"]')
+        agreementNotice.querySelector('[data-fixture-agreement-open]').onclick = () => agreementDialog.hidden = false
+        agreementNotice.querySelector('[data-fixture-agreement-close]').onclick = () => agreementDialog.hidden = true
+      }
+
       function showPage(pageNumber) {
         state.page = pageNumber
         document.querySelectorAll('[data-page]').forEach((section) => {
@@ -241,6 +277,7 @@ export function createFullRunFormHtml({
           pagination.innerHTML = '<button class="fb-runtime-submit-button" type="button" data-nav="previous">上一页</button>'
         }
         submitWrap.hidden = pageNumber !== 3
+        if (agreementNotice) agreementNotice.hidden = pageNumber !== 3
       }
 
       document.addEventListener('click', (event) => {
@@ -541,7 +578,7 @@ export function createFullRunFormHtml({
         const body = await response.json()
         const submissionId = String(body.data && body.data.submission_id || '')
         history.pushState({}, '', '/form/submission-result/')
-        document.body.innerHTML = '<form-submission-result form-id="' + formId + '" submission-id="' + submissionId + '"></form-submission-result><main><h1>提交成功</h1></main>'
+        document.body.innerHTML = '<form-submission-result form-id="' + formId + '" submission-id="' + submissionId + '"></form-submission-result><main><h1>提交成功</h1>' + ${JSON.stringify(resultExtraHtml)} + '</main>'
       })
 
       showPage(1)

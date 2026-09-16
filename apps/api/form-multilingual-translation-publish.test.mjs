@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
+import { createServer } from 'node:http'
 import test from 'node:test'
 
 import { runWithAssertionRecorder } from '../../scripts/support/recorded-expect.mjs'
+import { launchGoogleChrome } from '../../scripts/support/google-chrome.mjs'
 import { DEFAULT_RESPONSE_DRAIN_TIMEOUT_MS } from '../../scripts/support/api-response-recorder.mjs'
 import { DEFAULT_ABORT_CLEANUP_TIMEOUT_MS } from './script-runner.mjs'
 import { DEFAULT_CANCELLATION_WAIT_TIMEOUT_MS } from './server.mjs'
+import { ONE_PIXEL_PNG } from './support/form-all-fields-submit-full-run-fixture.mjs'
 import {
   DEFAULT_AI_TRANSLATION_TIMEOUT_MS,
   PROBE_RECOVERY_TIMEOUT_MS,
@@ -15,7 +18,9 @@ import {
   analyzeTranslationWorkspace,
   assertPublishedListRecord,
   assertSourceFormDetail,
+  assertTranslationEditorMatchesWorkspace,
   assertTranslationWorkspace,
+  assertWorkspaceAppliedToPayload,
   buildPublicPreviewUrl,
   buildTranslationUrl,
   compareWorkspaceStructure,
@@ -46,6 +51,112 @@ import {
   translationProbeRecoveryAction,
   visibleLanguageIssues,
 } from '../../scripts/form-multilingual-translation-publish.ui.spec.mjs'
+
+test('zh_HK quality accepts the Hong Kong 户 variant but still rejects other simplified characters', () => {
+  const workspace = (translatedText) => ({ units: [{
+    unit_key: 'agreement-name', group_key: 'other_translation', section_key: 'privacy_policy',
+    field_path: 'name', source_text: '自动化测试用户协议', translated_text: translatedText,
+    status: 'translated', editor_type: 'text',
+  }] })
+  const preview = (title) => ({ title, fieldLabels: [], fieldContent: [], placeholders: [], controlLabels: [], pagination: [] })
+  for (const text of ['自動化測試用户協議', '自動化測試用戶協議']) {
+    assert.deepEqual(languageQualityIssues(workspace(text), 'zh_HK'), [])
+    assert.deepEqual(visibleLanguageIssues(preview(text), 'zh_HK'), [])
+  }
+  const issues = languageQualityIssues(workspace('自動化測試用户协议'), 'zh_HK')
+  assert.ok(issues.some(issue => issue.type === 'traditional-kept-simplified-character'))
+  assert.ok(issues.every(issue => issue.value !== '户'))
+  assert.ok(visibleLanguageIssues(preview('用户协议'), 'zh_HK').some(issue => issue.value === '协'))
+})
+
+test('checks relative privacy fields across admin agreement arrays and flattened public translations', async (t) => {
+  const sourceName = '自动化测试用户协议'
+  const sourceContent = '<p>请核对本次测试数据。</p>'
+  const source = { data: { form: { common_config: { privacy_policy: {
+    name: sourceName,
+    agreements: [{ language: 'en_US', content: 'An unrelated agreement' }, { language: 'zh_CN', content: sourceContent }],
+  } } } } }
+  const workspaceFor = (name, content) => ({ source_language: 'zh_CN', sections: [{
+    group_key: 'other_translation', section_key: 'privacy_policy', scope_type: 'config',
+    scope_key: 'common_config.privacy_policy', units: [
+      { field_path: 'name', source_text: sourceName, translated_text: name },
+      { field_path: 'content', source_text: sourceContent, translated_text: content },
+    ],
+  }] })
+  const check = async (workspace, original, localized, language = 'en_US') => {
+    const assertions = []
+    await runWithAssertionRecorder('form-multilingual-translation-publish', (entry) => assertions.push(entry), () => {
+      assertWorkspaceAppliedToPayload(workspace, original, localized, language)
+    })
+    return assertions.filter((entry) => entry.status === 'failed')
+  }
+
+  for (const [language, name, content] of [
+    ['zh_HK', '自動化測試用戶協議', '<p>請核對本次測試資料。</p>'],
+    ['en_US', 'Automated Test User Agreement', '<p>Please check this test data.</p>'],
+  ]) {
+    await t.test(`${language} matches actual source and public schema shapes`, async () => {
+      const localized = { data: { form: { common_config: { privacy_policy: { name, content } } } } }
+      assert.deepEqual(await check(workspaceFor(name, content), source, localized, language), [])
+    })
+  }
+
+  const workspace = workspaceFor('Test Agreement', '<p>Check test data.</p>')
+  const localized = { data: { form: { common_config: { privacy_policy: {
+    name: 'Test Agreement', content: '<p>Check test data.</p>',
+  } } } } }
+  await t.test('keeps legacy direct source content compatible', async () => {
+    const legacy = structuredClone(source)
+    legacy.data.form.common_config.privacy_policy = { name: sourceName, content: sourceContent }
+    assert.deepEqual(await check(workspace, legacy, localized), [])
+  })
+
+  for (const failure of ['missing policy', 'empty public content', 'wrong translated text', 'wrong source language', 'duplicate source language']) {
+    await t.test(`reports ${failure} instead of accepting another field or agreement`, async () => {
+      const original = structuredClone(source)
+      const candidate = structuredClone(localized)
+      const policy = candidate.data.form.common_config.privacy_policy
+      if (failure === 'missing policy') {
+        delete candidate.data.form.common_config.privacy_policy
+        Object.assign(candidate.data.form, policy)
+      } else if (failure === 'empty public content') {
+        policy.content = ''
+        policy.agreements = [{ language: 'zh_CN', content: '<p>Check test data.</p>' }]
+      } else if (failure === 'wrong translated text') {
+        policy.content = '<p>Different content.</p>'
+      } else if (failure === 'wrong source language') {
+        original.data.form.common_config.privacy_policy.agreements = [{ language: 'en_US', content: sourceContent }]
+      } else {
+        original.data.form.common_config.privacy_policy.agreements.push({ language: 'zh_CN', content: sourceContent })
+      }
+      assert.ok((await check(workspace, original, candidate)).length > 0)
+    })
+  }
+})
+
+test('keeps absolute config paths and form/item paths when checking published translations', async () => {
+  const source = { data: { form: { title: '原始表单', common_config: { submit_button_text: '提交' },
+    notification_config: { customized_feedback: { body: '<p>已提交</p>' } } },
+  items: [{ item_key: 'question', label: '姓名' }] } }
+  const localized = { data: { form: { title: 'Test Form', common_config: { submit_button_text: 'Submit' },
+    notification_config: { customized_feedback: { body: '<p>Submitted</p>' } } },
+  items: [{ item_key: 'question', label: 'Name' }] } }
+  const definitions = [
+    ['config', 'submit_button_text', 'common_config', 'common_config.submit_button_text', '提交', 'Submit'],
+    ['config', 'customized_feedback', 'notification_config.customized_feedback', 'notification_config.customized_feedback.body', '<p>已提交</p>', '<p>Submitted</p>'],
+    ['form', 'form', '', 'title', '原始表单', 'Test Form'],
+    ['item', 'question', 'question', 'label', '姓名', 'Name'],
+  ]
+  const workspace = { source_language: 'zh_CN', sections: definitions.map(([scope_type, section_key, scope_key, field_path, source_text, translated_text]) => ({
+    scope_type, section_key, scope_key, group_key: 'other_translation', units: [{ field_path, source_text, translated_text }],
+  })) }
+  const assertions = []
+  await runWithAssertionRecorder('form-multilingual-translation-publish', (entry) => assertions.push(entry), () => {
+    assertWorkspaceAppliedToPayload(workspace, source, localized, 'en_US')
+  })
+  assert.deepEqual(assertions.filter((entry) => entry.status === 'failed'), [])
+  assert.equal(assertions.filter((entry) => entry.name.includes('公开接口应使用已发布译文')).length, 4)
+})
 
 function deferredPromise() {
   let resolve
@@ -211,17 +322,80 @@ test('accepts the expanded disabled sections for a current ordinary form', () =>
   assert.deepEqual(sourceFormContractAssertions(payload, { environmentCode: 'TEST' }), [])
 })
 
-test('keeps the verified legacy deployments strict and allows an explicit contract upgrade', () => {
+test('uses the returned draft revision for translation without changing published revision selection', () => {
+  // Matches TEST lRzmaD: draft=1 returns current=1, draft=2, and item revision=2.
+  const draftPayload = sourceFormContractPayload([
+    ...LEGACY_DISABLED_TRANSLATION_SECTIONS, 'promotion_link', 'activity_location',
+  ], { current_revision_no: 1, draft_revision_no: 2, status: 'published', published_status: 2 })
+  draftPayload.data.items[0].revision_no = 2
+  const source = assertSourceFormDetail(draftPayload, 'contract-form', { draft: true })
+  assert.equal(source.revisionNo, 2)
+  assert.equal(source.structureSignature.revisionNo, 2)
+
+  const workspace = publicationReadyResponse()
+  workspace.data.revision_no = 2
+  assert.equal(requireWorkspaceMutationGate(workspace, {
+    expectedRevision: source.revisionNo,
+    expectedTargetLanguage: 'en_US',
+  }).revisionNo, 2)
+
+  const publicPayload = structuredClone(draftPayload)
+  publicPayload.data.items[0].revision_no = 1
+  assert.equal(structuralSignature(publicPayload).revisionNo, 1)
+  assert.equal(publicStructuralSignature(publicPayload, publicPayload).revisionNo, 1)
+
+  const publishedPayload = structuredClone(draftPayload)
+  publishedPayload.data.form.current_revision_no = 2
+  publishedPayload.data.form.draft_revision_no = 0
+  publishedPayload.data.form.published_status = 1
+  assert.deepEqual(structuralSignature(publishedPayload), source.structureSignature)
+})
+
+test('retains exact workspace and item revision gates when a published form has a draft', () => {
+  const payload = sourceFormContractPayload([
+    ...LEGACY_DISABLED_TRANSLATION_SECTIONS, 'promotion_link', 'activity_location',
+  ], { current_revision_no: 1, draft_revision_no: 2 })
+  payload.data.items[0].revision_no = 2
+  const source = assertSourceFormDetail(payload, 'contract-form', { draft: true })
+  for (const revision of [1, 3]) {
+    const workspace = publicationReadyResponse()
+    workspace.data.revision_no = revision
+    assert.throws(() => requireWorkspaceMutationGate(workspace, {
+      expectedRevision: source.revisionNo,
+      expectedTargetLanguage: 'en_US',
+    }), /版本必须与初始表单版本一致/)
+  }
+
+  const mixedItems = structuredClone(payload)
+  mixedItems.data.items.push({ ...mixedItems.data.items[0], item_key: 'stale-item', revision_no: 1 })
+  assert.throws(() => assertSourceFormDetail(mixedItems, 'contract-form', { draft: true }), /草稿详情全部题目必须属于选定翻译版本/)
+
+  const conflictingEnvelope = structuredClone(payload)
+  conflictingEnvelope.data.revision_no = 1
+  assert.throws(() => assertSourceFormDetail(conflictingEnvelope, 'contract-form', { draft: true }), /草稿详情全部题目必须属于选定翻译版本/)
+})
+
+test('uses the current revision when draft=1 returns a form without a draft', () => {
+  const payload = sourceFormContractPayload([
+    ...LEGACY_DISABLED_TRANSLATION_SECTIONS, 'promotion_link', 'activity_location',
+  ], { current_revision_no: 1, draft_revision_no: 0 })
+  const source = assertSourceFormDetail(payload, 'contract-form', { draft: true })
+  assert.equal(source.revisionNo, 1)
+  assert.deepEqual(source.structureSignature, structuralSignature(payload))
+})
+
+test('uses the current contract in every environment and allows an explicit legacy override', () => {
   const legacy = sourceFormContractPayload([...LEGACY_DISABLED_TRANSLATION_SECTIONS])
   const current = sourceFormContractPayload([
     ...LEGACY_DISABLED_TRANSLATION_SECTIONS, 'promotion_link', 'activity_location',
   ])
   for (const environmentCode of ['CN_PROD', 'HK_PROD']) {
-    assert.deepEqual(sourceFormContractAssertions(legacy, { environmentCode }), [])
+    assert.deepEqual(sourceFormContractAssertions(current, { environmentCode }), [])
     assert.deepEqual(sourceFormContractAssertions(current, {
       environmentCode, sectionContract: '20260914',
     }), [])
-    assert.equal(sourceFormContractAssertions(current, { environmentCode }).length, 1)
+    assert.equal(sourceFormContractAssertions(legacy, { environmentCode }).length, 1)
+    assert.deepEqual(sourceFormContractAssertions(legacy, { environmentCode, sectionContract: 'legacy' }), [])
   }
   assert.deepEqual(sourceFormContractAssertions(legacy, {
     environmentCode: 'CUSTOM', sectionContract: 'legacy',
@@ -258,6 +432,35 @@ test('derives existing other-translation switches and preserves the submit-butto
   form.theme_config.submit_button.enabled = 2
   assert.deepEqual(sourceFormContractAssertions(sourceFormContractPayload(['submit_button_text'], form)), [])
   assert.equal(sourceFormContractAssertions(sourceFormContractPayload([], form)).length, 1)
+})
+
+test('keeps agreement, rich feedback and promotion translatable after creation settings are enabled', () => {
+  const form = {
+    common_config: {
+      privacy_policy: {
+        enabled: 1, confirm_required: 2, name: '自动化测试用户协议',
+        agreements: [{ language: 'zh_CN', original: 1, content: '<p>本次自动化测试协议内容。</p>' }],
+      },
+    },
+    notification_config: {
+      customized_feedback: { enabled: 1, body: '<h2>自动化测试提交成功</h2><ul><li><strong>已完成</strong></li></ul>' },
+      promotion_link: { enabled: 1, button_text: '自动化测试推广入口', selected: 'href', actions: [{ type: 'href', link: 'https://www.baidu.com/' }] },
+    },
+  }
+  const otherSections = LEGACY_DISABLED_TRANSLATION_SECTIONS.filter((section) => ![
+    'privacy_policy', 'customized_feedback',
+  ].includes(section))
+  for (const environmentCode of ['TEST', 'CN_PROD', 'HK_PROD']) {
+    const expectedSections = [...otherSections, 'activity_location']
+    const payload = sourceFormContractPayload(expectedSections, form)
+    assert.deepEqual(sourceFormContractAssertions(payload, { environmentCode }), [])
+    payload.data.form.translation.untranslatable_sections.other_translation = [
+      ...expectedSections, 'privacy_policy', 'customized_feedback',
+    ]
+    const failures = sourceFormContractAssertions(payload, { environmentCode })
+    assert.equal(failures.length, 1)
+    assert.match(failures[0].name, /other_translation/)
+  }
 })
 
 test('rejects missing, duplicate, unknown and incorrectly excluded current sections', () => {
@@ -943,6 +1146,250 @@ test('matches rendered rich-text descriptions using browser textContent semantic
     'Filling InstructionsPlease check carefully.',
   )
   assert.equal(textContentFromHtml('Hello <strong>world</strong>'), 'Hello world')
+})
+
+test('compares rich-text translation editors consistently across paragraphs, lists, and inline formatting', async (t) => {
+  const browser = await launchGoogleChrome()
+  t.after(() => browser.close())
+  const page = await browser.newPage()
+  const chineseHtml = '<h2>自動化測試提交成功</h2><p>表單：本次測試；<strong>加粗確認：</strong><em>斜體説明</em>、<u>下劃線重點</u>。</p><ol><li><p>已保存通知。</p></li><li><p>核對本次運行標識。</p></li></ol>'
+  const englishHtml = '<h2>Filling Instructions</h2><p>Please <strong>check carefully</strong>.</p><ul><li><p>Keep <em>word spacing</em>.</p></li><li><p>Review this submission.</p></li></ul>'
+  const entityHtml = '<p>Read &amp; confirm &quot;A&quot; &#39;B&#39; &#x43; &#68; &lt;tag&gt;.</p><ul><li><p>Keep&nbsp;word spacing.</p></li></ul>'
+
+  async function checkEditor(language, html, renderedHtml = [html, html], {
+    sourceHtml = '<p>请<strong>核对</strong>本次提交。</p>',
+    sourceText = '请核对本次提交。',
+  } = {}) {
+    const units = [0, 1].map((index) => ({
+      unit_key: `rich-text-${index}`,
+      field_path: `content-${index}`,
+      source_text: sourceHtml,
+      translated_text: html,
+      editor_type: 'rich_text',
+      status: 'translated',
+    }))
+    const workspace = { sections: [{ section_key: 'feedback', units }], units }
+    await page.setContent('<!doctype html><body><nav id="languages"></nav><button class="section-nav__item">反馈 2/2</button><main></main></body>')
+    await page.evaluate(({ units, renderedHtml, sourceText }) => {
+      for (const label of ['繁体中文', 'English']) {
+        const tab = document.createElement('button')
+        tab.className = 'target-language-tab'
+        const title = document.createElement('span')
+        title.className = 'target-language-tab__title'
+        title.textContent = label
+        tab.append(title)
+        tab.onclick = () => {
+          document.querySelectorAll('.target-language-tab').forEach((item) => {
+            item.classList.toggle('target-language-tab--active', item === tab)
+          })
+        }
+        document.querySelector('#languages').append(tab)
+      }
+      units.forEach((unit, index) => {
+        const article = document.createElement('article')
+        article.id = `translation-unit-${unit.unit_key}`
+        article.className = 'translation-unit translation-unit--translated'
+        article.innerHTML = '<div class="source-column"><textarea readonly></textarea></div><div class="target-column"><iframe></iframe></div>'
+        article.querySelector('textarea').value = sourceText
+        article.querySelector('iframe').srcdoc = `<!doctype html><body contenteditable="true">${renderedHtml[index]}</body>`
+        document.querySelector('main').append(article)
+      })
+    }, { units, renderedHtml, sourceText })
+    const assertions = []
+    const action = () => runWithAssertionRecorder('form-multilingual-translation-publish', (entry) => assertions.push(entry), () => (
+      assertTranslationEditorMatchesWorkspace(page, workspace, language, () => {})
+    ))
+    return { action, assertions }
+  }
+
+  for (const [language, html] of [['zh_HK', chineseHtml], ['en_US', englishHtml]]) {
+    await t.test(`${language} keeps matching text across block and inline elements`, async () => {
+      const { action, assertions } = await checkEditor(language, html)
+      await action()
+      assert.equal(assertions.filter((entry) => entry.status === 'failed').length, 0)
+      assert.equal(assertions.filter((entry) => entry.name.includes('UI 译文应与接口一致')).length, 2)
+    })
+  }
+
+  const plainSourceFixtures = [
+    {
+      label: 'description',
+      sourceHtml: '<p><strong>填写须知</strong></p><ul><li><p>请确保姓名、证件及联系方式真实有效。</p></li><li><p>提交前请仔细核对，带星号项目为必填。</p></li></ul><p></p>',
+      sourceText: '填写须知 请确保姓名、证件及联系方式真实有效。 提交前请仔细核对，带星号项目为必填。',
+    },
+    {
+      label: 'privacy policy',
+      sourceHtml: '<h2>自动化测试用户协议</h2><p>本协议用于验证表单用户协议的创建、保存和展示功能。</p><ol><li><p>测试范围包括采集项、分类标签、通知和提交反馈。</p></li><li><p>本次填写内容仅用于测试结果核对与问题定位。</p></li></ol>',
+      sourceText: '自动化测试用户协议 本协议用于验证表单用户协议的创建、保存和展示功能。 测试范围包括采集项、分类标签、通知和提交反馈。 本次填写内容仅用于测试结果核对与问题定位。',
+    },
+    {
+      label: 'custom feedback',
+      sourceHtml: '<h2>自动化测试提交成功</h2><p><strong>加粗确认：</strong><em>斜体说明</em>、<u>下划线重点</u>、<s>删除线示例</s>。</p><ul><li><p>已验证表单基础设置。</p></li><li><p>核对本次运行标识。</p></li></ul><p>外部链接示例：<a href="https://example.test/">百度官网</a></p>',
+      sourceText: '自动化测试提交成功 加粗确认：斜体说明、下划线重点、删除线示例。 已验证表单基础设置。 核对本次运行标识。 外部链接示例：百度官网',
+    },
+  ]
+  for (const language of ['zh_HK', 'en_US']) {
+    for (const source of plainSourceFixtures) {
+      await t.test(`${language} compares the actual readonly ${source.label} plain text`, async () => {
+        const { action, assertions } = await checkEditor(language, chineseHtml, undefined, source)
+        await action()
+        assert.equal(assertions.filter((entry) => entry.status === 'failed').length, 0)
+        assert.equal(assertions.filter((entry) => entry.name.includes('UI 原文应与接口一致')).length, 2)
+      })
+    }
+  }
+
+  await t.test('source plain text preserves decoded symbols and English word spaces', async () => {
+    const sourceHtml = '<h2>Read &amp; confirm</h2><p>Keep <strong>word spacing</strong> and &lt;tag&gt;.</p>'
+    const sourceText = 'Read & confirm Keep word spacing and <tag>.'
+    const matching = await checkEditor('en_US', englishHtml, undefined, { sourceHtml, sourceText })
+    await matching.action()
+    assert.equal(matching.assertions.filter((entry) => entry.status === 'failed').length, 0)
+
+    for (const changed of [sourceText.replace('word spacing', 'wordspacing'), sourceText.replace('&', ''), sourceText.replace('confirm', 'delete')]) {
+      const mismatch = await checkEditor('en_US', englishHtml, undefined, { sourceHtml, sourceText: changed })
+      await mismatch.action()
+      assert.equal(mismatch.assertions.filter((entry) => entry.status === 'failed' && entry.name.includes('UI 原文应与接口一致')).length, 2)
+    }
+  })
+
+  await t.test('the synchronization wait rejects missing English word spaces', async () => {
+    const { action } = await checkEditor('en_US', englishHtml, [englishHtml.replace('check carefully', 'checkcarefully'), englishHtml])
+    await assert.rejects(action, /富文本译文必须完成同步/)
+  })
+
+  await t.test('decodes named, decimal, and hexadecimal entities with actual DOM semantics', async () => {
+    const renderedHtml = entityHtml.replace('&amp;', '&#38;').replace('&quot;A&quot;', '"A"').replace('&#x43; &#68;', 'C D').replace('&nbsp;', ' ')
+    const { action, assertions } = await checkEditor('en_US', entityHtml, [renderedHtml, renderedHtml])
+    await action()
+    assert.equal(assertions.filter((entry) => entry.status === 'failed').length, 0)
+  })
+
+  for (const [label, html, changedHtml] of [
+    ['English word spaces', englishHtml, englishHtml.replace('word spacing', 'wordspacing')],
+    ['an encoded ampersand', entityHtml, entityHtml.replace('&amp;', '')],
+  ]) {
+    await t.test(`the subsequent unit comparison preserves ${label}`, async () => {
+      const { action, assertions } = await checkEditor('en_US', html, [html, changedHtml])
+      await assert.rejects(action, /UI 译文必须与接口一致/)
+      assert.equal(assertions.filter((entry) => entry.status === 'failed' && entry.name.includes('UI 译文应与接口一致')).length, 1)
+    })
+  }
+
+  for (const [label, changedHtml] of [
+    ['missing content', chineseHtml.replace('<li><p>已保存通知。</p></li>', '')],
+    ['simplified characters', chineseHtml.replace('測試', '测试')],
+    ['different translation', chineseHtml.replace('核對', '刪除')],
+  ]) {
+    await t.test(`the subsequent unit comparison rejects ${label}`, async () => {
+      const { action, assertions } = await checkEditor('zh_HK', chineseHtml, [chineseHtml, changedHtml])
+      await assert.rejects(action, /UI 译文必须与接口一致/)
+      assert.equal(assertions.filter((entry) => entry.status === 'failed' && entry.name.includes('UI 译文应与接口一致')).length, 1)
+    })
+  }
+})
+
+test('finishes rich-text images before navigating away and keeps broken images as failures', async (t) => {
+  const served = new Map()
+  const timers = new Set()
+  const server = createServer((request, response) => {
+    const mode = new URL(request.url, 'http://fixture.local').searchParams.get('mode')
+    const send = () => {
+      served.set(mode, Date.now())
+      response.writeHead(mode === 'slow' ? 200 : 503, { 'Content-Type': 'image/png' })
+      response.end(mode === 'slow' ? ONE_PIXEL_PNG : 'image unavailable')
+    }
+    if (mode !== 'slow') return send()
+    const timer = setTimeout(() => { timers.delete(timer); send() }, 1500)
+    timers.add(timer)
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  t.after(async () => {
+    for (const timer of timers) clearTimeout(timer)
+    server.closeAllConnections()
+    await new Promise((resolve) => server.close(resolve))
+  })
+  const browser = await launchGoogleChrome()
+  t.after(() => browser.close())
+
+  for (const mode of ['slow', 'broken']) {
+    await t.test(mode, async () => {
+      const page = await browser.newPage()
+      const imageUrl = `http://127.0.0.1:${server.address().port}/image.png?mode=${mode}`
+      const failures = []
+      const responseStatuses = []
+      page.on('requestfailed', (request) => {
+        if (request.url() === imageUrl) failures.push(request.failure()?.errorText)
+      })
+      page.on('response', (response) => {
+        if (response.url() === imageUrl) responseStatuses.push(response.status())
+      })
+      const richUnit = {
+        unit_key: 'feedback-image', field_path: 'content', editor_type: 'rich_text', status: 'translated',
+        source_text: '<p>已提交。</p>',
+        translated_text: `<p>Submitted.</p><img src="${imageUrl}"><img>`,
+      }
+      const plainUnit = {
+        unit_key: 'next-section', field_path: 'button_text', editor_type: 'plain_text', status: 'translated',
+        source_text: '继续', translated_text: 'Continue',
+      }
+      const workspace = {
+        sections: [{ section_key: 'feedback', units: [richUnit] }, { section_key: 'next', units: [plainUnit] }],
+        units: [richUnit, plainUnit],
+      }
+      await page.setContent('<!doctype html><body><nav id="languages"></nav><nav id="sections"></nav><main></main></body>')
+      await page.evaluate(({ richUnit, plainUnit }) => {
+        for (const label of ['繁体中文', 'English']) {
+          const tab = document.createElement('button')
+          tab.className = 'target-language-tab'
+          tab.innerHTML = '<span class="target-language-tab__title"></span>'
+          tab.firstElementChild.textContent = label
+          tab.onclick = () => document.querySelectorAll('.target-language-tab').forEach((item) => {
+            item.classList.toggle('target-language-tab--active', item === tab)
+          })
+          document.querySelector('#languages').append(tab)
+        }
+        for (const [index, unit] of [richUnit, plainUnit].entries()) {
+          const button = document.createElement('button')
+          button.className = 'section-nav__item'
+          button.textContent = `${index === 0 ? '反馈' : '下一分区'} 1/1`
+          button.onclick = () => {
+            if (index === 1) {
+              const image = document.querySelector('iframe').contentDocument.querySelector('img[src]')
+              window.nextSection = { at: Date.now(), complete: image.complete, width: image.naturalWidth }
+            }
+            const article = document.createElement('article')
+            article.id = `translation-unit-${unit.unit_key}`
+            article.className = 'translation-unit translation-unit--translated'
+            article.innerHTML = '<div class="source-column"><textarea readonly></textarea></div><div class="target-column"></div>'
+            article.querySelector('textarea').value = index === 0 ? '已提交。' : unit.source_text
+            const editor = document.createElement(index === 0 ? 'iframe' : 'textarea')
+            if (index === 0) editor.srcdoc = `<!doctype html><body contenteditable="true">${unit.translated_text}</body>`
+            else editor.value = unit.translated_text
+            article.querySelector('.target-column').append(editor)
+            document.querySelector('main').replaceChildren(article)
+          }
+          document.querySelector('#sections').append(button)
+        }
+      }, { richUnit, plainUnit })
+      const action = () => assertTranslationEditorMatchesWorkspace(page, workspace, 'zh_HK', () => {})
+      if (mode === 'slow') {
+        await action()
+        const navigation = await page.evaluate(() => window.nextSection)
+        assert.ok(navigation.at >= served.get(mode), 'the next section must not remove the iframe before its image response finishes')
+        assert.equal(navigation.complete, true)
+        assert.ok(navigation.width > 0)
+        assert.deepEqual(responseStatuses, [200])
+        assert.deepEqual(failures, [], 'navigation must not abort the delayed image')
+      } else {
+        await assert.rejects(action, /富文本图片必须与目标 HTML 数量一致并完成加载/)
+        assert.deepEqual(responseStatuses, [503], 'the real resource failure must remain observable')
+        assert.equal(await page.evaluate(() => window.nextSection), undefined)
+        assert.equal(await page.locator('iframe').count(), 1, 'a broken image must fail before its section is removed')
+      }
+      await page.close()
+    })
+  }
 })
 
 test('detects raw and URL-encoded secrets in share links without echoing secret values', () => {

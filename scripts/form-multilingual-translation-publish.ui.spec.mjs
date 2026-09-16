@@ -214,7 +214,7 @@ const SIMPLIFIED_TO_TRADITIONAL = Object.freeze({
   资: '資',
   细: '細',
   带: '帶',
-  户: '戶',
+  // Accept both 户 and 戶 for zh_HK (OpenCC's Hong Kong variant); other pairs stay strict.
   协: '協',
   议: '議',
   务: '務',
@@ -810,15 +810,44 @@ function stripHtml(value) {
 // `textContent` does not insert whitespace at block-element boundaries. Keep
 // this separate from `stripHtml`, whose word-separating behavior is useful for
 // language-quality analysis of rich-text content.
+function normalizeTextContent(value) {
+  return String(value ?? '').replace(/\s+/g, ' ').trim()
+}
+
 function textContentFromHtml(value) {
-  return String(value ?? '')
+  return normalizeTextContent(String(value ?? '')
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
     .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '')
     .replace(/<[^>]+>/g, '')
     .replace(/&nbsp;|&#160;/gi, ' ')
-    .replace(/&[a-z]+;|&#\d+;/gi, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
+    .replace(/&[a-z]+;|&#\d+;/gi, ' '))
+}
+
+async function browserTextContentsFromHtml(page, values) {
+  const contents = await page.evaluate((htmlValues) => htmlValues.map((value) => {
+    // An inert template decodes entities without rendering or loading the HTML.
+    const template = document.createElement('template')
+    template.innerHTML = String(value ?? '')
+    template.content.querySelectorAll('script, style').forEach((element) => element.remove())
+    return template.content.textContent
+  }), values)
+  return contents.map(normalizeTextContent)
+}
+
+async function browserSourceTextFromHtml(page, value) {
+  const content = await page.evaluate((html) => {
+    const template = document.createElement('template')
+    template.innerHTML = String(html ?? '')
+    template.content.querySelectorAll('script, style').forEach((element) => element.remove())
+    // The readonly source textarea presents plain text: block boundaries become
+    // separators, while inline formatting preserves the original word spacing.
+    template.content.querySelectorAll('address, article, aside, blockquote, br, dd, div, dl, dt, figcaption, figure, footer, h1, h2, h3, h4, h5, h6, header, hr, li, main, nav, ol, p, pre, section, table, tbody, td, tfoot, th, thead, tr, ul').forEach((element) => {
+      element.before(document.createTextNode(' '))
+      element.after(document.createTextNode(' '))
+    })
+    return template.content.textContent
+  }, value)
+  return normalizeTextContent(content)
 }
 
 function languageQualityIssues(workspaceValue, language = workspaceValue?.target_language) {
@@ -1198,9 +1227,12 @@ function signatureItems(items) {
   return [...items].sort((left, right) => String(left.item_key ?? '').localeCompare(String(right.item_key ?? '')))
 }
 
-function structuralSignature(payload) {
+function structuralSignature(payload, { draft = false } = {}) {
   const { data, form, items } = unwrapFormPayload(payload)
   const revisionNo = numericValue(data.revision_no)
+    // Only a response explicitly requested with draft=1 can prefer its draft.
+    // Published/public comparisons keep using current_revision_no by default.
+    || (draft ? numericValue(form.draft_revision_no) : 0)
     || numericValue(form.current_revision_no)
     || numericValue(form.draft_revision_no)
     || numericValue(items.find((item) => numericValue(item.revision_no))?.revision_no)
@@ -1288,10 +1320,10 @@ function orderedContentFormItems(items) {
 }
 
 function resolveTranslationSectionContract(environmentCode, configuredContract) {
-  // Verified deployment split on 2026-09-14; override when an environment is upgraded.
+  // All three environments use the current contract as verified on 2026-09-16.
   // The response under test cannot select its own baseline: missing new keys must fail.
   const contract = String(configuredContract ?? '').trim()
-    || (['CN_PROD', 'HK_PROD'].includes(String(environmentCode ?? '').trim().toUpperCase()) ? 'legacy' : '20260914')
+    || '20260914'
   if (!['legacy', '20260914'].includes(contract)) {
     throw new Error('TRANSLATION_SECTION_CONTRACT 仅支持 legacy 或 20260914')
   }
@@ -1321,7 +1353,7 @@ function expectedOtherUntranslatableSections(form, contract) {
   return excluded
 }
 
-function assertSourceFormDetail(payload, formId, { environmentCode, sectionContract } = {}) {
+function assertSourceFormDetail(payload, formId, { environmentCode, sectionContract, draft = false } = {}) {
   const contract = resolveTranslationSectionContract(environmentCode, sectionContract)
   const { data, form, items } = unwrapFormPayload(payload)
   expect(String(form.form_id ?? form.id ?? ''), '翻译前表单详情应属于目标表单 ID').toBe(formId)
@@ -1331,6 +1363,13 @@ function assertSourceFormDetail(payload, formId, { environmentCode, sectionContr
   expect(items.map((item) => item.item_key).filter(Boolean), '翻译前题目 item_key 应唯一')
     .toHaveLength(new Set(items.map((item) => item.item_key).filter(Boolean)).size)
   expect(items.every((item) => numericValue(item.revision_no) > 0), '翻译前每个题目都应属于有效版本').toBe(true)
+  const structureSignature = structuralSignature(payload, { draft })
+  if (draft) {
+    flowExpect(
+      items.every((item) => numericValue(item.revision_no) === structureSignature.revisionNo),
+      '草稿详情全部题目必须属于选定翻译版本，才能修改或发布',
+    ).toBe(true)
+  }
 
   const translation = form.translation
   expect(isRecord(translation), '表单详情应明确包含多语言配置').toBe(true)
@@ -1365,9 +1404,9 @@ function assertSourceFormDetail(payload, formId, { environmentCode, sectionContr
     data,
     form,
     items,
-    revisionNo: structuralSignature(payload).revisionNo,
+    revisionNo: structureSignature.revisionNo,
     sourceSignature: sourceTextSignature(payload),
-    structureSignature: structuralSignature(payload),
+    structureSignature,
   }
 }
 
@@ -1433,6 +1472,28 @@ function objectForWorkspaceSection(payload, section) {
   return items.find((item) => String(item.item_key ?? '') === section.scope_key) ?? null
 }
 
+function readWorkspaceUnitValue(payload, section, unit, sourceLanguage) {
+  if (section.scope_type === 'config' && section.section_key === 'privacy_policy'
+    && ['name', 'content'].includes(unit.field_path)) {
+    const { form } = unwrapFormPayload(payload)
+    const policy = form.common_config?.privacy_policy
+    if (!isRecord(policy)) return undefined
+    if (unit.field_path === 'name') return typeof policy.name === 'string' ? policy.name : undefined
+    // The public endpoint exposes content directly; admin details keep the
+    // source agreement in a language-specific array. Never substitute another
+    // language, or fall back from an explicitly empty public content field.
+    if (Object.prototype.hasOwnProperty.call(policy, 'content')) {
+      return typeof policy.content === 'string' ? policy.content : undefined
+    }
+    const agreements = Array.isArray(policy.agreements)
+      ? policy.agreements.filter((agreement) => isRecord(agreement) && agreement.language === sourceLanguage)
+      : []
+    return agreements.length === 1 && typeof agreements[0].content === 'string'
+      ? agreements[0].content : undefined
+  }
+  return readFieldPath(objectForWorkspaceSection(payload, section), unit.field_path)
+}
+
 function normalizeComparableText(value) {
   return String(value ?? '').replace(/\r\n/g, '\n').trim()
 }
@@ -1446,8 +1507,8 @@ function assertWorkspaceAppliedToPayload(workspace, sourcePayload, localizedPayl
     expect(localizedObject, `${language} ${section.section_key} 应能定位公开页对象`).toBeTruthy()
     if (!sourceObject || !localizedObject) continue
     for (const unit of section.units) {
-      const sourceValue = readFieldPath(sourceObject, unit.field_path)
-      const localizedValue = readFieldPath(localizedObject, unit.field_path)
+      const sourceValue = readWorkspaceUnitValue(sourcePayload, section, unit, workspace.source_language)
+      const localizedValue = readWorkspaceUnitValue(localizedPayload, section, unit, workspace.source_language)
       expect(normalizeComparableText(sourceValue), `${language} ${unit.field_path} 工作区原文应与表单源字段一致`)
         .toBe(normalizeComparableText(unit.source_text))
       expect(normalizeComparableText(localizedValue), `${language} ${unit.field_path} 公开接口应使用已发布译文`)
@@ -1698,7 +1759,7 @@ async function navigateToWorkspaceSection(page, workspace, sectionKey) {
   return navItem
 }
 
-async function readRenderedTranslationUnits(page) {
+async function readRenderedTranslationUnits(page, expectedUnits) {
   const units = await page.locator('article.translation-unit').evaluateAll((articles) => articles.map((article) => {
     const sourceEditor = article.querySelector('.source-column textarea, .source-column input')
     const targetEditor = article.querySelector('.target-column textarea, .target-column input')
@@ -1717,7 +1778,32 @@ async function readRenderedTranslationUnits(page) {
     const article = page.locator(`article.translation-unit[id="${unit.id.replace(/["\\]/g, '\\$&')}"]`)
     const body = article.frameLocator('.target-column iframe').locator('body')
     await flowExpect(body, `${unit.id} 富文本译文编辑器必须完成挂载`).toBeVisible()
-    unit.targetText = await body.innerText()
+    const expectedUnit = expectedUnits.find((entry) => `translation-unit-${entry.unit_key}` === unit.id)
+    flowExpect(expectedUnit, `${unit.id} 富文本编辑器必须属于当前工作区分区`).toBeTruthy()
+    const expectedImages = await article.evaluate((_article, html) => {
+      const template = document.createElement('template')
+      template.innerHTML = String(html ?? '')
+      const images = [...template.content.querySelectorAll('img')]
+      return { count: images.length, withSource: images.filter((image) => image.getAttribute('src')?.trim()).length }
+    }, expectedUnit.translated_text)
+    await flowExpect.poll(() => body.locator('img').evaluateAll((images) => {
+      const withSource = images.filter((image) => image.getAttribute('src')?.trim())
+      return {
+        count: images.length,
+        withSource: withSource.length,
+        incomplete: withSource.map((image, index) => ({
+          index,
+          complete: image.complete,
+          naturalWidth: image.naturalWidth,
+          naturalHeight: image.naturalHeight,
+        })).filter((image) => !image.complete || image.naturalWidth <= 0 || image.naturalHeight <= 0),
+      }
+    }), {
+      timeout: scaleTimeout(ACTION_TIMEOUT_MS),
+      intervals: [50, 100, 200],
+      message: `${unit.id} 富文本图片必须与目标 HTML 数量一致并完成加载，才能离开当前分区`,
+    }).toEqual({ ...expectedImages, incomplete: [] })
+    unit.targetText = normalizeTextContent(await body.textContent())
   }
   return units
 }
@@ -1725,8 +1811,9 @@ async function readRenderedTranslationUnits(page) {
 async function waitForRenderedTargetText(article, unit, language) {
   if (unit.editor_type === 'rich_text') {
     const body = article.frameLocator('.target-column iframe').locator('body')
+    const [expectedText] = await browserTextContentsFromHtml(article.page(), [unit.translated_text])
     await flowExpect(body, `${language} ${unit.section_key}/${unit.field_path} 切换语言后富文本译文必须完成同步`)
-      .toContainText(stripHtml(unit.translated_text))
+      .toHaveText(expectedText)
     return
   }
   const editor = article.locator('.target-column textarea, .target-column input').first()
@@ -1756,7 +1843,7 @@ async function assertTranslationEditorMatchesWorkspace(page, workspace, language
     ).toBeVisible()
     await waitForRenderedTargetText(firstUnitLocator, firstUnit, language)
 
-    const renderedUnits = await readRenderedTranslationUnits(page)
+    const renderedUnits = await readRenderedTranslationUnits(page, section.units)
     const expectedProgress = `${section.units.filter((unit) => unit.status === 'translated').length}/${section.units.length}`
     expect(await navItem.innerText(), `${language} ${section.section_key} 导航进度应为 ${expectedProgress}`)
       .toContain(expectedProgress)
@@ -1769,17 +1856,20 @@ async function assertTranslationEditorMatchesWorkspace(page, workspace, language
       expect(rendered, `${language} ${section.section_key}/${unit.field_path} 应存在编辑器单元`).toBeTruthy()
       if (!rendered) continue
       expect(rendered.sourceReadonly, `${language} ${section.section_key}/${unit.field_path} 原文编辑器应只读`).toBe(true)
+      const [expectedRichTargetText] = rendered.hasRichTextEditor
+        ? await browserTextContentsFromHtml(page, [unit.translated_text])
+        : []
       const renderedSourceText = rendered.hasRichTextEditor
-        ? stripHtml(rendered.sourceText)
+        ? normalizeTextContent(rendered.sourceText)
         : normalizeComparableText(rendered.sourceText)
       const expectedSourceText = rendered.hasRichTextEditor
-        ? stripHtml(unit.source_text)
+        ? await browserSourceTextFromHtml(page, unit.source_text)
         : normalizeComparableText(unit.source_text)
       const renderedTargetText = rendered.hasRichTextEditor
-        ? stripHtml(rendered.targetText)
+        ? normalizeTextContent(rendered.targetText)
         : normalizeComparableText(rendered.targetText)
       const expectedTargetText = rendered.hasRichTextEditor
-        ? stripHtml(unit.translated_text)
+        ? expectedRichTargetText
         : normalizeComparableText(unit.translated_text)
       expect(renderedSourceText, `${language} ${section.section_key}/${unit.field_path} UI 原文应与接口一致`)
         .toBe(expectedSourceText)
@@ -2978,7 +3068,7 @@ export async function run({
 
     const detailOutcome = await inspectBusinessResponse(detailResponse, '多语言翻译前表单详情')
     flowExpect(detailOutcome.succeeded, '表单详情接口必须成功，才能执行 AI 翻译或发布').toBe(true)
-    const source = assertSourceFormDetail(detailOutcome.body, formId, { sectionContract })
+    const source = assertSourceFormDetail(detailOutcome.body, formId, { sectionContract, draft: true })
     flowExpect(String(source.form.form_id ?? source.form.id ?? ''), '发布门禁必须确认表单详情属于目标 FORM_ID')
       .toBe(formId)
     flowExpect(source.form.source_language, '发布门禁必须确认原文语言为 zh_CN').toBe('zh_CN')
@@ -3367,9 +3457,9 @@ export async function run({
     publicNetworkObserver.setPhase('结束清理')
     shareNetworkObserver.setPhase('结束清理')
     const observerStops = await Promise.allSettled([
-      adminNetworkObserver.stop({ discardPending: true }),
-      publicNetworkObserver.stop({ discardPending: true }),
-      shareNetworkObserver.stop({ discardPending: true }),
+      adminNetworkObserver.stop({ discardPending: true, signal }),
+      publicNetworkObserver.stop({ discardPending: true, signal }),
+      shareNetworkObserver.stop({ discardPending: true, signal }),
     ])
     const discardedPending = observerStops.reduce((total, result) => (
       result.status === 'fulfilled'
@@ -3412,7 +3502,9 @@ export {
   analyzeTranslationWorkspace,
   assertPublishedListRecord,
   assertSourceFormDetail,
+  assertTranslationEditorMatchesWorkspace,
   assertTranslationWorkspace,
+  assertWorkspaceAppliedToPayload,
   buildPublicPreviewUrl,
   buildTranslationUrl,
   compareWorkspaceStructure,

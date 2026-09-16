@@ -1,6 +1,7 @@
 import { scaleTimeout } from './environment-timeouts.mjs'
 const MAX_BODY_CHARACTERS = 100_000
 const DEFAULT_RESPONSE_DRAIN_TIMEOUT_MS = 2_000
+const HONG_KONG_RESPONSE_DRAIN_TIMEOUT_MS = 15_000
 const DEFAULT_NETWORK_PHASE = '未标记'
 const DIAGNOSTIC_CORRELATION_WINDOW_MS = 100
 const API_RESOURCE_TYPES = new Set(['eventsource', 'fetch', 'xhr'])
@@ -54,6 +55,14 @@ function requestBody(request) {
     return `[multipart/form-data，${value.length} 字符，二进制内容未展开]`
   }
   return parseBodyText(value, contentType)
+}
+
+function finalRequestBodyEntry(state) {
+  // Playwright emits request before route.continue can replace its body. Read
+  // the public request again at the terminal event to report what was sent.
+  const finalBody = requestBody(state.request)
+  const body = finalBody === undefined ? state.requestBody : finalBody
+  return body === undefined ? {} : { requestBody: body }
 }
 
 function parseHttpUrl(request) {
@@ -283,7 +292,9 @@ export function attachNetworkObserver(target, {
   onResourceResponse,
   onNetworkEntry,
   shouldRecord = () => true,
-  responseDrainTimeoutMs = scaleTimeout(DEFAULT_RESPONSE_DRAIN_TIMEOUT_MS),
+  responseDrainTimeoutMs = scaleTimeout(DEFAULT_RESPONSE_DRAIN_TIMEOUT_MS, {
+    hongKongMs: HONG_KONG_RESPONSE_DRAIN_TIMEOUT_MS,
+  }),
   initialPhase = DEFAULT_NETWORK_PHASE,
   includeApi = true,
   includeResources = true,
@@ -315,9 +326,7 @@ export function attachNetworkObserver(target, {
     && diagnosticGroups.size === 0
 
   const notifyIdle = () => {
-    if (!isIdle()) return
-    for (const resolve of idleWaiters) resolve()
-    idleWaiters.clear()
+    for (const checkIdle of idleWaiters) checkIdle()
   }
 
   const track = (work) => {
@@ -717,7 +726,7 @@ export function attachNetworkObserver(target, {
         ok: !failed,
         ...(state.category === 'api' ? {
           method: state.method,
-          ...(state.requestBody === undefined ? {} : { requestBody: state.requestBody }),
+          ...finalRequestBodyEntry(state),
           ...(state.resourceType === 'eventsource'
             ? { streaming: true }
             : { responseBody: responseBody.body }),
@@ -796,9 +805,9 @@ export function attachNetworkObserver(target, {
       if (state.resourceType === 'eventsource') {
         state.finished = true
         finalizeResponse(state, response)
-        return
-      }
-      if (state.finished) finalizeResponse(state, response)
+      } else if (state.finished) finalizeResponse(state, response)
+      // Headers can reveal a stream that a scoped prerequisite wait excludes.
+      notifyIdle()
     } catch {
       // 响应元数据异常仅影响记录，不中断测试。
     }
@@ -821,13 +830,14 @@ export function attachNetworkObserver(target, {
         if (response) {
           state.response = response
           finalizeResponse(state, response)
+          notifyIdle()
           return
         }
         deferFailure(state, {
           ...commonEntry(state, null),
           ...(state.category === 'api' ? {
             method: state.method,
-            ...(state.requestBody === undefined ? {} : { requestBody: state.requestBody }),
+            ...finalRequestBodyEntry(state),
           } : { resourceType: state.resourceType }),
           error: '请求已结束，但 Playwright 未提供响应信息',
           failureKind: 'network',
@@ -849,7 +859,7 @@ export function attachNetworkObserver(target, {
         ok: ignored,
         ...(state.category === 'api' ? {
           method: state.method,
-          ...(state.requestBody === undefined ? {} : { requestBody: state.requestBody }),
+          ...finalRequestBodyEntry(state),
         } : {
           resourceType: state.resourceType,
         }),
@@ -963,30 +973,64 @@ export function attachNetworkObserver(target, {
     return phase
   }
 
-  const waitUntilIdle = (timeoutMs) => {
-    if (isIdle()) return Promise.resolve(true)
-    return new Promise((resolve) => {
+  const waitUntilIdle = (timeoutMs, signal, shouldWaitFor) => {
+    const abortReason = () => signal.reason ?? new DOMException('等待网络请求完成已取消', 'AbortError')
+    if (signal?.aborted) return Promise.reject(abortReason())
+    // Selected states stay live until their response bodies or resources finish.
+    // Unrelated subscriber/diagnostic work remains part of the default full drain.
+    const isWaitIdle = typeof shouldWaitFor === 'function'
+      ? () => ![...states.values()].some(state => shouldWaitFor({
+        request: state.request,
+        url: state.url,
+        category: state.category,
+        resourceType: state.resourceType,
+        response: state.response,
+        responseHeaders: safely(() => state.response?.headers(), {}) ?? {},
+      }) !== false)
+      : isIdle
+    try {
+      if (isWaitIdle()) return Promise.resolve(true)
+    } catch (error) {
+      return Promise.reject(error)
+    }
+    return new Promise((resolve, reject) => {
       let settled = false
       let timer
-      const finish = (idle) => {
+      const finish = (idle, failed = false, error) => {
         if (settled) return
         settled = true
         clearTimeout(timer)
-        idleWaiters.delete(onIdle)
-        resolve(idle)
+        idleWaiters.delete(checkIdle)
+        signal?.removeEventListener('abort', onAbort)
+        if (failed) reject(error)
+        else resolve(idle)
       }
-      const onIdle = () => finish(true)
+      const checkIdle = () => {
+        try {
+          if (isWaitIdle()) finish(true)
+        } catch (error) {
+          finish(false, true, error)
+        }
+      }
+      const onAbort = () => finish(false, true, abortReason())
       timer = setTimeout(() => finish(false), timeoutMs)
-      idleWaiters.add(onIdle)
+      idleWaiters.add(checkIdle)
+      signal?.addEventListener('abort', onAbort, { once: true })
     })
   }
 
-  const stop = async ({ discardPending = false } = {}) => {
+  const stop = async ({ discardPending = false, signal } = {}) => {
     if (stopPromise) return stopPromise
     stopPromise = (async () => {
       stopping = true
       const timeoutMs = Math.max(0, Number(responseDrainTimeoutMs) || 0)
-      await waitUntilIdle(timeoutMs)
+      let cancelled = false
+      try {
+        await waitUntilIdle(timeoutMs, signal)
+      } catch (error) {
+        if (!signal?.aborted) throw error
+        cancelled = true
+      }
 
       target.off('request', onRequest)
       target.off('response', onResponse)
@@ -1014,12 +1058,14 @@ export function attachNetworkObserver(target, {
           ok: false,
           ...(state.category === 'api' ? {
             method: state.method,
-            ...(state.requestBody === undefined ? {} : { requestBody: state.requestBody }),
+            ...finalRequestBodyEntry(state),
           } : {
             resourceType: state.resourceType,
           }),
-          error: `网络观察器封账时请求仍未完成（已等待 ${timeoutMs}ms）`,
-          failureKind: 'timeout',
+          error: cancelled
+            ? '运行取消时网络请求仍未完成，网络观察器已立即封账'
+            : `网络观察器封账时请求仍未完成（已等待 ${timeoutMs}ms）`,
+          failureKind: cancelled ? 'aborted' : 'timeout',
           incomplete: true,
         }, state.diagnostics))
       }
@@ -1046,7 +1092,7 @@ export function attachNetworkObserver(target, {
     ready,
     setPhase,
     stop,
-    waitForIdle: ({ timeoutMs = responseDrainTimeoutMs } = {}) => waitUntilIdle(Math.max(0, Number(timeoutMs) || 0)),
+    waitForIdle: ({ timeoutMs = responseDrainTimeoutMs, signal, shouldWaitFor } = {}) => waitUntilIdle(Math.max(0, Number(timeoutMs) || 0), signal, shouldWaitFor),
     get phase() {
       return phase
     },
@@ -1059,7 +1105,9 @@ export function attachNetworkObserver(target, {
 export function attachApiResponseRecorder(page, {
   onApiResponse,
   shouldRecord = () => true,
-  responseDrainTimeoutMs = scaleTimeout(DEFAULT_RESPONSE_DRAIN_TIMEOUT_MS),
+  responseDrainTimeoutMs = scaleTimeout(DEFAULT_RESPONSE_DRAIN_TIMEOUT_MS, {
+    hongKongMs: HONG_KONG_RESPONSE_DRAIN_TIMEOUT_MS,
+  }),
   initialPhase = DEFAULT_NETWORK_PHASE,
 } = {}) {
   if (typeof onApiResponse !== 'function') {
@@ -1077,8 +1125,8 @@ export function attachApiResponseRecorder(page, {
     initialPhase,
     includeResources: false,
   })
-  const stop = async () => {
-    await observer.stop()
+  const stop = async (options) => {
+    await observer.stop(options)
   }
   stop.stop = observer.stop
   stop.setPhase = observer.setPhase

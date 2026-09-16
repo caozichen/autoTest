@@ -1135,25 +1135,32 @@ async function runContactChecks(page, {
   expect(contactDate, '联系人初始列表目标行应包含 YYYY-MM-DD 日期，供提交时间筛选使用')
     .not.toBe('')
 
+  let attemptedCount = 0
   let succeededCount = 0
   for (const name of names) {
     throwIfRunAborted(signal)
+    attemptedCount += 1
     if (await runContactNameSearch(page, { apiContext, filterCard, name, logger })) {
       succeededCount += 1
     }
   }
 
-  if (contactDate && await runContactDateSearch(page, {
-    apiContext,
-    filterCard,
-    names,
-    date: contactDate,
-    logger,
-  })) {
-    succeededCount += 1
+  if (contactDate) {
+    attemptedCount += 1
+    if (await runContactDateSearch(page, {
+      apiContext,
+      filterCard,
+      names,
+      date: contactDate,
+      logger,
+    })) {
+      succeededCount += 1
+    }
+  } else {
+    logger('info', '联系人初始列表没有可用提交日期，跳过时间筛选；姓名筛选结果及已有失败断言保留')
   }
   await resetFilterCard(filterCard)
-  return { attemptedCount: names.length + 1, succeededCount }
+  return { attemptedCount, succeededCount }
 }
 
 async function screenshotFailure(page, formId, artifactWriter) {
@@ -1475,7 +1482,7 @@ export async function run({
     })
 
     networkObserver.setPhase('网络健康封账')
-    const networkEvidence = await networkObserver.stop()
+    const networkEvidence = await networkObserver.stop({ signal })
     assertNetworkEvidence(networkEvidence, apiUrl.origin, apiPathPrefix)
 
     networkObserver.setPhase('运行结果汇总')
@@ -1551,7 +1558,7 @@ export async function run({
     throw error
   } finally {
     networkObserver.setPhase('结束清理')
-    await networkObserver.stop()
+    await networkObserver.stop({ signal })
     const abortCloseStarted = await stopAbortClose()
     if (!abortCloseStarted) await closePlaywrightHandles({ context, browser }, { logger })
   }

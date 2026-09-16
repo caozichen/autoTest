@@ -6,10 +6,11 @@ import { launchGoogleChrome } from '../../scripts/support/google-chrome.mjs'
 test('isolates timeout multipliers across concurrent runs and async boundaries', async () => {
   const values = await Promise.all(['HK_PROD', 'TEST', 'CN_PROD', 'prod_hk'].map(code => withEnvironmentTimeouts(code, async () => {
     await new Promise(resolve => setTimeout(resolve, 5))
-    return [scaleTimeout(30000), scaleTimeout(45000), scaleTimeout(180000), scaleTimeout(0)]
+    return [scaleTimeout(30000), scaleTimeout(45000), scaleTimeout(180000), scaleTimeout(0), scaleTimeout(2000, { hongKongMs: 15000 })]
   })))
-  assert.deepEqual(values, [[90000,135000,540000,0],[30000,45000,180000,0],[30000,45000,180000,0],[90000,135000,540000,0]])
+  assert.deepEqual(values, [[90000,135000,540000,0,15000],[30000,45000,180000,0,2000],[30000,45000,180000,0,2000],[90000,135000,540000,0,15000]])
   assert.equal(scaleTimeout(30000), 30000)
+  assert.equal(scaleTimeout(2000, { hongKongMs: 15000 }), 2000)
 })
 test('Chrome actions honor the scaled timeout and expect remains usable', async t => {
   const browser = await launchGoogleChrome(); t.after(() => browser.close())

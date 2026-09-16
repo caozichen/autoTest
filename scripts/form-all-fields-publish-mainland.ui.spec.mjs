@@ -10,6 +10,8 @@ import {
 } from './form-all-fields-publish.ui.spec.mjs'
 import { expect as flowExpect, scaleTimeout } from './support/environment-timeouts.mjs'
 import { clickWhenReady } from './support/ui-readiness.mjs'
+import { configurePostCollectionSettings } from './support/form-post-collection-settings.mjs'
+import { assertClassificationTagOptionsAvailable } from './support/form-settings-channels.mjs'
 
 // Mainland production adds the three contact fields directly. Do not wait for
 // the international collection/replacement dialogs as a required success signal.
@@ -70,12 +72,26 @@ export async function configureMainlandContactSettings(page, logger) {
   logger('info', '内地基础设置没有全局收录联系人及冲突策略入口；联系人收录使用已配置的题级开关')
 }
 
-// The two entries share every field, upload, save, publish and contract check.
-// Only the creation entry and contact workflow differ between deployments.
-export async function run(options) {
+export function assertMainlandClassificationTagOptionsAvailable(selectedCategory, selectedTag) {
+  // 内地暂不要求分类或标签存在；保留原断言调用，取消下面注释即可恢复。
+  // return assertClassificationTagOptionsAvailable(selectedCategory, selectedTag)
+  return false
+}
+
+export async function configureMainlandAdditionalSettings(options) {
+  return configurePostCollectionSettings(options, {
+    assertClassificationTagOptionsAvailable: assertMainlandClassificationTagOptionsAvailable,
+  })
+}
+
+// Share field, upload, save, publish and contract checks. Mainland customizes
+// contact initialization and temporarily disables the category/tag availability assertion.
+export async function run(options, workflowOverrides = {}) {
   return runCompleteForm(options, {
     createPath: '/form-activity/index?type=form',
     prepareContactFields: initializeMainlandContactFields,
     configureContactSettings: configureMainlandContactSettings,
+    configureAdditionalSettings: configureMainlandAdditionalSettings,
+    ...workflowOverrides,
   })
 }

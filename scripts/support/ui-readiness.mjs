@@ -14,7 +14,9 @@ export function observeUiReadiness(page) {
     if (request.isNavigationRequest() && request.frame() === page.mainFrame()) state.navigating = true
     if (!['xhr', 'fetch'].includes(request.resourceType())) return
     const url = new URL(request.url())
-    if (!/\/(?:api\/)?(?:be|base|f)\//.test(url.pathname)) return
+    // The shared region tree sits outside the usual business API prefixes.
+    if (!/\/(?:api\/)?(?:be|base|f)\//.test(url.pathname)
+      && !/^\/api\/area\/tree\/?$/.test(url.pathname)) return
     // Background AI polling must not hold unrelated controls hostage.
     if (/\/translation\/ai\/status$/.test(url.pathname)) return
     state.pending.add(request)
