@@ -6,6 +6,7 @@ import { expect as flowExpect } from './support/environment-timeouts.mjs'
 import { expect } from './support/recorded-expect.mjs'
 import { attachNetworkObserver } from './support/api-response-recorder.mjs'
 import { launchGoogleChrome } from './support/google-chrome.mjs'
+import { createFormEmailData } from './support/form-test-email.mjs'
 import {
   FIELD_TYPE_CODES,
   pageFieldKeysFor,
@@ -465,16 +466,18 @@ function buildFormUrl(siteBaseUrl, requestPath = FORM_PATH) {
   return formUrl.toString()
 }
 
-function createTestData(now = Date.now()) {
+function createTestData(now = Date.now(), emailOptions) {
   const suffix = String(now).slice(-8).padStart(8, '0')
   const groupSuffix = String(Number(suffix) + 1).padStart(8, '0').slice(-8)
+  const emails = createFormEmailData(now, emailOptions)
   return {
     runId: String(now),
     nameTitle: 'Mr.（先生）',
     username: `自动化测试用户${String(now).slice(-4)}`,
     mobile: `139${suffix}`,
     invalidMobile: '123',
-    email: `autotest_${now}@example.com`,
+    // 原逻辑：email: `autotest_${now}@example.com`；已移入共用开关的关闭分支。
+    email: emails.email,
     invalidEmail: 'invalid-email',
     idCard: '11010519491231002X',
     landlinePhone: '0755-12345678',
@@ -496,7 +499,8 @@ function createTestData(now = Date.now()) {
     cascader: [...CASCADER_LEVEL_VALUES],
     groupUsername: `题组联系人${String(now).slice(-4)}`,
     groupMobile: `138${groupSuffix}`,
-    groupEmail: `group_${now}@example.com`,
+    // 原逻辑：groupEmail: `group_${now}@example.com`；关闭开关后恢复。
+    groupEmail: emails.groupEmail,
     matrix: Array.from({ length: 3 }, (_, row) =>
       Array.from({ length: 3 }, (_, column) => `题目${row + 1}-项目${column + 1}答案`),
     ),

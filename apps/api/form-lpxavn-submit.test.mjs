@@ -382,6 +382,21 @@ test('indexes both entry arrays and object-shaped answers by item_key', () => {
   }])
 })
 
+test('email switch controls both fields and their payload assertions', () => {
+  const now = 1787048650389
+  for (const useFixedEmail of [true, false]) {
+    const data = createTestData(now, { useFixedEmail })
+    assert.equal(data.email, useFixedEmail ? 'caozichen@lingxi360.cn' : `autotest_${now}@example.com`)
+    assert.equal(data.groupEmail, useFixedEmail ? 'caozichen@lingxi360.cn' : `group_${now}@example.com`)
+    assertSubmissionPayload(createSubmissionPayload(data), data)
+    for (const field of ['email', 'groupEmail']) {
+      const wrong = { ...data, [field]: 'unexpected@example.com' }
+      assert.throws(() => assertSubmissionPayload(createSubmissionPayload(wrong), data), /邮箱/)
+    }
+  }
+  assert.throws(() => createTestData(now, { useFixedEmail: 'false' }), /必须为 true 或 false/)
+})
+
 test('validates the complete structured submission payload by field key', () => {
   const data = createTestData(1787048650389)
   const payload = createSubmissionPayload(data)
@@ -426,8 +441,8 @@ test('combines the selected environment domain with the new form path', () => {
   ), /不能包含反斜杠/)
 })
 
-test('creates unique answers for the main contact and nested field-group contact', () => {
-  const data = createTestData(1787048650389)
+test('creates unique answers for both contacts when fixed email is disabled', () => {
+  const data = createTestData(1787048650389, { useFixedEmail: false })
   assert.match(data.mobile, /^139\d{8}$/)
   assert.match(data.groupMobile, /^138\d{8}$/)
   assert.notEqual(data.mobile, data.groupMobile)
