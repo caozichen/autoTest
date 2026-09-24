@@ -40,7 +40,7 @@ const loading = ref(true)
 const searchKeyword = ref('')
 const statusFilter = ref<'all' | ScriptStatus>('all')
 const currentPage = ref(1)
-const pageSize = 6
+const pageSize = ref(20)
 const editorVisible = ref(false)
 const editingScript = ref<AutomationScript | null>(null)
 const editorRuntimeVariables = ref<RuntimeVariable[]>([])
@@ -51,6 +51,12 @@ const executionPickerVisible = ref(false)
 const executionPickerMode = ref<'stop' | 'logs'>('stop')
 const executionPickerScript = ref<AutomationScript | null>(null)
 const executionChoices = ref<RunRecord[]>([])
+const executionPickerPage = ref(1)
+const executionPickerPageSize = ref(20)
+const pagedExecutionChoices = computed(() => {
+  const start = (executionPickerPage.value - 1) * executionPickerPageSize.value
+  return executionChoices.value.slice(start, start + executionPickerPageSize.value)
+})
 const runningScriptIds = ref<Set<string>>(new Set())
 const stoppingScriptIds = ref<Set<string>>(new Set())
 const router = useRouter()
@@ -128,8 +134,8 @@ const filteredScripts = computed(() => {
 })
 
 const pagedScripts = computed(() => {
-  const start = (currentPage.value - 1) * pageSize
-  return filteredScripts.value.slice(start, start + pageSize)
+  const start = (currentPage.value - 1) * pageSize.value
+  return filteredScripts.value.slice(start, start + pageSize.value)
 })
 
 const summary = computed(() => ({
@@ -159,7 +165,7 @@ const editorVariableOptions = computed(() => {
 })
 const selectedRunLocked = computed(() => selectedScripts.value.some(isScriptRunning))
 
-watch([searchKeyword, statusFilter], () => {
+watch([searchKeyword, statusFilter, pageSize], () => {
   currentPage.value = 1
 })
 
@@ -537,9 +543,11 @@ async function refreshPipelineResult(script: AutomationScript): Promise<void> {
 function showExecutionPicker(script: AutomationScript, records: RunRecord[], mode: 'stop' | 'logs'): void {
   executionPickerScript.value = script
   executionChoices.value = records
+  executionPickerPage.value = 1
   executionPickerMode.value = mode
   executionPickerVisible.value = true
 }
+watch(executionPickerPageSize, () => { executionPickerPage.value = 1 })
 function chooseExecution(record: RunRecord): void {
   const script = executionPickerScript.value
   if (!script) return
@@ -774,9 +782,10 @@ onBeforeUnmount(() => {
         <span>已选择 {{ selectedScripts.length }} 项</span>
         <el-pagination
           v-model:current-page="currentPage"
+          v-model:page-size="pageSize"
           background
-          layout="total, prev, pager, next"
-          :page-size="pageSize"
+          layout="total, sizes, prev, pager, next"
+          :page-sizes="[10, 20, 50]"
           :total="filteredScripts.length"
         />
       </footer>
@@ -790,7 +799,7 @@ onBeforeUnmount(() => {
       @save="saveScript"
     />
     <el-dialog v-model="executionPickerVisible" :title="executionPickerMode === 'stop' ? '选择要停止的批次' : '选择要查看的环境结果'" width="720px">
-      <el-table :data="executionChoices" row-key="id">
+      <el-table :data="pagedExecutionChoices" row-key="id">
         <el-table-column label="环境" min-width="170"><template #default="scope">{{ scope.row.environment.name }} · {{ scope.row.environment.code }}</template></el-table-column>
         <el-table-column label="批次" prop="displayId" min-width="190" />
         <el-table-column label="运行名称" prop="name" min-width="160" />
@@ -798,6 +807,14 @@ onBeforeUnmount(() => {
           <el-button :type="executionPickerMode === 'stop' ? 'danger' : 'primary'" text @click="chooseExecution(scope.row)">{{ executionPickerMode === 'stop' ? '停止此批次' : '查看日志' }}</el-button>
         </template></el-table-column>
       </el-table>
+      <el-pagination
+        v-model:current-page="executionPickerPage"
+        v-model:page-size="executionPickerPageSize"
+        background
+        layout="total, sizes, prev, pager, next"
+        :page-sizes="[10, 20, 50]"
+        :total="executionChoices.length"
+      />
     </el-dialog>
     <ScriptRunResultDialog v-model="resultVisible" :script="resultScript" />
   </div>

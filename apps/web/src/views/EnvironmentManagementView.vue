@@ -33,7 +33,7 @@ const loading = ref(true)
 const searchKeyword = ref('')
 const statusFilter = ref<'all' | 'enabled' | 'disabled'>('all')
 const currentPage = ref(1)
-const pageSize = 6
+const pageSize = ref(20)
 const editorVisible = ref(false)
 const editorSaving = ref(false)
 const editingEnvironment = ref<TestEnvironment | null>(null)
@@ -55,8 +55,8 @@ const filteredEnvironments = computed(() => {
   })
 })
 const pagedEnvironments = computed(() => {
-  const start = (currentPage.value - 1) * pageSize
-  return filteredEnvironments.value.slice(start, start + pageSize)
+  const start = (currentPage.value - 1) * pageSize.value
+  return filteredEnvironments.value.slice(start, start + pageSize.value)
 })
 const summary = computed(() => ({
   total: environments.value.length,
@@ -64,7 +64,7 @@ const summary = computed(() => ({
   variables: environments.value.reduce((total, environment) => total + environment.variables.filter((variable) => variable.enabled).length, 0),
 }))
 
-watch([searchKeyword, statusFilter], () => {
+watch([searchKeyword, statusFilter, pageSize], () => {
   currentPage.value = 1
 })
 
@@ -72,6 +72,8 @@ async function loadEnvironments(showSuccess = false): Promise<void> {
   loading.value = true
   try {
     environments.value = await services.environments.list()
+    const lastPage = Math.max(1, Math.ceil(filteredEnvironments.value.length / pageSize.value))
+    currentPage.value = Math.min(currentPage.value, lastPage)
     if (showSuccess) ElMessage.success('环境列表已刷新')
   } catch {
     ElMessage.error('环境列表加载失败')
@@ -371,9 +373,10 @@ onMounted(() => loadEnvironments())
         <span>当前使用：{{ currentEnvironment?.name ?? '未选择' }}</span>
         <el-pagination
           v-model:current-page="currentPage"
+          v-model:page-size="pageSize"
           background
-          layout="total, prev, pager, next"
-          :page-size="pageSize"
+          layout="total, sizes, prev, pager, next"
+          :page-sizes="[10, 20, 50]"
           :total="filteredEnvironments.length"
         />
       </footer>
@@ -700,6 +703,7 @@ onMounted(() => loadEnvironments())
 
 .table-footer {
   min-height: 60px;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 16px;
   padding: 10px 16px;

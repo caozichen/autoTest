@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "revision": 1,
+  "id": "form-copy-delete-archive",
+  "name": "表单复制-删除归档",
+  "description": "以测试环境表单 lg2wd5 为默认源表单，检查已发布表单的归档/删除菜单；复制并发布第一份，再复制同名草稿并删除第二份，验证页面、业务接口和资源。",
+  "directory": "scripts",
+  "entryFile": "form-copy-delete-archive.ui.spec.mjs",
+  "timeoutMs": 600000,
+  "enabled": true,
+  "inputParameters": [
+    {
+      "id": "copy-source-form-id",
+      "key": "FORM_ID",
+      "value": "lg2wd5",
+      "description": "源表单 ID，默认使用用户指定的测试环境表单 lg2wd5"
+    }
+  ],
+  "responseVariableBindings": [
+    { "id": "first-copy-form-id", "variableName": "FIRST_COPY_FORM_ID", "responsePath": "firstCopyId", "secret": false },
+    { "id": "deleted-copy-form-id", "variableName": "DELETED_COPY_FORM_ID", "responsePath": "deletedCopyId", "secret": false }
+  ],
+  "tags": ["Playwright", "UI", "Headless Chrome", "表单活动", "复制", "归档", "删除", "P0"],
+  "createdAt": "2026-09-24T00:00:00.000Z",
+  "updatedAt": "2026-09-24T00:00:00.000Z"
+}

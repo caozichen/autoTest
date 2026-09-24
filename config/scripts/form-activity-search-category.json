@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "revision": 1,
+  "id": "form-activity-search-category",
+  "name": "表单活动搜索项及分类",
+  "description": "逐项验证表单活动列表八个搜索项、仅看我的及接口和页面结果；新增分类、在列表中选择、删除本次分类并恢复全部分类。",
+  "directory": "scripts",
+  "entryFile": "form-activity-search-category.ui.spec.mjs",
+  "timeoutMs": 600000,
+  "enabled": true,
+  "inputParameters": [],
+  "responseVariableBindings": [
+    { "id": "created-category-id", "variableName": "CREATED_CATEGORY_ID", "responsePath": "createdCategoryId", "secret": false },
+    { "id": "deleted-category-id", "variableName": "DELETED_CATEGORY_ID", "responsePath": "deletedCategoryId", "secret": false }
+  ],
+  "tags": ["Playwright", "UI", "Headless Chrome", "表单活动", "搜索", "分类", "仅看我的", "接口", "资源", "P0"],
+  "createdAt": "2026-09-24T00:00:00.000Z",
+  "updatedAt": "2026-09-24T00:00:00.000Z"
+}

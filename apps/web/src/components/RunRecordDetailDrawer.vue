@@ -59,9 +59,7 @@ interface ResourceResponseView extends ScriptResourceResponse {
 type ResponseCategory = 'api' | 'resources'
 type ResourceOutcomeFilter = 'all' | 'failed' | 'passed'
 
-const API_PAGE_SIZE = 50
-const RESOURCE_PAGE_SIZE = 50
-const ASSERTION_PAGE_SIZE = 100
+const PAGE_SIZES = [10, 20, 50]
 const SCREENSHOT_REVEAL_TIMEOUT_MS = 15_000
 
 interface ScreenshotView extends ScriptArtifact {
@@ -94,9 +92,22 @@ const expandedAssertionGroupIds = ref<Set<string>>(new Set())
 const expandedApiResponseKeys = ref<Set<string>>(new Set())
 const responseCategory = ref<ResponseCategory>('api')
 const apiPage = ref(1)
+const apiPageSize = ref(20)
 const resourceOutcomeFilter = ref<ResourceOutcomeFilter>('failed')
 const resourceTypeFilter = ref('all')
 const resourcePage = ref(1)
+const resourcePageSize = ref(20)
+const scriptPage = ref(1)
+const scriptPageSize = ref(20)
+const logPage = ref(1)
+const logPageSize = ref(20)
+const screenshotPage = ref(1)
+const screenshotPageSize = ref(20)
+const assertionPageSize = ref(20)
+const successGroupPage = ref(1)
+const successGroupPageSize = ref(20)
+const failedGroupPage = ref(1)
+const failedGroupPageSize = ref(20)
 const assertionGroupPages = ref<Map<string, number>>(new Map())
 const revealingScreenshotKeys = ref<Set<string>>(new Set())
 const screenshotRevealControllers = new Map<string, AbortController>()
@@ -141,8 +152,24 @@ const filteredLogs = computed(() => {
     return matchesLevel && matchesKeyword
   })
 })
+const pagedLogs = computed(() => {
+  const start = (logPage.value - 1) * logPageSize.value
+  return filteredLogs.value.slice(start, start + logPageSize.value)
+})
+const pagedScripts = computed(() => {
+  const start = (scriptPage.value - 1) * scriptPageSize.value
+  return (props.record?.scripts ?? []).slice(start, start + scriptPageSize.value)
+})
 
 const assertionAnalysis = computed(() => buildRunAssertionAnalysis(props.record?.scripts ?? []))
+const pagedSuccessGroups = computed(() => {
+  const start = (successGroupPage.value - 1) * successGroupPageSize.value
+  return assertionAnalysis.value.successGroups.slice(start, start + successGroupPageSize.value)
+})
+const pagedFailedGroups = computed(() => {
+  const start = (failedGroupPage.value - 1) * failedGroupPageSize.value
+  return assertionAnalysis.value.failedGroups.slice(start, start + failedGroupPageSize.value)
+})
 const apiResponses = computed<ApiResponseView[]>(() => (props.record?.scripts ?? [])
   .flatMap((script) => script.apiResponses.map((response) => ({
     ...response,
@@ -151,8 +178,8 @@ const apiResponses = computed<ApiResponseView[]>(() => (props.record?.scripts ??
   })))
   .sort((left, right) => new Date(left.timestamp).getTime() - new Date(right.timestamp).getTime()))
 const pagedApiResponses = computed(() => {
-  const start = (apiPage.value - 1) * API_PAGE_SIZE
-  return apiResponses.value.slice(start, start + API_PAGE_SIZE)
+  const start = (apiPage.value - 1) * apiPageSize.value
+  return apiResponses.value.slice(start, start + apiPageSize.value)
 })
 const resourceResponses = computed<ResourceResponseView[]>(() => (props.record?.scripts ?? [])
   .flatMap((script) => (script.resourceResponses ?? []).map((response) => ({
@@ -174,8 +201,8 @@ const filteredResourceResponses = computed(() => resourceResponses.value.filter(
   return true
 }))
 const pagedResourceResponses = computed(() => {
-  const start = (resourcePage.value - 1) * RESOURCE_PAGE_SIZE
-  return filteredResourceResponses.value.slice(start, start + RESOURCE_PAGE_SIZE)
+  const start = (resourcePage.value - 1) * resourcePageSize.value
+  return filteredResourceResponses.value.slice(start, start + resourcePageSize.value)
 })
 const successfulResourceResponseCount = computed(() => resourceResponses.value.filter((response) => response.ok).length)
 const failedResourceResponseCount = computed(() => resourceResponses.value.filter((response) => !response.ok).length)
@@ -251,6 +278,10 @@ const screenshots = computed<ScreenshotView[]>(() => (props.record?.scripts ?? [
     }))
   .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt)))
 const screenshotUrls = computed(() => screenshots.value.map((screenshot) => screenshot.url))
+const pagedScreenshots = computed(() => {
+  const start = (screenshotPage.value - 1) * screenshotPageSize.value
+  return screenshots.value.slice(start, start + screenshotPageSize.value)
+})
 
 const statusIcon = computed(() => {
   if (props.record?.status === 'passed') return CircleCheck
@@ -374,6 +405,11 @@ watch(
     resourceTypeFilter.value = 'all'
     apiPage.value = 1
     resourcePage.value = 1
+    scriptPage.value = 1
+    logPage.value = 1
+    screenshotPage.value = 1
+    successGroupPage.value = 1
+    failedGroupPage.value = 1
     assertionGroupPages.value = new Map()
     expandedAssertionGroupIds.value = new Set()
     expandedApiResponseKeys.value = new Set(apiResponses.value.slice(0, 1).map((response) => response.key))
@@ -382,26 +418,42 @@ watch(
 
 onBeforeUnmount(cancelScreenshotRevealRequests)
 
-watch(
-  () => apiResponses.value.length,
-  (total) => {
-    const lastPage = Math.max(1, Math.ceil(total / API_PAGE_SIZE))
-    if (apiPage.value > lastPage) apiPage.value = lastPage
-  },
-)
+watch(apiPageSize, () => { apiPage.value = 1 })
+watch([() => apiResponses.value.length, apiPageSize], ([total]) => {
+  const lastPage = Math.max(1, Math.ceil(total / apiPageSize.value))
+  if (apiPage.value > lastPage) apiPage.value = lastPage
+})
 
 watch(
-  [resourceOutcomeFilter, resourceTypeFilter],
+  [resourceOutcomeFilter, resourceTypeFilter, resourcePageSize],
   () => { resourcePage.value = 1 },
 )
 
-watch(
-  () => filteredResourceResponses.value.length,
-  (total) => {
-    const lastPage = Math.max(1, Math.ceil(total / RESOURCE_PAGE_SIZE))
-    if (resourcePage.value > lastPage) resourcePage.value = lastPage
-  },
-)
+watch([() => filteredResourceResponses.value.length, resourcePageSize], ([total]) => {
+  const lastPage = Math.max(1, Math.ceil(total / resourcePageSize.value))
+  if (resourcePage.value > lastPage) resourcePage.value = lastPage
+})
+
+watch([logLevel, logKeyword, logPageSize], () => { logPage.value = 1 })
+watch([() => filteredLogs.value.length, logPageSize], ([total]) => {
+  logPage.value = Math.min(logPage.value, Math.max(1, Math.ceil(total / logPageSize.value)))
+})
+watch(scriptPageSize, () => { scriptPage.value = 1 })
+watch([() => props.record?.scripts.length ?? 0, scriptPageSize], ([total]) => {
+  scriptPage.value = Math.min(scriptPage.value, Math.max(1, Math.ceil(total / scriptPageSize.value)))
+})
+watch(screenshotPageSize, () => { screenshotPage.value = 1 })
+watch([() => screenshots.value.length, screenshotPageSize], ([total]) => {
+  screenshotPage.value = Math.min(screenshotPage.value, Math.max(1, Math.ceil(total / screenshotPageSize.value)))
+})
+watch(successGroupPageSize, () => { successGroupPage.value = 1 })
+watch([() => assertionAnalysis.value.successGroups.length, successGroupPageSize], ([total]) => {
+  successGroupPage.value = Math.min(successGroupPage.value, Math.max(1, Math.ceil(total / successGroupPageSize.value)))
+})
+watch(failedGroupPageSize, () => { failedGroupPage.value = 1 })
+watch([() => assertionAnalysis.value.failedGroups.length, failedGroupPageSize], ([total]) => {
+  failedGroupPage.value = Math.min(failedGroupPage.value, Math.max(1, Math.ceil(total / failedGroupPageSize.value)))
+})
 
 watch(
   () => screenshots.value.length,
@@ -462,20 +514,25 @@ function syncApiResponseState(key: string, event: Event): void {
 }
 
 function assertionGroupPage(group: RunAssertionGroup): number {
-  const lastPage = Math.max(1, Math.ceil(group.assertions.length / ASSERTION_PAGE_SIZE))
+  const lastPage = Math.max(1, Math.ceil(group.assertions.length / assertionPageSize.value))
   return Math.min(assertionGroupPages.value.get(group.id) ?? 1, lastPage)
 }
 
 function pagedAssertions(group: RunAssertionGroup) {
-  const start = (assertionGroupPage(group) - 1) * ASSERTION_PAGE_SIZE
-  return group.assertions.slice(start, start + ASSERTION_PAGE_SIZE)
+  const start = (assertionGroupPage(group) - 1) * assertionPageSize.value
+  return group.assertions.slice(start, start + assertionPageSize.value)
 }
 
 function setAssertionGroupPage(group: RunAssertionGroup, page: number): void {
-  const lastPage = Math.max(1, Math.ceil(group.assertions.length / ASSERTION_PAGE_SIZE))
+  const lastPage = Math.max(1, Math.ceil(group.assertions.length / assertionPageSize.value))
   const next = new Map(assertionGroupPages.value)
   next.set(group.id, Math.min(Math.max(1, page), lastPage))
   assertionGroupPages.value = next
+}
+
+function setAssertionPageSize(size: number): void {
+  assertionPageSize.value = size
+  assertionGroupPages.value = new Map()
 }
 
 
@@ -688,7 +745,7 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
               <header class="api-response-heading">
                 <div>
                   <h3>业务接口调用明细</h3>
-                  <p>按实际响应时间排序，共 {{ apiResponses.length }} 条，每页最多 {{ API_PAGE_SIZE }} 条。</p>
+                  <p>按实际响应时间排序，共 {{ apiResponses.length }} 条，每页 {{ apiPageSize }} 条。</p>
                 </div>
                 <el-button
                   v-if="pagedApiResponses.length"
@@ -747,12 +804,12 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
               </div>
               <el-empty v-else description="该运行记录没有接口响应明细" />
               <el-pagination
-                v-if="apiResponses.length > API_PAGE_SIZE"
                 v-model:current-page="apiPage"
+                v-model:page-size="apiPageSize"
                 class="resource-pagination"
-                :page-size="API_PAGE_SIZE"
+                :page-sizes="PAGE_SIZES"
                 :total="apiResponses.length"
-                layout="prev, pager, next"
+                layout="total, sizes, prev, pager, next"
                 background
               />
             </section>
@@ -776,7 +833,7 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
               <header class="resource-response-heading">
                 <div>
                   <h3>页面资源加载明细</h3>
-                  <p>当前显示 {{ filteredResourceResponses.length }} / {{ resourceResponses.length }} 条，每页最多 {{ RESOURCE_PAGE_SIZE }} 条。</p>
+                  <p>当前显示 {{ filteredResourceResponses.length }} / {{ resourceResponses.length }} 条，每页 {{ resourcePageSize }} 条。</p>
                 </div>
                 <div class="resource-filters">
                   <label>
@@ -847,12 +904,12 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
               <el-empty v-else :description="resourceEmptyDescription" />
 
               <el-pagination
-                v-if="filteredResourceResponses.length > RESOURCE_PAGE_SIZE"
                 v-model:current-page="resourcePage"
+                v-model:page-size="resourcePageSize"
                 class="resource-pagination"
-                :page-size="RESOURCE_PAGE_SIZE"
+                :page-sizes="PAGE_SIZES"
                 :total="filteredResourceResponses.length"
-                layout="prev, pager, next"
+                layout="total, sizes, prev, pager, next"
                 background
               />
             </section>
@@ -862,7 +919,7 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
         <el-tab-pane name="scripts" lazy>
           <template #label><span class="tab-label"><el-icon><Files /></el-icon>脚本结果</span></template>
           <section class="table-section">
-            <el-table :data="record.scripts" row-key="recordId" class="detail-table">
+            <el-table :data="pagedScripts" row-key="recordId" class="detail-table">
               <el-table-column type="expand">
                 <template #default="scope">
                   <div class="script-expanded">
@@ -892,6 +949,15 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
                 <template #default="scope">{{ formatDuration(scope.row.durationMs) }}</template>
               </el-table-column>
             </el-table>
+            <el-pagination
+              v-model:current-page="scriptPage"
+              v-model:page-size="scriptPageSize"
+              class="resource-pagination"
+              :page-sizes="PAGE_SIZES"
+              :total="record.scripts.length"
+              layout="total, sizes, prev, pager, next"
+              background
+            />
           </section>
         </el-tab-pane>
 
@@ -910,7 +976,7 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
               <span>{{ filteredLogs.length }} / {{ record.logs.length }} 条</span>
             </div>
             <div v-if="filteredLogs.length" class="log-stream">
-              <div v-for="log in filteredLogs" :key="log.id" class="log-line">
+              <div v-for="log in pagedLogs" :key="log.id" class="log-line">
                 <time>{{ formatTime(log.timestamp) }}</time>
                 <span class="log-line__level" :class="`is-${log.level}`">{{ log.level.toUpperCase() }}</span>
                 <span class="log-line__scope">{{ scopeLabels[log.scope] }}</span>
@@ -921,6 +987,15 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
               </div>
             </div>
             <el-empty v-else description="没有符合条件的日志" />
+            <el-pagination
+              v-model:current-page="logPage"
+              v-model:page-size="logPageSize"
+              class="resource-pagination"
+              :page-sizes="PAGE_SIZES"
+              :total="filteredLogs.length"
+              layout="total, sizes, prev, pager, next"
+              background
+            />
           </section>
         </el-tab-pane>
 
@@ -933,7 +1008,7 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
             </header>
             <div class="screenshot-list" role="list">
               <article
-                v-for="(screenshot, index) in screenshots"
+                v-for="(screenshot, index) in pagedScreenshots"
                 :key="screenshot.key"
                 class="screenshot-row"
                 role="listitem"
@@ -944,7 +1019,7 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
                   :alt="`${screenshot.scriptName}执行截图`"
                   fit="cover"
                   :preview-src-list="screenshotUrls"
-                  :initial-index="index"
+                  :initial-index="(screenshotPage - 1) * screenshotPageSize + index"
                   preview-teleported
                   hide-on-click-modal
                 >
@@ -989,6 +1064,15 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
                 </div>
               </article>
             </div>
+            <el-pagination
+              v-model:current-page="screenshotPage"
+              v-model:page-size="screenshotPageSize"
+              class="resource-pagination"
+              :page-sizes="PAGE_SIZES"
+              :total="screenshots.length"
+              layout="total, sizes, prev, pager, next"
+              background
+            />
           </section>
         </el-tab-pane>
 
@@ -1034,18 +1118,18 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
                         text
                         size="small"
                         class="assertion-column__toggle"
-                        :disabled="!assertionAnalysis.successGroups.length"
-                        :icon="assertionGroupsAreExpanded(assertionAnalysis.successGroups) ? ArrowUpBold : ArrowDownBold"
-                        @click="toggleAssertionGroups(assertionAnalysis.successGroups)"
+                        :disabled="!pagedSuccessGroups.length"
+                        :icon="assertionGroupsAreExpanded(pagedSuccessGroups) ? ArrowUpBold : ArrowDownBold"
+                        @click="toggleAssertionGroups(pagedSuccessGroups)"
                       >
-                        {{ assertionGroupsAreExpanded(assertionAnalysis.successGroups) ? '收起全部' : '展开全部' }}
+                        {{ assertionGroupsAreExpanded(pagedSuccessGroups) ? '收起本页' : '展开本页' }}
                       </el-button>
                       <span>{{ assertionAnalysis.successGroups.length }} 个大断言</span>
                     </div>
                   </header>
                   <div v-if="assertionAnalysis.successGroups.length" class="assertion-group-list">
                     <details
-                      v-for="group in assertionAnalysis.successGroups"
+                      v-for="group in pagedSuccessGroups"
                       :key="group.id"
                       :open="isAssertionGroupExpanded(group.id)"
                       class="assertion-group"
@@ -1063,19 +1147,29 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
                           <div><p>{{ assertion.name }}</p><small>{{ assertion.matcher }} · {{ assertion.durationMs }} ms</small><pre v-if="assertion.error">{{ assertion.error }}</pre></div>
                         </div>
                         <el-pagination
-                          v-if="group.assertions.length > ASSERTION_PAGE_SIZE"
                           :current-page="assertionGroupPage(group)"
+                          :page-size="assertionPageSize"
                           class="resource-pagination"
-                          :page-size="ASSERTION_PAGE_SIZE"
+                          :page-sizes="PAGE_SIZES"
                           :total="group.assertions.length"
-                          layout="prev, pager, next"
+                          layout="total, sizes, prev, pager, next"
                           background
                           @update:current-page="setAssertionGroupPage(group, $event)"
+                          @update:page-size="setAssertionPageSize"
                         />
                       </div>
                     </details>
                   </div>
                   <div v-else class="assertion-column__empty">暂无成功的大断言</div>
+                  <el-pagination
+                    v-model:current-page="successGroupPage"
+                    v-model:page-size="successGroupPageSize"
+                    class="resource-pagination"
+                    :page-sizes="PAGE_SIZES"
+                    :total="assertionAnalysis.successGroups.length"
+                    layout="total, sizes, prev, pager, next"
+                    background
+                  />
                 </div>
 
                 <div class="assertion-column assertion-column--failed">
@@ -1086,18 +1180,18 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
                         text
                         size="small"
                         class="assertion-column__toggle"
-                        :disabled="!assertionAnalysis.failedGroups.length"
-                        :icon="assertionGroupsAreExpanded(assertionAnalysis.failedGroups) ? ArrowUpBold : ArrowDownBold"
-                        @click="toggleAssertionGroups(assertionAnalysis.failedGroups)"
+                        :disabled="!pagedFailedGroups.length"
+                        :icon="assertionGroupsAreExpanded(pagedFailedGroups) ? ArrowUpBold : ArrowDownBold"
+                        @click="toggleAssertionGroups(pagedFailedGroups)"
                       >
-                        {{ assertionGroupsAreExpanded(assertionAnalysis.failedGroups) ? '收起全部' : '展开全部' }}
+                        {{ assertionGroupsAreExpanded(pagedFailedGroups) ? '收起本页' : '展开本页' }}
                       </el-button>
                       <span>{{ assertionAnalysis.failedGroups.length }} 个大断言</span>
                     </div>
                   </header>
                   <div v-if="assertionAnalysis.failedGroups.length" class="assertion-group-list">
                     <details
-                      v-for="group in assertionAnalysis.failedGroups"
+                      v-for="group in pagedFailedGroups"
                       :key="group.id"
                       :open="isAssertionGroupExpanded(group.id)"
                       class="assertion-group"
@@ -1115,19 +1209,29 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
                           <div><p>{{ assertion.name }}</p><small>{{ assertion.matcher }} · {{ assertion.durationMs }} ms</small><pre v-if="assertion.error">{{ assertion.error }}</pre></div>
                         </div>
                         <el-pagination
-                          v-if="group.assertions.length > ASSERTION_PAGE_SIZE"
                           :current-page="assertionGroupPage(group)"
+                          :page-size="assertionPageSize"
                           class="resource-pagination"
-                          :page-size="ASSERTION_PAGE_SIZE"
+                          :page-sizes="PAGE_SIZES"
                           :total="group.assertions.length"
-                          layout="prev, pager, next"
+                          layout="total, sizes, prev, pager, next"
                           background
                           @update:current-page="setAssertionGroupPage(group, $event)"
+                          @update:page-size="setAssertionPageSize"
                         />
                       </div>
                     </details>
                   </div>
                   <div v-else class="assertion-column__empty">本批次没有失败的大断言</div>
+                  <el-pagination
+                    v-model:current-page="failedGroupPage"
+                    v-model:page-size="failedGroupPageSize"
+                    class="resource-pagination"
+                    :page-sizes="PAGE_SIZES"
+                    :total="assertionAnalysis.failedGroups.length"
+                    layout="total, sizes, prev, pager, next"
+                    background
+                  />
                 </div>
               </div>
             </section>
@@ -1285,7 +1389,7 @@ function failureStageLabel(stage: RunRecord['failureStage']): string {
 .resource-response-row__identity p { margin: 5px 0 0; color: var(--color-danger, #dc2626); font-size: var(--font-caption); line-height: 1.45; overflow-wrap: anywhere; }
 .resource-response-row__diagnostics { margin: 5px 0 0; padding-left: 16px; color: var(--color-danger, #dc2626); font-size: var(--font-caption); line-height: 1.45; overflow-wrap: anywhere; }
 .resource-response-row__duration { color: var(--color-text-secondary, #64748b); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: var(--font-xs); text-align: right; }
-.resource-pagination { display: flex; justify-content: flex-end; margin-top: 14px; }
+.resource-pagination { display: flex; flex-wrap: wrap; justify-content: flex-end; margin-top: 14px; }
 
 .table-section { overflow: hidden; border: 1px solid var(--color-border, #e5ebf3); border-radius: min(var(--radius-card, 6px), 8px); background: var(--color-surface, #fff); }
 .detail-table { width: 100%; }

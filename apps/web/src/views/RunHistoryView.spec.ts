@@ -126,16 +126,23 @@ const PaginationStub = defineComponent({
   props: {
     currentPage: { type: Number, required: true },
     pageSize: { type: Number, required: true },
+    pageSizes: { type: Array, required: true },
     total: { type: Number, required: true },
   },
-  emits: ['update:currentPage'],
+  emits: ['update:currentPage', 'update:pageSize'],
   setup(props, { emit }) {
     return () => h('div', {
       'data-testid': 'pagination',
       'data-page': String(props.currentPage),
+      'data-page-size': String(props.pageSize),
+      'data-page-sizes': JSON.stringify(props.pageSizes),
       'data-total': String(props.total),
     }, [
       h('button', { 'data-testid': 'page-2', onClick: () => emit('update:currentPage', 2) }, '2'),
+      ...[10, 20, 50].map((size) => h('button', {
+        'data-testid': `size-${size}`,
+        onClick: () => emit('update:pageSize', size),
+      }, String(size))),
     ])
   },
 })
@@ -343,6 +350,32 @@ describe('RunHistoryView', () => {
     expect(environmentSelect.value).toBe('all')
     expect(root.querySelector('[data-testid="pagination"]')?.getAttribute('data-page')).toBe('1')
     expect(resetButton.disabled).toBe(true)
+  })
+
+  it('defaults to 20 records and resets to the first page when page size changes', async () => {
+    const records = Array.from({ length: 55 }, (_, index) => runRecord(`batch-${index}`, 'passed'))
+    const root = await mountView(records)
+    const pagination = root.querySelector<HTMLElement>('[data-testid="pagination"]')!
+
+    expect(pagination.dataset.pageSize).toBe('20')
+    expect(pagination.dataset.pageSizes).toBe('[10,20,50]')
+    expect(root.querySelectorAll('[data-label="批次"] [data-row-id]')).toHaveLength(20)
+
+    root.querySelector<HTMLButtonElement>('[data-testid="page-2"]')?.click()
+    await nextTick()
+    expect(root.querySelectorAll('[data-label="批次"] [data-row-id]')).toHaveLength(20)
+    expect(pagination.dataset.page).toBe('2')
+
+    root.querySelector<HTMLButtonElement>('[data-testid="size-10"]')?.click()
+    await nextTick()
+    expect(pagination.dataset.page).toBe('1')
+    expect(pagination.dataset.pageSize).toBe('10')
+    expect(root.querySelectorAll('[data-label="批次"] [data-row-id]')).toHaveLength(10)
+
+    root.querySelector<HTMLButtonElement>('[data-testid="size-50"]')?.click()
+    await nextTick()
+    expect(pagination.dataset.pageSize).toBe('50')
+    expect(root.querySelectorAll('[data-label="批次"] [data-row-id]')).toHaveLength(50)
   })
 
   it('finds script errors without a batch error and combines them with the other filters', async () => {

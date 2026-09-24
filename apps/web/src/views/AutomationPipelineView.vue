@@ -33,7 +33,7 @@ const loading = ref(true)
 const searchKeyword = ref('')
 const selectedEnvironmentId = ref('')
 const currentPage = ref(1)
-const pageSize = 8
+const pageSize = ref(20)
 let refreshTimer: number | undefined
 let refreshingExecution = false
 const editorVisible = ref(false)
@@ -82,8 +82,8 @@ const filteredPipelines = computed(() => {
 })
 
 const pagedPipelines = computed(() => {
-  const start = (currentPage.value - 1) * pageSize
-  return filteredPipelines.value.slice(start, start + pageSize)
+  const start = (currentPage.value - 1) * pageSize.value
+  return filteredPipelines.value.slice(start, start + pageSize.value)
 })
 
 const summary = computed(() => ({
@@ -95,7 +95,7 @@ const summary = computed(() => ({
   ),
 }))
 
-watch(searchKeyword, () => {
+watch([searchKeyword, pageSize], () => {
   currentPage.value = 1
 })
 
@@ -115,7 +115,7 @@ async function loadData(showSuccess = false): Promise<void> {
       selectedEnvironmentId.value = nextEnvironments.find((environment) => environment.active && environment.enabled)?.id ?? ''
     }
     syncExecutions()
-    const lastPage = Math.max(1, Math.ceil(filteredPipelines.value.length / pageSize))
+    const lastPage = Math.max(1, Math.ceil(filteredPipelines.value.length / pageSize.value))
     currentPage.value = Math.min(currentPage.value, lastPage)
     if (showSuccess) ElMessage.success('自动化配置已刷新')
   } catch (error) {
@@ -481,9 +481,10 @@ onBeforeUnmount(() => { if (refreshTimer !== undefined) window.clearInterval(ref
         <span>共 {{ filteredPipelines.length }} 个自动化配置</span>
         <el-pagination
           v-model:current-page="currentPage"
+          v-model:page-size="pageSize"
           background
-          layout="total, prev, pager, next"
-          :page-size="pageSize"
+          layout="total, sizes, prev, pager, next"
+          :page-sizes="[10, 20, 50]"
           :total="filteredPipelines.length"
         />
       </footer>
@@ -909,6 +910,7 @@ onBeforeUnmount(() => { if (refreshTimer !== undefined) window.clearInterval(ref
 .table-footer {
   display: flex;
   min-height: 60px;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 18px;

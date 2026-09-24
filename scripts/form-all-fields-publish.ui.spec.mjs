@@ -735,7 +735,9 @@ async function configureFormIntroduction(page, title, logger) {
   await subtitleEditor.blur()
   await expect(subtitleEditor, '表单描述应保存为纯文本').toHaveText(FORM_SUBTITLE)
 
-  const contentEditor = page.locator('.designer-info-content-wrap .ProseMirror[contenteditable="true"]')
+  const contentEditor = page.locator(
+    '.fb-runtime-form-info > div > .fb-richtext-editor .ProseMirror[contenteditable="true"]',
+  )
   await expect(contentEditor, '表单内容富文本编辑区应唯一存在').toHaveCount(1)
   await fillRichTextList(page, contentEditor)
   logger('success', '表单标题、纯文本描述和富文本内容已填写')
@@ -1492,10 +1494,14 @@ export {
   chooseContactCollectionInDesigner,
   enterBasicSettings,
   ensureIgnoreStrategyInSettings,
+  ensureFieldRequired,
+  ensurePropertySwitchChecked,
   hasPresetContactFields,
+  initializeContactFields,
   waitForContactPageReady,
   assertSavedPayloads,
   inspectBusinessResponse,
+  fetchFormDetail,
   requireGroupKey,
   timestampTitle,
   uploadImageThroughBrowser,

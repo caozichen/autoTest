@@ -823,10 +823,11 @@ function mockApplicationHtml({ mainland = false } = {}) {
           button('预览', 'aria-label="预览" id="preview"'),
           '<h1><div class="editable-div" contenteditable="true">未命名表单</div></h1>',
           '<div class="fb-runtime-form-subtitle"><div class="editable-div" contenteditable="true"></div></div>',
-          '<div class="designer-info-content-wrap"><div class="fb-richtext-editor"><div class="rich-toolbar">' +
+          '<div class="fb-runtime-form-info"><div><div class="fb-richtext-editor"><div class="rich-toolbar">' +
             button('加粗', 'aria-label="加粗" data-rich-command="bold"') +
             button('无序列表', 'aria-label="无序列表" data-rich-command="insertUnorderedList"') +
-            '</div><div class="ProseMirror" contenteditable="true"></div></div></div>',
+            '</div><div class="ProseMirror" contenteditable="true"></div></div></div></div>',
+          '<div class="fb-richtext-editor"><div class="ProseMirror" contenteditable="true"></div></div>',
           '<section id="fields"></section>',
           '<aside class="fb-edit-aside"></aside>',
           '<section id="preview-settings"></section>',
@@ -841,7 +842,7 @@ function mockApplicationHtml({ mainland = false } = {}) {
           element.onclick = () => addType(element.dataset.componentType)
           element.ondragstart = (event) => event.dataTransfer.setData('text/plain', element.dataset.componentType)
         })
-        const richEditor = document.querySelector('.designer-info-content-wrap .ProseMirror')
+        const richEditor = document.querySelector('.fb-runtime-form-info > div > .fb-richtext-editor .ProseMirror')
         let richMode = 'plain'
         let richHeadingValue = ''
         let richListValues = []

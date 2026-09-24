@@ -31,7 +31,7 @@ const keyword = ref('')
 const statusFilter = ref<'all' | RunRecordStatus>('all')
 const environmentFilter = ref('all')
 const currentPage = ref(1)
-const pageSize = 8
+const pageSize = ref(20)
 const detailVisible = ref(false)
 const detailRecord = ref<RunRecord | null>(null)
 const detailLoadingId = ref('')
@@ -101,11 +101,11 @@ const filteredRecords = computed(() => {
 })
 
 const pagedRecords = computed(() => {
-  const start = (currentPage.value - 1) * pageSize
-  return filteredRecords.value.slice(start, start + pageSize)
+  const start = (currentPage.value - 1) * pageSize.value
+  return filteredRecords.value.slice(start, start + pageSize.value)
 })
 
-watch([keyword, statusFilter, environmentFilter], () => {
+watch([keyword, statusFilter, environmentFilter, pageSize], () => {
   currentPage.value = 1
 })
 
@@ -155,6 +155,8 @@ async function loadRecords(showSuccess = false, silent = false): Promise<void> {
 
   try {
     applyRecordList(await services.runRecords.list())
+    const lastPage = Math.max(1, Math.ceil(filteredRecords.value.length / pageSize.value))
+    currentPage.value = Math.min(currentPage.value, lastPage)
     if (showSuccess) ElMessage.success('运行记录已刷新')
   } catch {
     if (!silent) ElMessage.error('运行记录加载失败')
@@ -444,11 +446,20 @@ onBeforeUnmount(() => {
         <el-table-column label="开始时间" width="205">
           <template #default="scope"><time class="date-cell">{{ formatDateTime(scope.row.startedAt) }}</time></template>
         </el-table-column>
-        <el-table-column label="操作" width="152" fixed="right">
+        <el-table-column label="操作" width="128" fixed="right">
           <template #default="scope">
             <div class="row-actions">
+              <el-button
+                text
+                type="primary"
+                :icon="View"
+                :loading="detailLoadingId === scope.row.id"
+                :disabled="Boolean(detailLoadingId) && detailLoadingId !== scope.row.id"
+                @click="openDetail(scope.row)"
+              >详情</el-button>
               <el-tooltip v-if="scope.row.status === 'running'" content="强制停止" placement="top">
                 <el-button
+                  class="force-stop-button"
                   text
                   type="danger"
                   :icon="VideoPause"
@@ -458,14 +469,6 @@ onBeforeUnmount(() => {
                   @click="confirmForceStop(scope.row)"
                 />
               </el-tooltip>
-              <el-button
-                text
-                type="primary"
-                :icon="View"
-                :loading="detailLoadingId === scope.row.id"
-                :disabled="Boolean(detailLoadingId) && detailLoadingId !== scope.row.id"
-                @click="openDetail(scope.row)"
-              >详情</el-button>
             </div>
           </template>
         </el-table-column>
@@ -473,7 +476,14 @@ onBeforeUnmount(() => {
 
       <footer class="table-footer">
         <span>运行记录仅保存脱敏后的环境、脚本、日志与结果快照</span>
-        <el-pagination v-model:current-page="currentPage" background layout="total, prev, pager, next" :page-size="pageSize" :total="filteredRecords.length" />
+        <el-pagination
+          v-model:current-page="currentPage"
+          v-model:page-size="pageSize"
+          background
+          layout="total, sizes, prev, pager, next"
+          :page-sizes="[10, 20, 50]"
+          :total="filteredRecords.length"
+        />
       </footer>
     </section>
 
@@ -764,6 +774,17 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 2px;
+}
+
+.row-actions :deep(.el-button) {
+  margin: 0;
+}
+
+.row-actions :deep(.force-stop-button) {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  padding: 0;
 }
 
 .record-identity {

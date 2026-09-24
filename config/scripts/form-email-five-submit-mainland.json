@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "revision": 1,
+  "id": "form-email-five-submit-mainland",
+  "name": "邮件测试表单：五邮箱填写（内地版）",
+  "description": "适配内地联系人初始化和收录设置差异，创建仅含姓名、手机号、邮箱的必填表单；配置提交成功邮件和邮件测试说明，发布后分别用五个指定邮箱提交并校验页面、接口、资源与结果。",
+  "directory": "scripts",
+  "entryFile": "form-email-five-submit-mainland.ui.spec.mjs",
+  "timeoutMs": 600000,
+  "enabled": true,
+  "inputParameters": [],
+  "responseVariableBindings": [
+    { "id": "email-mainland-form-id", "variableName": "FORM_ID", "responsePath": "formId", "secret": false },
+    { "id": "email-mainland-form-contract", "variableName": "FORM_CONTRACT", "responsePath": "formContract", "secret": false },
+    { "id": "email-mainland-submissions", "variableName": "EMAIL_SUBMISSIONS", "responsePath": "submissions", "secret": false }
+  ],
+  "tags": ["Playwright", "UI", "Headless Chrome", "表单活动", "邮件测试", "内地生产", "P0"],
+  "createdAt": "2026-09-23T00:00:00.000Z",
+  "updatedAt": "2026-09-23T00:00:00.000Z"
+}

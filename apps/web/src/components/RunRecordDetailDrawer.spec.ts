@@ -550,6 +550,32 @@ const TagStub = defineComponent({
   },
 })
 
+const PaginationStub = defineComponent({
+  inheritAttrs: false,
+  props: {
+    currentPage: { type: Number, required: true },
+    pageSize: { type: Number, required: true },
+    pageSizes: { type: Array as PropType<number[]>, required: true },
+    total: { type: Number, required: true },
+  },
+  emits: ['update:currentPage', 'update:pageSize'],
+  setup(props, { attrs, emit }) {
+    return () => h('div', {
+      class: attrs.class,
+      'data-page': String(props.currentPage),
+      'data-page-size': String(props.pageSize),
+      'data-page-sizes': JSON.stringify(props.pageSizes),
+      'data-total': String(props.total),
+    }, [
+      h('button', { class: 'page-two', onClick: () => emit('update:currentPage', 2) }, '2'),
+      ...props.pageSizes.map((size) => h('button', {
+        class: `size-${size}`,
+        onClick: () => emit('update:pageSize', size),
+      }, String(size))),
+    ])
+  },
+})
+
 function mountDrawer(
   record: Ref<RunRecord | null>,
   visible = ref(true),
@@ -577,6 +603,7 @@ function mountDrawer(
   app.component('el-table', TableStub)
   app.component('el-table-column', TableColumnStub)
   app.component('el-tag', TagStub)
+  app.component('el-pagination', PaginationStub)
   mountedApps.push(app)
   app.mount(root)
   return { root, visible }
@@ -975,8 +1002,8 @@ describe('RunRecordDetailDrawer', () => {
     await nextTick()
 
     rows = [...root.querySelectorAll<HTMLElement>('.resource-response-row')]
-    expect(rows).toHaveLength(50)
-    expect(root.textContent).toContain('当前显示 75 / 75 条，每页最多 50 条')
+    expect(rows).toHaveLength(20)
+    expect(root.textContent).toContain('当前显示 75 / 75 条，每页 20 条')
   })
 
   it('does not repeat diagnostics already included in API or resource errors', async () => {
@@ -1108,6 +1135,19 @@ describe('RunRecordDetailDrawer', () => {
 
     root.querySelector<HTMLButtonElement>('[data-testid="select-responses"]')?.click()
     await nextTick()
+    expect(root.querySelectorAll('.api-response-item')).toHaveLength(20)
+
+    const apiPagination = root.querySelector<HTMLElement>('.api-response-section .resource-pagination')!
+    expect(apiPagination.dataset.pageSizes).toBe('[10,20,50]')
+    apiPagination.querySelector<HTMLButtonElement>('.page-two')?.click()
+    await nextTick()
+    expect(apiPagination.dataset.page).toBe('2')
+    apiPagination.querySelector<HTMLButtonElement>('.size-10')?.click()
+    await nextTick()
+    expect(apiPagination.dataset.page).toBe('1')
+    expect(root.querySelectorAll('.api-response-item')).toHaveLength(10)
+    apiPagination.querySelector<HTMLButtonElement>('.size-50')?.click()
+    await nextTick()
     expect(root.querySelectorAll('.api-response-item')).toHaveLength(50)
 
     const expandCurrentApiPage = [...root.querySelectorAll<HTMLElement>('.api-response-heading el-button')]
@@ -1125,6 +1165,105 @@ describe('RunRecordDetailDrawer', () => {
     firstAssertionGroup!.open = true
     firstAssertionGroup!.dispatchEvent(new Event('toggle'))
     await nextTick()
-    expect(root.querySelectorAll('.assertion-child')).toHaveLength(100)
+    expect(root.querySelectorAll('.assertion-child')).toHaveLength(20)
+    const assertionPagination = root.querySelector<HTMLElement>('.assertion-children .resource-pagination')!
+    expect(assertionPagination.dataset.pageSizes).toBe('[10,20,50]')
+    assertionPagination.querySelector<HTMLButtonElement>('.page-two')?.click()
+    await nextTick()
+    expect(assertionPagination.dataset.page).toBe('2')
+    assertionPagination.querySelector<HTMLButtonElement>('.size-10')?.click()
+    await nextTick()
+    expect(assertionPagination.dataset.page).toBe('1')
+    expect(root.querySelectorAll('.assertion-child')).toHaveLength(10)
+  })
+
+  it('pages resource, script, log and screenshot lists with a default size of 20', async () => {
+    const record = screenshotRecord()
+    const originalScript = record.scripts[0]!
+    record.scripts = Array.from({ length: 25 }, (_, index) => ({
+      ...originalScript,
+      id: `script-${index}`,
+      recordId: `script-record-${index}`,
+      name: `脚本 ${index}`,
+      artifacts: [artifact({
+        stepId: `script-${index}`,
+        relativePath: `screenshots/image-${index}.png`,
+        absolutePath: `/workspace/screenshots/image-${index}.png`,
+      })],
+    }))
+    record.logs = Array.from({ length: 25 }, (_, index) => ({
+      id: `log-${index}`,
+      timestamp: '2026-09-04T00:00:01.000Z',
+      level: 'info' as const,
+      scope: 'script' as const,
+      message: `日志 ${index}`,
+    }))
+    const { root } = mountDrawer(ref(record))
+    await nextTick()
+
+    root.querySelector<HTMLButtonElement>('[data-testid="select-scripts"]')?.click()
+    await nextTick()
+    expect(root.querySelectorAll('.script-cell')).toHaveLength(20)
+    const scriptPagination = root.querySelector<HTMLElement>('[data-tab-name="scripts"] .resource-pagination')!
+    expect(scriptPagination.dataset.pageSizes).toBe('[10,20,50]')
+    scriptPagination.querySelector<HTMLButtonElement>('.page-two')?.click()
+    await nextTick()
+    expect(root.querySelectorAll('.script-cell')).toHaveLength(5)
+
+    root.querySelector<HTMLButtonElement>('[data-testid="select-logs"]')?.click()
+    await nextTick()
+    expect(root.querySelectorAll('.log-line')).toHaveLength(20)
+    const logPagination = root.querySelector<HTMLElement>('[data-tab-name="logs"] .resource-pagination')!
+    logPagination.querySelector<HTMLButtonElement>('.page-two')?.click()
+    await nextTick()
+    expect(root.querySelectorAll('.log-line')).toHaveLength(5)
+    logPagination.querySelector<HTMLButtonElement>('.size-50')?.click()
+    await nextTick()
+    expect(logPagination.dataset.page).toBe('1')
+    expect(root.querySelectorAll('.log-line')).toHaveLength(25)
+
+    root.querySelector<HTMLButtonElement>('[data-testid="select-screenshots"]')?.click()
+    await nextTick()
+    expect(root.querySelectorAll('.screenshot-row')).toHaveLength(20)
+    const screenshotPagination = root.querySelector<HTMLElement>('[data-tab-name="screenshots"] .resource-pagination')!
+    screenshotPagination.querySelector<HTMLButtonElement>('.page-two')?.click()
+    await nextTick()
+    expect(root.querySelectorAll('.screenshot-row')).toHaveLength(5)
+    expect(root.querySelector('[data-testid="screenshot-thumbnail"]')?.getAttribute('data-initial-index')).toBe('20')
+
+    root.querySelector<HTMLButtonElement>('[data-testid="select-analysis"]')?.click()
+    await nextTick()
+    const failedGroupPagination = root.querySelector<HTMLElement>('.assertion-column--failed > .resource-pagination')!
+    expect(failedGroupPagination.dataset.pageSize).toBe('20')
+    expect(root.querySelectorAll('.assertion-column--failed .assertion-group')).toHaveLength(20)
+    failedGroupPagination.querySelector<HTMLButtonElement>('.page-two')?.click()
+    await nextTick()
+    expect(failedGroupPagination.dataset.page).toBe('2')
+    failedGroupPagination.querySelector<HTMLButtonElement>('.size-10')?.click()
+    await nextTick()
+    expect(failedGroupPagination.dataset.page).toBe('1')
+    expect(root.querySelectorAll('.assertion-column--failed .assertion-group')).toHaveLength(10)
+
+    const resourceRecord = ref<RunRecord | null>(networkRecord())
+    const { root: resourceRoot } = mountDrawer(resourceRecord)
+    await nextTick()
+    resourceRoot.querySelector<HTMLButtonElement>('[data-testid="select-responses"]')?.click()
+    await nextTick()
+    resourceRoot.querySelectorAll<HTMLButtonElement>('.network-category-switch button')[1]?.click()
+    await nextTick()
+    const filter = resourceRoot.querySelector<HTMLSelectElement>('select[aria-label="筛选资源加载结果"]')!
+    filter.value = 'all'
+    filter.dispatchEvent(new Event('change', { bubbles: true }))
+    await nextTick()
+    const resourcePagination = resourceRoot.querySelector<HTMLElement>('.resource-response-section .resource-pagination')!
+    expect(resourcePagination.dataset.pageSizes).toBe('[10,20,50]')
+    expect(resourceRoot.querySelectorAll('.resource-response-row')).toHaveLength(20)
+    resourcePagination.querySelector<HTMLButtonElement>('.page-two')?.click()
+    await nextTick()
+    expect(resourcePagination.dataset.page).toBe('2')
+    resourcePagination.querySelector<HTMLButtonElement>('.size-10')?.click()
+    await nextTick()
+    expect(resourcePagination.dataset.page).toBe('1')
+    expect(resourceRoot.querySelectorAll('.resource-response-row')).toHaveLength(10)
   })
 })

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { formatDateTime as formatTime } from '@/utils/date-time'
 
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { CircleCheck, CircleClose, Clock, Document, VideoPause, Warning } from '@element-plus/icons-vue'
 
 import type { AutomationScript, ScriptLogLevel } from '@/domain/script'
@@ -16,6 +16,16 @@ const emit = defineEmits<{
 }>()
 
 const result = computed(() => props.script?.lastRunResult ?? null)
+const logPage = ref(1)
+const logPageSize = ref(20)
+const pagedLogs = computed(() => {
+  const start = (logPage.value - 1) * logPageSize.value
+  return result.value?.logs.slice(start, start + logPageSize.value) ?? []
+})
+watch([() => props.modelValue ? props.script?.id : undefined, logPageSize], () => { logPage.value = 1 })
+watch(() => result.value?.logs.length ?? 0, (total) => {
+  logPage.value = Math.min(logPage.value, Math.max(1, Math.ceil(total / logPageSize.value)))
+})
 const isRunning = computed(() => props.script?.status === 'running')
 const isInterrupted = computed(() => props.script?.status === 'interrupted' || result.value?.cancelled === true)
 const isPartial = computed(() => props.script?.status === 'partial' || result.value?.status === 'partial')
@@ -64,7 +74,7 @@ function formatDetails(details?: Record<string, unknown>): string {
       <section class="run-logs">
         <div class="run-logs__heading"><el-icon><Document /></el-icon><strong>执行日志</strong><span>{{ result.logs.length }} 条</span></div>
         <div class="run-logs__body">
-          <div v-for="(log, index) in result.logs" :key="`${log.timestamp}-${index}`" class="log-row">
+          <div v-for="(log, index) in pagedLogs" :key="`${log.timestamp}-${(logPage - 1) * logPageSize + index}`" class="log-row">
             <time>{{ formatTime(log.timestamp) }}</time>
             <el-tag :type="logTypeMap[log.level]" size="small" effect="plain">{{ log.level.toUpperCase() }}</el-tag>
             <div>
@@ -73,6 +83,15 @@ function formatDetails(details?: Record<string, unknown>): string {
             </div>
           </div>
         </div>
+        <el-pagination
+          v-model:current-page="logPage"
+          v-model:page-size="logPageSize"
+          class="run-logs__pagination"
+          background
+          layout="total, sizes, prev, pager, next"
+          :page-sizes="[10, 20, 50]"
+          :total="result.logs.length"
+        />
       </section>
     </div>
     <el-empty v-else description="该脚本暂无运行结果" />
@@ -127,6 +146,7 @@ function formatDetails(details?: Record<string, unknown>): string {
 .run-logs__heading .el-icon { color: var(--color-primary, #2563eb); }
 .run-logs__heading span { margin-left: auto; color: var(--color-text-muted, #94a3b8); font-size: var(--font-caption); }
 .run-logs__body { overflow-y: auto; border: 1px solid var(--color-border, #e5ebf3); border-radius: 5px; background: var(--color-bg-subtle, #f8fafc); }
+.run-logs__pagination { display: flex; flex-wrap: wrap; justify-content: flex-end; margin-top: 12px; }
 .log-row { display: grid; grid-template-columns: 155px 66px minmax(0, 1fr); gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--color-border-light, #eef2f7); }
 .log-row:last-child { border-bottom: 0; }
 .log-row time { color: var(--color-text-muted, #94a3b8); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: var(--font-caption); }

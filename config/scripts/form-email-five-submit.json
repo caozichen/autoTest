@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "revision": 1,
+  "id": "form-email-five-submit",
+  "name": "邮件测试表单：五邮箱填写",
+  "description": "创建仅含姓名、手机号、邮箱的必填联系人表单，在消息及触达配置提交成功邮件和邮件测试说明，发布后分别使用 QQ、163、Gmail、Outlook、灵析五个指定邮箱提交并校验页面、接口、资源与提交结果。",
+  "directory": "scripts",
+  "entryFile": "form-email-five-submit.ui.spec.mjs",
+  "timeoutMs": 600000,
+  "enabled": true,
+  "inputParameters": [],
+  "responseVariableBindings": [
+    { "id": "email-form-id", "variableName": "FORM_ID", "responsePath": "formId", "secret": false },
+    { "id": "email-form-contract", "variableName": "FORM_CONTRACT", "responsePath": "formContract", "secret": false },
+    { "id": "email-submissions", "variableName": "EMAIL_SUBMISSIONS", "responsePath": "submissions", "secret": false }
+  ],
+  "tags": ["Playwright", "UI", "Headless Chrome", "表单活动", "邮件测试", "P0"],
+  "createdAt": "2026-09-23T00:00:00.000Z",
+  "updatedAt": "2026-09-23T00:00:00.000Z"
+}

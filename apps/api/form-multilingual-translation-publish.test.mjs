@@ -1159,6 +1159,7 @@ test('compares rich-text translation editors consistently across paragraphs, lis
   async function checkEditor(language, html, renderedHtml = [html, html], {
     sourceHtml = '<p>请<strong>核对</strong>本次提交。</p>',
     sourceText = '请核对本次提交。',
+    delayedIframeIndex = -1,
   } = {}) {
     const units = [0, 1].map((index) => ({
       unit_key: `rich-text-${index}`,
@@ -1170,7 +1171,7 @@ test('compares rich-text translation editors consistently across paragraphs, lis
     }))
     const workspace = { sections: [{ section_key: 'feedback', units }], units }
     await page.setContent('<!doctype html><body><nav id="languages"></nav><button class="section-nav__item">反馈 2/2</button><main></main></body>')
-    await page.evaluate(({ units, renderedHtml, sourceText }) => {
+    await page.evaluate(({ units, renderedHtml, sourceText, delayedIframeIndex }) => {
       for (const label of ['繁体中文', 'English']) {
         const tab = document.createElement('button')
         tab.className = 'target-language-tab'
@@ -1189,12 +1190,18 @@ test('compares rich-text translation editors consistently across paragraphs, lis
         const article = document.createElement('article')
         article.id = `translation-unit-${unit.unit_key}`
         article.className = 'translation-unit translation-unit--translated'
-        article.innerHTML = '<div class="source-column"><textarea readonly></textarea></div><div class="target-column"><iframe></iframe></div>'
+        article.innerHTML = '<div class="source-column"><textarea readonly></textarea></div><div class="target-column"></div>'
         article.querySelector('textarea').value = sourceText
-        article.querySelector('iframe').srcdoc = `<!doctype html><body contenteditable="true">${renderedHtml[index]}</body>`
+        const mountIframe = () => {
+          const iframe = document.createElement('iframe')
+          iframe.srcdoc = `<!doctype html><body contenteditable="true">${renderedHtml[index]}</body>`
+          article.querySelector('.target-column').append(iframe)
+        }
+        if (index === delayedIframeIndex) setTimeout(mountIframe, 150)
+        else mountIframe()
         document.querySelector('main').append(article)
       })
-    }, { units, renderedHtml, sourceText })
+    }, { units, renderedHtml, sourceText, delayedIframeIndex })
     const assertions = []
     const action = () => runWithAssertionRecorder('form-multilingual-translation-publish', (entry) => assertions.push(entry), () => (
       assertTranslationEditorMatchesWorkspace(page, workspace, language, () => {})
@@ -1210,6 +1217,13 @@ test('compares rich-text translation editors consistently across paragraphs, lis
       assert.equal(assertions.filter((entry) => entry.name.includes('UI 译文应与接口一致')).length, 2)
     })
   }
+
+  await t.test('waits for every rich-text iframe instead of inferring editor type from mount timing', async () => {
+    const { action, assertions } = await checkEditor('en_US', englishHtml, undefined, { delayedIframeIndex: 1 })
+    await action()
+    assert.equal(assertions.filter((entry) => entry.status === 'failed').length, 0)
+    assert.equal(assertions.filter((entry) => entry.name.includes('UI 译文应与接口一致')).length, 2)
+  })
 
   const plainSourceFixtures = [
     {

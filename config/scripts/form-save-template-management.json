@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "revision": 1,
+  "id": "form-save-template-management",
+  "name": "表单存为模板-系统模板管理",
+  "description": "以测试环境表单 lg2wd5 为默认源表单，验证存为模板、类型和名称、备注、置底置顶及编辑改名；用该模板创建并发布表单问卷，最后删除本次创建的模板并确认已发布表单保留。",
+  "directory": "scripts",
+  "entryFile": "form-save-template-management.ui.spec.mjs",
+  "timeoutMs": 600000,
+  "enabled": true,
+  "inputParameters": [
+    {
+      "id": "template-source-form-id",
+      "key": "FORM_ID",
+      "value": "lg2wd5",
+      "description": "源表单 ID，默认使用用户指定的测试环境表单 lg2wd5"
+    }
+  ],
+  "responseVariableBindings": [
+    { "id": "created-template-id", "variableName": "CREATED_TEMPLATE_ID", "responsePath": "templateId", "secret": false },
+    { "id": "deleted-template-id", "variableName": "DELETED_TEMPLATE_ID", "responsePath": "deletedTemplateId", "secret": false },
+    { "id": "template-designer-id", "variableName": "TEMPLATE_DESIGNER_ID", "responsePath": "designerId", "secret": false },
+    { "id": "template-created-form-id", "variableName": "TEMPLATE_CREATED_FORM_ID", "responsePath": "createdFormId", "secret": false }
+  ],
+  "tags": ["Playwright", "UI", "Headless Chrome", "表单活动", "系统模板", "备注", "排序", "编辑", "创建问卷", "发布", "删除", "P0"],
+  "createdAt": "2026-09-24T00:00:00.000Z",
+  "updatedAt": "2026-09-24T00:00:00.000Z"
+}

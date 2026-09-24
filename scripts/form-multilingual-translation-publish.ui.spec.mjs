@@ -1763,23 +1763,30 @@ async function readRenderedTranslationUnits(page, expectedUnits) {
   const units = await page.locator('article.translation-unit').evaluateAll((articles) => articles.map((article) => {
     const sourceEditor = article.querySelector('.source-column textarea, .source-column input')
     const targetEditor = article.querySelector('.target-column textarea, .target-column input')
-    const iframe = article.querySelector('.target-column iframe')
     return {
       id: article.id,
       className: article.className,
       sourceText: sourceEditor?.value ?? '',
       sourceReadonly: sourceEditor?.readOnly === true || sourceEditor?.disabled === true,
       targetText: targetEditor?.value ?? '',
-      hasRichTextEditor: Boolean(iframe),
+      hasRichTextEditor: false,
     }
   }))
 
-  for (const unit of units.filter((entry) => entry.hasRichTextEditor)) {
+  const expectedById = new Map(expectedUnits.map((unit) => [`translation-unit-${unit.unit_key}`, unit]))
+  for (const unit of units) {
     const article = page.locator(`article.translation-unit[id="${unit.id.replace(/["\\]/g, '\\$&')}"]`)
+    const expectedUnit = expectedById.get(unit.id)
+    flowExpect(expectedUnit, `${unit.id} 编辑器必须属于当前工作区分区`).toBeTruthy()
+    unit.hasRichTextEditor = expectedUnit?.editor_type === 'rich_text'
+    if (!unit.hasRichTextEditor) continue
+
+    const iframe = article.locator('.target-column iframe')
+    await flowExpect(iframe, `${unit.id} 富文本译文编辑器 iframe 必须完成挂载`).toHaveCount(1, {
+      timeout: scaleTimeout(ACTION_TIMEOUT_MS),
+    })
     const body = article.frameLocator('.target-column iframe').locator('body')
     await flowExpect(body, `${unit.id} 富文本译文编辑器必须完成挂载`).toBeVisible()
-    const expectedUnit = expectedUnits.find((entry) => `translation-unit-${entry.unit_key}` === unit.id)
-    flowExpect(expectedUnit, `${unit.id} 富文本编辑器必须属于当前工作区分区`).toBeTruthy()
     const expectedImages = await article.evaluate((_article, html) => {
       const template = document.createElement('template')
       template.innerHTML = String(html ?? '')
