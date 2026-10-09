@@ -89,7 +89,7 @@ export function createPublishedFormFixture() {
     max_file_quantity: 1,
     media_type: [{
       type: 'image',
-      extensions: ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'psd', 'tif', 'heic', 'heif'],
+      extensions: ['jpg', 'jpeg', 'png', 'gif', 'bmp'],
     }],
   }
   field(FIELD_KEYS.fileUpload).common_config = {

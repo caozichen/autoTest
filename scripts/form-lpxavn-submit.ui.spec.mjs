@@ -137,7 +137,7 @@ const EXPECTED_NAME_TITLES = Object.freeze([
   'Mrs.（太太）',
   'Dr.（医生/博士）',
 ])
-const IMAGE_EXTENSIONS = Object.freeze(['jpg', 'jpeg', 'png', 'gif', 'bmp', 'psd', 'tif', 'heic', 'heif'])
+const IMAGE_EXTENSIONS = Object.freeze(['jpg', 'jpeg', 'png', 'gif', 'bmp'])
 
 const PAGE_FIELD_LABELS = Object.freeze([
   ['姓名', '手机号', '邮箱', '身份证件', '固定电话', '地址', '生日'],
@@ -209,7 +209,7 @@ function assertUploadContract(item, { label, mediaType, extensions }) {
   expect(Array.isArray(media), `${label}应包含文件类型限制`).toBeTruthy()
   expect(media?.[0]?.type, `${label}文件类型应匹配`).toBe(mediaType)
   if (extensions) {
-    expect(media?.[0]?.extensions, `${label}应限制为发布脚本创建时的图片扩展名`).toEqual(extensions)
+    expect(media?.[0]?.extensions, `${label}允许的图片扩展名应为 ${extensions.join('、')}`).toEqual(extensions)
   }
 }
 
