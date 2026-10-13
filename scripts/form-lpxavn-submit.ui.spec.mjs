@@ -473,7 +473,7 @@ function createTestData(now = Date.now(), emailOptions) {
   return {
     runId: String(now),
     nameTitle: 'Mr.（先生）',
-    username: `自动化测试用户${String(now).slice(-4)}`,
+    username: `自动化测试用户${String(now).slice(-6)}`,
     mobile: `139${suffix}`,
     invalidMobile: '123',
     // 原逻辑：email: `autotest_${now}@example.com`；已移入共用开关的关闭分支。
@@ -497,7 +497,7 @@ function createTestData(now = Date.now(), emailOptions) {
     number: '100.00',
     numberTooLarge: '100.01',
     cascader: [...CASCADER_LEVEL_VALUES],
-    groupUsername: `题组联系人${String(now).slice(-4)}`,
+    groupUsername: `题组联系人${String(now).slice(-6)}`,
     groupMobile: `138${groupSuffix}`,
     // 原逻辑：groupEmail: `group_${now}@example.com`；关闭开关后恢复。
     groupEmail: emails.groupEmail,

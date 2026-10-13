@@ -198,10 +198,10 @@ async function runPublicSubmissionFixture(t, { withSettings = false } = {}) {
   assert.equal(result.result.formId, formId)
   assert.equal(result.result.submissionId, 'full-run-submission-001')
   assert.equal(result.result.submissionAssertions.title, fixture.data.form.title)
-  assert.match(result.result.submissionAssertions.primaryContactName, /^自动化测试用户\d{4}$/)
-  assert.match(result.result.submissionAssertions.groupContactName, /^题组联系人\d{4}$/)
-  assert.match(result.result.submissionAssertions.fields['姓名[1]'], /^自动化测试用户\d{4}$/)
-  assert.match(result.result.submissionAssertions.fields['姓名[2]'], /^题组联系人\d{4}$/)
+  assert.match(result.result.submissionAssertions.primaryContactName, /^自动化测试用户\d{6}$/)
+  assert.match(result.result.submissionAssertions.groupContactName, /^题组联系人\d{6}$/)
+  assert.match(result.result.submissionAssertions.fields['姓名[1]'], /^自动化测试用户\d{6}$/)
+  assert.match(result.result.submissionAssertions.fields['姓名[2]'], /^题组联系人\d{6}$/)
   assert.equal(
     result.result.submissionAssertions.primaryContactName,
     result.result.submissionAssertions.fields['姓名[1]'],

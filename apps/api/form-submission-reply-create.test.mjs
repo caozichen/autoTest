@@ -318,6 +318,8 @@ test('creates one complete all-fields submission on the admin page with the envi
   assert.equal(createRequests[0].body.form_id, formId)
   assert.equal(createRequests[0].body.updater_name, '自动化测试操作人')
   const serializedSubmission = JSON.stringify(createRequests[0].body)
+  assert.match(serializedSubmission, /"自动化测试用户\d{6}"/)
+  assert.match(serializedSubmission, /"题组联系人\d{6}"/)
   for (const name of [
     'username', 'mobile', 'email', 'idCard', 'landlinePhone', 'address', 'birthday',
     'input', 'textarea', 'radio', 'checkbox', 'select', 'number', 'date', 'time',

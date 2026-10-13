@@ -443,6 +443,8 @@ test('combines the selected environment domain with the new form path', () => {
 
 test('creates unique answers for both contacts when fixed email is disabled', () => {
   const data = createTestData(1787048650389, { useFixedEmail: false })
+  assert.equal(data.username, '自动化测试用户650389')
+  assert.equal(data.groupUsername, '题组联系人650389')
   assert.match(data.mobile, /^139\d{8}$/)
   assert.match(data.groupMobile, /^138\d{8}$/)
   assert.notEqual(data.mobile, data.groupMobile)
@@ -463,11 +465,11 @@ test('builds the downstream submission assertion contract with both contact name
 
   assert.deepEqual(createSubmissionAssertions(EXPECTED_FORM_TITLE, data), {
     title: EXPECTED_FORM_TITLE,
-    primaryContactName: data.username,
-    groupContactName: data.groupUsername,
+    primaryContactName: '自动化测试用户650389',
+    groupContactName: '题组联系人650389',
     fields: {
-      '姓名[1]': data.username,
-      '姓名[2]': data.groupUsername,
+      '姓名[1]': '自动化测试用户650389',
+      '姓名[2]': '题组联系人650389',
     },
   })
 })
