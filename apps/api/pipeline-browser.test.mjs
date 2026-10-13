@@ -51,7 +51,7 @@ test('Chrome refresh/close/reopen preserves the entire pipeline and can stop it 
   const context = await browser.newContext()
   await context.route('http://127.0.0.1:4310/**', async route => {
     const upstream = await route.fetch({ url: runnerUrl + new URL(route.request().url()).pathname,
-      headers: { ...route.request().headers(), origin: 'http://127.0.0.1:5174' } })
+      headers: { ...route.request().headers(), origin: 'http://127.0.0.1:10085' } })
     await route.fulfill({ response: upstream, headers: { ...upstream.headers(), 'access-control-allow-origin': webUrl } })
   })
   await context.addInitScript(({ timestamp }) => {
@@ -152,7 +152,7 @@ test('Chrome runs three environments, restores them after reload and selects exa
   const context = await browser.newContext()
   await context.route('http://127.0.0.1:4310/**', async route => {
     const upstream = await route.fetch({ url: runnerUrl + new URL(route.request().url()).pathname,
-      headers: { ...route.request().headers(), origin: 'http://127.0.0.1:5174' } })
+      headers: { ...route.request().headers(), origin: 'http://127.0.0.1:10085' } })
     await route.fulfill({ response: upstream, headers: { ...upstream.headers(), 'access-control-allow-origin': webUrl } })
   })
   await context.addInitScript(({ timestamp, codes }) => {

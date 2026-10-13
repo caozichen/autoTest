@@ -77,7 +77,7 @@ npm run install:supervisor
 
 启动后访问：
 
-- Web：`http://127.0.0.1:5174`
+- Web：`http://127.0.0.1:10085`
 - Runner 健康检查：`http://127.0.0.1:4310/health`
 - Supervisor 健康检查：`http://127.0.0.1:4311/health`
 

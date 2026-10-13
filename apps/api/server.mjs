@@ -24,8 +24,8 @@ import { executeRegisteredScript, validateRegisteredRunRequest } from './script-
 const DEFAULT_HOST = '127.0.0.1'
 const DEFAULT_PORT = 4310
 const allowedOrigins = new Set([
-  'http://127.0.0.1:5174',
-  'http://localhost:5174',
+  'http://127.0.0.1:10085',
+  'http://localhost:10085',
   'http://127.0.0.1:4173',
   'http://localhost:4173',
 ])

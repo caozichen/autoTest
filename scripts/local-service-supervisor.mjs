@@ -6,13 +6,13 @@ import { fileURLToPath } from 'node:url'
 const SUPERVISOR_HOST = '127.0.0.1'
 const SUPERVISOR_PORT = 4311
 const SUPERVISOR_ORIGIN = `http://${SUPERVISOR_HOST}:${SUPERVISOR_PORT}`
-const WEB_URL = 'http://127.0.0.1:5174/'
+const WEB_URL = 'http://127.0.0.1:10085/'
 const RUNNER_HEALTH_URL = 'http://127.0.0.1:4310/health'
 const CONTROL_HEADER = 'x-autotest-control'
 const CONTROL_HEADER_VALUE = 'start-runner'
 const ALLOWED_ORIGINS = new Set([
-  'http://127.0.0.1:5174',
-  'http://localhost:5174',
+  'http://127.0.0.1:10085',
+  'http://localhost:10085',
 ])
 const SCRIPT_DIRECTORY = dirname(fileURLToPath(import.meta.url))
 const WORKSPACE_DIRECTORY = resolve(SCRIPT_DIRECTORY, '..')

@@ -11,7 +11,7 @@ AutoTest 不是单独的网页文件。标准启动命令会运行三个只允�
 ```text
 浏览器
   |
-  +-- Web 管理端（Vue + Vite）-------- http://127.0.0.1:5174
+  +-- Web 管理端（Vue + Vite）-------- http://127.0.0.1:10085
           |
           +-- 调用 Runner ------------ http://127.0.0.1:4310
           |       |
@@ -26,7 +26,7 @@ AutoTest 不是单独的网页文件。标准启动命令会运行三个只允�
 
 | 服务 | 作用 | 默认地址 |
 | --- | --- | --- |
-| Web | 登录、环境管理、脚本管理、流水线和运行记录界面 | `http://127.0.0.1:5174` |
+| Web | 登录、环境管理、脚本管理、流水线和运行记录界面 | `http://127.0.0.1:10085` |
 | Runner | 接收运行请求，通过 Playwright 启动 Google Chrome 执行脚本 | `http://127.0.0.1:4310` |
 | Supervisor | 启动 Web/Runner、持续恢复 Web，并供页面请求恢复 Runner | `http://127.0.0.1:4311` |
 
@@ -82,7 +82,7 @@ AutoTest 不是单独的网页文件。标准启动命令会运行三个只允�
 
 | 端口 | 用途 | 是否可随意修改 |
 | --- | --- | --- |
-| `5174` | Web 开发服务 | 不建议，Vite 使用严格端口，Runner CORS 也依赖它 |
+| `10085` | Web 开发服务 | 不建议，Vite 使用严格端口，Runner CORS 也依赖它 |
 | `4310` | Playwright Runner | 不建议，Web 和 Supervisor 固定连接这个端口 |
 | `4311` | Supervisor | 不建议，Web 固定连接这个端口 |
 | `4173` | Web 生产构建预览 | 只在执行 preview 命令时使用 |
@@ -306,19 +306,19 @@ npm.cmd run dev
 ```text
 [supervisor] 本地服务管理器: http://127.0.0.1:4311
 [runner] Playwright runner: http://127.0.0.1:4310
-Local: http://127.0.0.1:5174/
+Local: http://127.0.0.1:10085/
 ```
 
 启动后打开页面：
 
 ```powershell
-Start-Process "http://127.0.0.1:5174"
+Start-Process "http://127.0.0.1:10085"
 ```
 
 也可以手动在浏览器地址栏输入：
 
 ```text
-http://127.0.0.1:5174
+http://127.0.0.1:10085
 ```
 
 本地管理端登录账号：
@@ -337,7 +337,7 @@ http://127.0.0.1:5174
 ```powershell
 Invoke-RestMethod http://127.0.0.1:4310/health
 Invoke-RestMethod http://127.0.0.1:4311/health
-Test-NetConnection 127.0.0.1 -Port 5174
+Test-NetConnection 127.0.0.1 -Port 10085
 ```
 
 正确结果：
@@ -417,12 +417,12 @@ where.exe node
 
 如果是 Node 18 或 20，请卸载旧版本或修正 PATH，直到 `node --version` 至少为 `v22.0.0`。
 
-#### WQ4. 出现 `EADDRINUSE` 或 `Port 5174 is already in use`
+#### WQ4. 出现 `EADDRINUSE` 或 `Port 10085 is already in use`
 
 通常是之前启动的 AutoTest 还没有停止。先找到原来的 PowerShell 窗口并按 `Ctrl + C`。也可以只读查询端口：
 
 ```powershell
-Get-NetTCPConnection -LocalPort 5174,4310,4311 -ErrorAction SilentlyContinue |
+Get-NetTCPConnection -LocalPort 10085,4310,4311 -ErrorAction SilentlyContinue |
   Select-Object LocalPort, State, OwningProcess
 ```
 
@@ -438,7 +438,7 @@ Stop-Process -Id 12345
 #### WQ5. 页面打不开
 
 - 确认 `npm.cmd run dev` 的窗口仍然打开。
-- 地址必须是 `http://127.0.0.1:5174`，不是 `https://`。
+- 地址必须是 `http://127.0.0.1:10085`，不是 `https://`。
 - 执行 W9 的三个健康检查，判断是 Web、Runner 还是 Supervisor 没有启动。
 - 查看启动窗口最早出现的错误，不要只看最后一行。
 
@@ -654,12 +654,12 @@ npm ls --depth=0 --workspaces --include-workspace-root
 npm run dev
 ```
 
-保持终端窗口打开。正常会看到 Web `5174`、Runner `4310` 和 Supervisor `4311` 的启动日志。
+保持终端窗口打开。正常会看到 Web `10085`、Runner `4310` 和 Supervisor `4311` 的启动日志。
 
 使用默认浏览器打开：
 
 ```bash
-open "http://127.0.0.1:5174"
+open "http://127.0.0.1:10085"
 ```
 
 登录账号：
@@ -676,7 +676,7 @@ open "http://127.0.0.1:5174"
 ```bash
 curl http://127.0.0.1:4310/health
 curl http://127.0.0.1:4311/health
-curl -I http://127.0.0.1:5174
+curl -I http://127.0.0.1:10085
 ```
 
 正确结果：
@@ -794,7 +794,7 @@ ls -ld "/Applications/Google Chrome.app"
 逐个检查：
 
 ```bash
-lsof -nP -iTCP:5174 -sTCP:LISTEN
+lsof -nP -iTCP:10085 -sTCP:LISTEN
 lsof -nP -iTCP:4310 -sTCP:LISTEN
 lsof -nP -iTCP:4311 -sTCP:LISTEN
 ```
@@ -1005,7 +1005,7 @@ npm run dev
 - [ ] 已从 GitHub 克隆 `autoTest`。
 - [ ] 已在项目根目录成功执行 `npm ci`。
 - [ ] `npm run dev` 或 `npm.cmd run dev` 保持运行。
-- [ ] `http://127.0.0.1:5174` 能打开。
+- [ ] `http://127.0.0.1:10085` 能打开。
 - [ ] 能使用 `admin / admin123` 登录。
 - [ ] Runner `4310/health` 返回 `ok: true`。
 - [ ] Supervisor `4311/health` 返回 `ok: true`。

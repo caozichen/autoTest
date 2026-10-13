@@ -78,7 +78,7 @@ Invoke-RestMethod http://127.0.0.1:4310/health
 - Runner 只执行持久配置中的已启用脚本 ID。入口必须是真实存在的 `.mjs` 文件，且在解析
   符号链接后的真实路径仍位于仓库 `scripts/` 目录。Runner 同时校验 API 与授权来源同源，
   并在保存日志前脱敏 Token、Authorization 和环境密钥。
-- Runner 只允许本地 `5174`、`4173` 端口的管理端 Origin 调用。
+- Runner 只允许本地 `10085`、`4173` 端口的管理端 Origin 调用。
 
 ## 运行记录存储
 

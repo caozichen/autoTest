@@ -767,11 +767,11 @@ test('reveals a registered screenshot using its verified real path', async (t) =
 
   const response = await fetch(screenshotRevealUrl(baseUrl, artifact), {
     method: 'POST',
-    headers: { Origin: 'http://127.0.0.1:5174' },
+    headers: { Origin: 'http://127.0.0.1:10085' },
   })
 
   assert.equal(response.status, 200)
-  assert.equal(response.headers.get('access-control-allow-origin'), 'http://127.0.0.1:5174')
+  assert.equal(response.headers.get('access-control-allow-origin'), 'http://127.0.0.1:10085')
   assert.deepEqual(await response.json(), { ok: true })
   assert.deepEqual(revealedPaths, [await realpath(artifact.absolutePath)])
 
@@ -832,7 +832,7 @@ test('serves registered screenshots from the trusted artifact root with safe res
   const { baseUrl } = await startTestServer(t, { artifactRootDirectory, runRecordStore })
 
   const response = await fetch(screenshotUrl(baseUrl, artifact), {
-    headers: { Origin: 'http://127.0.0.1:5174' },
+    headers: { Origin: 'http://127.0.0.1:10085' },
   })
 
   assert.equal(response.status, 200)
@@ -841,7 +841,7 @@ test('serves registered screenshots from the trusted artifact root with safe res
   assert.equal(response.headers.get('content-disposition'), 'inline')
   assert.equal(response.headers.get('cache-control'), 'no-store')
   assert.equal(response.headers.get('x-content-type-options'), 'nosniff')
-  assert.equal(response.headers.get('access-control-allow-origin'), 'http://127.0.0.1:5174')
+  assert.equal(response.headers.get('access-control-allow-origin'), 'http://127.0.0.1:10085')
   assert.deepEqual(Buffer.from(await response.arrayBuffer()), screenshotBody)
 
   const rejectedOrigin = await fetch(screenshotUrl(baseUrl, artifact), {
@@ -1184,7 +1184,7 @@ test('serves persistent run-record CRUD, summaries, migration, and PATCH CORS', 
 
   const optionsResponse = await fetch(`${baseUrl}/run-records`, {
     method: 'OPTIONS',
-    headers: { Origin: 'http://127.0.0.1:5174' },
+    headers: { Origin: 'http://127.0.0.1:10085' },
   })
   assert.equal(optionsResponse.status, 204)
   assert.match(optionsResponse.headers.get('access-control-allow-methods') ?? '', /PATCH/)
@@ -1275,7 +1275,7 @@ test('serves persistent script-config CRUD with CAS and DELETE CORS', async (t) 
 
   const optionsResponse = await fetch(`${baseUrl}/script-configs`, {
     method: 'OPTIONS',
-    headers: { Origin: 'http://127.0.0.1:5174' },
+    headers: { Origin: 'http://127.0.0.1:10085' },
   })
   assert.equal(optionsResponse.status, 204)
   assert.match(optionsResponse.headers.get('access-control-allow-methods') ?? '', /DELETE/)
