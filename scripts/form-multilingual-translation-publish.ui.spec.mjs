@@ -2695,9 +2695,18 @@ async function assertUnauthenticatedShareRedirect(context, shortUrlValue, longUr
   }
 }
 
+function assertShareShortLinkOrigin(shortUrl, environmentCode) {
+  if (environmentCode === 'CN_PROD') {
+    expect(shortUrl.origin, '内地分享短链域名应为带非空前缀的 1xi.co 子域名').toMatch(/^https:\/\/(?:[^./:]+\.)+1xi\.co$/)
+  } else {
+    expect(shortUrl.origin, '分享短链应使用产品短链域名').toBe('https://1xi.co')
+  }
+}
+
 async function inspectShareSettingsPage({
   page,
   siteBaseUrl,
+  environmentCode,
   formId,
   authorization,
   extraHTTPHeaders,
@@ -2731,7 +2740,7 @@ async function inspectShareSettingsPage({
   expect(longUrl.searchParams.get('channel_code'), '分享长链应携带非空 channel_code').toMatch(/\S+/)
   expect(longUrl.searchParams.has('locale'), '分享长链不应固化语言，应由右上角菜单切换').toBe(false)
   expect(shortUrl.protocol, '分享短链应使用 HTTPS').toBe('https:')
-  expect(shortUrl.origin, '分享短链域名应为带非空前缀的 1xi.co 子域名').toMatch(/^https:\/\/(?:[^./:]+\.)+1xi\.co$/)
+  assertShareShortLinkOrigin(shortUrl, environmentCode)
   expect(shortUrl.pathname, '分享短链路径不应为空').not.toBe('/')
   expect(longUrl.toString(), '长链和短链不应相同').not.toBe(shortUrl.toString())
 
@@ -3347,6 +3356,7 @@ export async function run({
     const shareSettings = await inspectShareSettingsPage({
       page,
       siteBaseUrl,
+      environmentCode,
       formId,
       authorization,
       extraHTTPHeaders,
@@ -3546,6 +3556,7 @@ export {
   analyzeTranslationWorkspace,
   assertPublishedListRecord,
   assertPublishedSourceFormDetail,
+  assertShareShortLinkOrigin,
   assertSourceFormDetail,
   assertTranslationEditorMatchesWorkspace,
   assertTranslationWorkspace,

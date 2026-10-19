@@ -18,6 +18,7 @@ import {
   analyzeTranslationWorkspace,
   assertPublishedListRecord,
   assertPublishedSourceFormDetail,
+  assertShareShortLinkOrigin,
   assertSourceFormDetail,
   assertTranslationEditorMatchesWorkspace,
   assertTranslationWorkspace,
@@ -767,6 +768,35 @@ test('recognizes share links only after their asynchronous display value becomes
     tryParseShareLink('https://1xi.co/AbCd12')?.toString(),
     'https://1xi.co/AbCd12',
   )
+})
+
+test('requires a short-link subdomain only for mainland production and retains the original domain elsewhere', async () => {
+  const failures = async (environmentCode, url) => {
+    const assertions = []
+    await runWithAssertionRecorder('form-multilingual-translation-publish', (entry) => assertions.push(entry), () => {
+      assertShareShortLinkOrigin(new URL(url), environmentCode)
+    })
+    assert.equal(assertions.length, 1)
+    return assertions.filter((entry) => entry.status === 'failed')
+  }
+
+  for (const environmentCode of ['TEST', 'HK_PROD', undefined]) {
+    assert.deepEqual(await failures(environmentCode, 'https://1xi.co/AbCd12'), [])
+    for (const url of ['https://mvr.1xi.co/AbCd12', 'http://1xi.co/AbCd12', 'https://1xi.co:8443/AbCd12']) {
+      assert.equal((await failures(environmentCode, url)).length, 1, `${environmentCode}: ${url}`)
+    }
+  }
+  for (const url of ['https://mvr.1xi.co/AbCd12', 'https://nested.mvr.1xi.co/AbCd12']) {
+    assert.deepEqual(await failures('CN_PROD', url), [])
+  }
+  for (const url of ['https://1xi.co/AbCd12', 'http://mvr.1xi.co/AbCd12', 'https://mvr.1xi.co:8443/AbCd12']) {
+    assert.equal((await failures('CN_PROD', url)).length, 1, url)
+  }
+  for (const environmentCode of ['CN_PROD', 'TEST', 'HK_PROD']) {
+    for (const url of ['https://mvr.1xi.co.example.com/AbCd12', 'https://not1xi.co/AbCd12', 'https://example.com/AbCd12']) {
+      assert.equal((await failures(environmentCode, url)).length, 1, `${environmentCode}: ${url}`)
+    }
+  }
 })
 
 test('does not throw when a popup first-navigation request has no frame yet', () => {
