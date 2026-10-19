@@ -17,6 +17,7 @@ import {
   TARGET_LANGUAGE_CODES,
   analyzeTranslationWorkspace,
   assertPublishedListRecord,
+  assertPublishedSourceFormDetail,
   assertSourceFormDetail,
   assertTranslationEditorMatchesWorkspace,
   assertTranslationWorkspace,
@@ -39,6 +40,7 @@ import {
   parseTranslationExpectations,
   publicSourceTextSignature,
   publicStructuralSignature,
+  readPublishedFormDetail,
   requireTranslationQualityGate,
   requireWorkspaceMutationGate,
   runActionAndWaitForApiResponses,
@@ -317,7 +319,7 @@ function sourceFormContractAssertions(payload, options = {}) {
 
 test('accepts the expanded disabled sections for a current ordinary form', () => {
   const payload = sourceFormContractPayload([
-    ...LEGACY_DISABLED_TRANSLATION_SECTIONS, 'promotion_link', 'activity_location',
+    ...LEGACY_DISABLED_TRANSLATION_SECTIONS, 'promotion_link', 'submission_view_qrcode', 'activity_location',
   ])
   assert.deepEqual(sourceFormContractAssertions(payload, { environmentCode: 'TEST' }), [])
 })
@@ -325,7 +327,7 @@ test('accepts the expanded disabled sections for a current ordinary form', () =>
 test('uses the returned draft revision for translation without changing published revision selection', () => {
   // Matches TEST lRzmaD: draft=1 returns current=1, draft=2, and item revision=2.
   const draftPayload = sourceFormContractPayload([
-    ...LEGACY_DISABLED_TRANSLATION_SECTIONS, 'promotion_link', 'activity_location',
+    ...LEGACY_DISABLED_TRANSLATION_SECTIONS, 'promotion_link', 'submission_view_qrcode', 'activity_location',
   ], { current_revision_no: 1, draft_revision_no: 2, status: 'published', published_status: 2 })
   draftPayload.data.items[0].revision_no = 2
   const source = assertSourceFormDetail(draftPayload, 'contract-form', { draft: true })
@@ -353,7 +355,7 @@ test('uses the returned draft revision for translation without changing publishe
 
 test('retains exact workspace and item revision gates when a published form has a draft', () => {
   const payload = sourceFormContractPayload([
-    ...LEGACY_DISABLED_TRANSLATION_SECTIONS, 'promotion_link', 'activity_location',
+    ...LEGACY_DISABLED_TRANSLATION_SECTIONS, 'promotion_link', 'submission_view_qrcode', 'activity_location',
   ], { current_revision_no: 1, draft_revision_no: 2 })
   payload.data.items[0].revision_no = 2
   const source = assertSourceFormDetail(payload, 'contract-form', { draft: true })
@@ -377,7 +379,7 @@ test('retains exact workspace and item revision gates when a published form has 
 
 test('uses the current revision when draft=1 returns a form without a draft', () => {
   const payload = sourceFormContractPayload([
-    ...LEGACY_DISABLED_TRANSLATION_SECTIONS, 'promotion_link', 'activity_location',
+    ...LEGACY_DISABLED_TRANSLATION_SECTIONS, 'promotion_link', 'submission_view_qrcode', 'activity_location',
   ], { current_revision_no: 1, draft_revision_no: 0 })
   const source = assertSourceFormDetail(payload, 'contract-form', { draft: true })
   assert.equal(source.revisionNo, 1)
@@ -387,11 +389,14 @@ test('uses the current revision when draft=1 returns a form without a draft', ()
 test('uses the current contract in every environment and allows an explicit legacy override', () => {
   const legacy = sourceFormContractPayload([...LEGACY_DISABLED_TRANSLATION_SECTIONS])
   const current = sourceFormContractPayload([
+    ...LEGACY_DISABLED_TRANSLATION_SECTIONS, 'promotion_link', 'submission_view_qrcode', 'activity_location',
+  ])
+  const september = sourceFormContractPayload([
     ...LEGACY_DISABLED_TRANSLATION_SECTIONS, 'promotion_link', 'activity_location',
   ])
   for (const environmentCode of ['CN_PROD', 'HK_PROD']) {
     assert.deepEqual(sourceFormContractAssertions(current, { environmentCode }), [])
-    assert.deepEqual(sourceFormContractAssertions(current, {
+    assert.deepEqual(sourceFormContractAssertions(september, {
       environmentCode, sectionContract: '20260914',
     }), [])
     assert.equal(sourceFormContractAssertions(legacy, { environmentCode }).length, 1)
@@ -409,6 +414,7 @@ test('derives promotion and activity availability independently from the form se
     for (const isActivity of [1, 2]) {
       const excluded = [...LEGACY_DISABLED_TRANSLATION_SECTIONS]
       if (enabled === 2) excluded.push('promotion_link')
+      excluded.push('submission_view_qrcode')
       if (isActivity === 2) excluded.push('activity_location')
       const payload = sourceFormContractPayload(excluded, {
         is_activity: isActivity,
@@ -426,7 +432,7 @@ test('derives existing other-translation switches and preserves the submit-butto
     theme_config: { submit_button: { text: '提交', enabled: null }, add_to_cart_button: { enabled: 1 } },
     common_config: { terms_of_service: { enabled: 1 }, privacy_policy: { enabled: 1 } },
     payment_config: { payment_method: { payment_alert: { enabled: 1 } } },
-    notification_config: { customized_feedback: { enabled: 1 }, promotion_link: { enabled: '1' } },
+    notification_config: { customized_feedback: { enabled: 1 }, promotion_link: { enabled: '1' }, submission_view_qrcode: { enabled: 1 } },
   }
   assert.deepEqual(sourceFormContractAssertions(sourceFormContractPayload([], form)), [])
   form.theme_config.submit_button.enabled = 2
@@ -451,7 +457,7 @@ test('keeps agreement, rich feedback and promotion translatable after creation s
     'privacy_policy', 'customized_feedback',
   ].includes(section))
   for (const environmentCode of ['TEST', 'CN_PROD', 'HK_PROD']) {
-    const expectedSections = [...otherSections, 'activity_location']
+    const expectedSections = [...otherSections, 'submission_view_qrcode', 'activity_location']
     const payload = sourceFormContractPayload(expectedSections, form)
     assert.deepEqual(sourceFormContractAssertions(payload, { environmentCode }), [])
     payload.data.form.translation.untranslatable_sections.other_translation = [
@@ -464,11 +470,12 @@ test('keeps agreement, rich feedback and promotion translatable after creation s
 })
 
 test('rejects missing, duplicate, unknown and incorrectly excluded current sections', () => {
-  const expected = [...LEGACY_DISABLED_TRANSLATION_SECTIONS, 'promotion_link', 'activity_location']
+  const expected = [...LEGACY_DISABLED_TRANSLATION_SECTIONS, 'promotion_link', 'submission_view_qrcode', 'activity_location']
   const invalid = [
     [...LEGACY_DISABLED_TRANSLATION_SECTIONS],
     [...LEGACY_DISABLED_TRANSLATION_SECTIONS, 'promotion_link'],
     [...LEGACY_DISABLED_TRANSLATION_SECTIONS, 'activity_location'],
+    [...LEGACY_DISABLED_TRANSLATION_SECTIONS, 'promotion_link', 'activity_location'],
     expected.slice(1),
     [...expected, 'promotion_link'],
     [...expected, 'unknown_section'],
@@ -489,9 +496,38 @@ test('rejects missing, duplicate, unknown and incorrectly excluded current secti
   assert.equal(sourceFormContractAssertions(activity).length, 1)
 })
 
+test('translation uses published V1 while V2 is a draft and rejects draft-only or mixed-version sources', () => {
+  const payload = sourceFormContractPayload([
+    ...LEGACY_DISABLED_TRANSLATION_SECTIONS, 'promotion_link', 'submission_view_qrcode', 'activity_location',
+  ], { current_revision_no: 1, draft_revision_no: 2 })
+  assert.equal(assertPublishedSourceFormDetail(payload, 'contract-form').revisionNo, 1)
+  const onlyDraft = structuredClone(payload)
+  onlyDraft.data.form.current_revision_no = 0
+  assert.throws(() => assertPublishedSourceFormDetail(onlyDraft, 'contract-form'), /纯草稿不得进入写入流程/)
+  const draftItems = structuredClone(payload)
+  draftItems.data.items[0].revision_no = 2
+  assert.throws(() => assertPublishedSourceFormDetail(draftItems, 'contract-form'), /全部题目必须属于最后发布版本/)
+  const draftEnvelope = structuredClone(payload)
+  draftEnvelope.data.revision_no = 2
+  assert.throws(() => assertPublishedSourceFormDetail(draftEnvelope, 'contract-form'), /详情必须属于最后发布版本/)
+})
+
+test('submission view QR translation availability follows its own enable switch', () => {
+  for (const enabled of [1, 2]) {
+    const sections = [...LEGACY_DISABLED_TRANSLATION_SECTIONS, 'promotion_link',
+      ...(enabled === 2 ? ['submission_view_qrcode'] : []), 'activity_location']
+    const payload = sourceFormContractPayload(sections, {
+      notification_config: { submission_view_qrcode: { enabled, title: '查看答卷', body: '保存凭证' } },
+    })
+    assert.deepEqual(sourceFormContractAssertions(payload), [])
+    payload.data.form.translation.untranslatable_sections.other_translation.push('unknown_new_section')
+    assert.equal(sourceFormContractAssertions(payload).length, 1)
+  }
+})
+
 test('retains the source structure and email exclusion assertions', () => {
   const payload = sourceFormContractPayload([
-    ...LEGACY_DISABLED_TRANSLATION_SECTIONS, 'promotion_link', 'activity_location',
+    ...LEGACY_DISABLED_TRANSLATION_SECTIONS, 'promotion_link', 'submission_view_qrcode', 'activity_location',
   ])
   payload.data.form.translation.untranslatable_sections.form_structure = ['form']
   payload.data.form.translation.untranslatable_sections.email_translation.pop()
@@ -659,7 +695,7 @@ test('keeps every response and popup watcher behind the managed action helper', 
 
   assert.equal(source.match(/\bexactApiResponse\s*\(/g)?.length, 2)
   assert.equal(source.match(/\.waitForResponse\s*\(/g)?.length, 1)
-  assert.equal(source.match(/await runActionAndWaitForApiResponses\s*\(/g)?.length, 12)
+  assert.equal(source.match(/await runActionAndWaitForApiResponses\s*\(/g)?.length, 13)
   assert.equal(source.match(/context\.waitForEvent\('page'/g)?.length, 1)
   assert.match(source, /runActionAndWaitForWatchers\(\[\s*\(\) => context\.waitForEvent\('page'/)
   assert.doesNotMatch(source, /\b(?:const|let)\s+\w+Promise\s*=\s*exactApiResponse\s*\(/)
@@ -922,6 +958,46 @@ test('public source text comparison excludes admin submission metadata while pre
   assert.notDeepEqual(publicSourceTextSignature(source, missingQuestion), expected)
 })
 
+test('reads the published source with the app language instead of the team fallback dictionary', async () => {
+  const payload = language => ({ code: 0, data: {
+    form: { form_id: 'locale-form', source_language: 'zh_CN', title: '原始标题', current_revision_no: 2, draft_revision_no: 3 },
+    items: [{ item_key: 'document', type_code: 'id_card', revision_no: 2, label: '证件', common_config: {
+      collect_mode: { choices: [{ code: 'id_card', title: language === 'zh_CN' ? '身份证' : '身份證' }] },
+    } }],
+  } })
+  const observed = []
+  const server = createServer((request, response) => {
+    const url = new URL(request.url, 'http://fixture.local')
+    if (url.pathname === '/api/be/form/locale-form') {
+      observed.push({ language: request.headers.language, draft: url.searchParams.get('draft'), authorization: request.headers.authorization })
+      response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' })
+      response.end(JSON.stringify(payload(request.headers.language)))
+      return
+    }
+    response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+    response.end('<!doctype html><title>Locale fixture</title>')
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  const origin = `http://127.0.0.1:${server.address().port}`
+  let browser
+  try {
+    browser = await launchGoogleChrome()
+    const page = await browser.newPage({ locale: 'zh-CN' })
+    await page.goto(origin)
+    await page.evaluate(() => localStorage.setItem('token', 'Bearer locale-fixture-token'))
+    const source = await readPublishedFormDetail(page, `${origin}/api`, 'locale-form', '发布原文')
+    assert.deepEqual(observed, [{ language: 'zh_CN', draft: '0', authorization: 'Bearer locale-fixture-token' }])
+    assert.deepEqual(publicSourceTextSignature(source, payload('zh_CN')), sourceTextSignature(source))
+    assert.notDeepEqual(sourceTextSignature(payload('zh_HK')), sourceTextSignature(source), 'team fallback reproduces the original false failure')
+    const changed = payload('zh_CN')
+    changed.data.items[0].label = '错误原文'
+    assert.notDeepEqual(publicSourceTextSignature(source, changed), sourceTextSignature(source), 'authored text differences must still fail')
+  } finally {
+    await browser?.close()
+    await new Promise(resolve => server.close(resolve))
+  }
+})
+
 test('parses optional exact translation expectations for both target languages', () => {
   assert.deepEqual(parseTranslationExpectations(undefined), {})
   assert.deepEqual(parseTranslationExpectations(''), {})
@@ -1160,18 +1236,24 @@ test('compares rich-text translation editors consistently across paragraphs, lis
     sourceHtml = '<p>请<strong>核对</strong>本次提交。</p>',
     sourceText = '请核对本次提交。',
     delayedIframeIndex = -1,
+    plainTitle = false,
+    delayedBodyIndex = -1,
   } = {}) {
     const units = [0, 1].map((index) => ({
       unit_key: `rich-text-${index}`,
       field_path: `content-${index}`,
-      source_text: sourceHtml,
-      translated_text: html,
-      editor_type: 'rich_text',
+      source_text: plainTitle && index === 0 ? sourceText : sourceHtml,
+      translated_text: plainTitle && index === 0 ? 'Registration and Contact Instructions' : html,
+      editor_type: plainTitle && index === 0 ? 'plain_text' : 'rich_text',
       status: 'translated',
     }))
     const workspace = { sections: [{ section_key: 'feedback', units }], units }
+    await page.evaluate(() => {
+      clearTimeout(window.delayedBodyTimer)
+      delete window.delayedBodyReady
+    })
     await page.setContent('<!doctype html><body><nav id="languages"></nav><button class="section-nav__item">反馈 2/2</button><main></main></body>')
-    await page.evaluate(({ units, renderedHtml, sourceText, delayedIframeIndex }) => {
+    await page.evaluate(({ units, renderedHtml, sourceText, delayedIframeIndex, delayedBodyIndex }) => {
       for (const label of ['繁体中文', 'English']) {
         const tab = document.createElement('button')
         tab.className = 'target-language-tab'
@@ -1192,16 +1274,32 @@ test('compares rich-text translation editors consistently across paragraphs, lis
         article.className = 'translation-unit translation-unit--translated'
         article.innerHTML = '<div class="source-column"><textarea readonly></textarea></div><div class="target-column"></div>'
         article.querySelector('textarea').value = sourceText
+        if (unit.editor_type === 'plain_text') {
+          const editor = document.createElement('textarea')
+          editor.value = unit.translated_text
+          article.querySelector('.target-column').append(editor)
+          document.querySelector('main').append(article)
+          return
+        }
         const mountIframe = () => {
           const iframe = document.createElement('iframe')
-          iframe.srcdoc = `<!doctype html><body contenteditable="true">${renderedHtml[index]}</body>`
+          iframe.srcdoc = `<!doctype html><body contenteditable="true">${index === delayedBodyIndex ? '' : renderedHtml[index]}</body>`
           article.querySelector('.target-column').append(iframe)
         }
         if (index === delayedIframeIndex) setTimeout(mountIframe, 150)
         else mountIframe()
         document.querySelector('main').append(article)
       })
-    }, { units, renderedHtml, sourceText, delayedIframeIndex })
+      if (delayedBodyIndex >= 0) {
+        document.querySelector('.section-nav__item').onclick = () => {
+          window.delayedBodyTimer = setTimeout(() => {
+            const iframe = document.querySelector(`#translation-unit-${units[delayedBodyIndex].unit_key} iframe`)
+            iframe.contentDocument.body.innerHTML = renderedHtml[delayedBodyIndex]
+            window.delayedBodyReady = true
+          }, 750)
+        }
+      }
+    }, { units, renderedHtml, sourceText, delayedIframeIndex, delayedBodyIndex })
     const assertions = []
     const action = () => runWithAssertionRecorder('form-multilingual-translation-publish', (entry) => assertions.push(entry), () => (
       assertTranslationEditorMatchesWorkspace(page, workspace, language, () => {})
@@ -1221,6 +1319,16 @@ test('compares rich-text translation editors consistently across paragraphs, lis
   await t.test('waits for every rich-text iframe instead of inferring editor type from mount timing', async () => {
     const { action, assertions } = await checkEditor('en_US', englishHtml, undefined, { delayedIframeIndex: 1 })
     await action()
+    assert.equal(assertions.filter((entry) => entry.status === 'failed').length, 0)
+    assert.equal(assertions.filter((entry) => entry.name.includes('UI 译文应与接口一致')).length, 2)
+  })
+
+  await t.test('waits for delayed rich-text body after a plain title is ready', async () => {
+    const { action, assertions } = await checkEditor('en_US', englishHtml, undefined, {
+      plainTitle: true, delayedBodyIndex: 1,
+    })
+    await action()
+    assert.equal(await page.evaluate(() => window.delayedBodyReady), true)
     assert.equal(assertions.filter((entry) => entry.status === 'failed').length, 0)
     assert.equal(assertions.filter((entry) => entry.name.includes('UI 译文应与接口一致')).length, 2)
   })
@@ -1283,10 +1391,9 @@ test('compares rich-text translation editors consistently across paragraphs, lis
     ['English word spaces', englishHtml, englishHtml.replace('word spacing', 'wordspacing')],
     ['an encoded ampersand', entityHtml, entityHtml.replace('&amp;', '')],
   ]) {
-    await t.test(`the subsequent unit comparison preserves ${label}`, async () => {
-      const { action, assertions } = await checkEditor('en_US', html, [html, changedHtml])
-      await assert.rejects(action, /UI 译文必须与接口一致/)
-      assert.equal(assertions.filter((entry) => entry.status === 'failed' && entry.name.includes('UI 译文应与接口一致')).length, 1)
+    await t.test(`the subsequent unit synchronization preserves ${label}`, async () => {
+      const { action } = await checkEditor('en_US', html, [html, changedHtml])
+      await assert.rejects(action, /富文本译文必须完成同步/)
     })
   }
 
@@ -1295,10 +1402,9 @@ test('compares rich-text translation editors consistently across paragraphs, lis
     ['simplified characters', chineseHtml.replace('測試', '测试')],
     ['different translation', chineseHtml.replace('核對', '刪除')],
   ]) {
-    await t.test(`the subsequent unit comparison rejects ${label}`, async () => {
-      const { action, assertions } = await checkEditor('zh_HK', chineseHtml, [chineseHtml, changedHtml])
-      await assert.rejects(action, /UI 译文必须与接口一致/)
-      assert.equal(assertions.filter((entry) => entry.status === 'failed' && entry.name.includes('UI 译文应与接口一致')).length, 1)
+    await t.test(`the subsequent unit synchronization rejects ${label}`, async () => {
+      const { action } = await checkEditor('zh_HK', chineseHtml, [chineseHtml, changedHtml])
+      await assert.rejects(action, /富文本译文必须完成同步/)
     })
   }
 })

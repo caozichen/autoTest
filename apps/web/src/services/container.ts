@@ -5,8 +5,7 @@ import { LocalDashboardService } from './dashboard/local-dashboard.service'
 import type { EnvironmentService } from './environments/environment-service'
 import type { EnvironmentLoginService } from './environments/environment-login-service'
 import { FetchEnvironmentLoginService } from './environments/fetch-environment-login.service'
-import { LocalEnvironmentSessionService, type EnvironmentSessionService } from './environments/local-environment-session.service'
-import { LocalEnvironmentService } from './environments/local-environment.service'
+import type { EnvironmentSessionService } from './environments/local-environment-session.service'
 import { LocalScriptService } from './scripts/local-script.service'
 import type { ScriptService } from './scripts/script-service'
 import type { RuntimeVariableService } from './runtime-variables/runtime-variable-service'
@@ -14,7 +13,7 @@ import { SessionRuntimeVariableService } from './runtime-variables/session-runti
 import { HttpRunRecordService } from './run-records/http-run-record.service'
 import type { RunRecordService } from './run-records/run-record-service'
 import type { AutomationPipelineService } from './automation-pipelines/automation-pipeline-service'
-import { LocalAutomationPipelineService } from './automation-pipelines/local-automation-pipeline.service'
+import { createSettingsServices, type RunHistoryTabsService } from './settings/settings-services'
 import type { RunnerControlService } from './system/runner-control-service'
 import { LocalRunnerControlService } from './system/local-runner-control.service'
 import { HttpAutomationPipelineExecutionService } from './automation-pipelines/http-automation-pipeline-execution-service'
@@ -32,16 +31,15 @@ export interface ServiceContainer {
   environments: EnvironmentService
   runtimeVariables: RuntimeVariableService
   runRecords: RunRecordService
+  runHistoryTabs: RunHistoryTabsService
   runnerControl: RunnerControlService
   scripts: ScriptService
 }
 
 const scripts = new LocalScriptService()
-const environments = new LocalEnvironmentService()
+const { environments, automationPipelines, environmentSessions, runHistoryTabs } = createSettingsServices()
 const runRecords = new HttpRunRecordService()
-const automationPipelines = new LocalAutomationPipelineService()
 const environmentLogin = new FetchEnvironmentLoginService()
-const environmentSessions = new LocalEnvironmentSessionService()
 const runtimeVariables = new SessionRuntimeVariableService()
 const automationPipelineExecution = new HttpAutomationPipelineExecutionService({
   environments,
@@ -62,6 +60,7 @@ export const services: ServiceContainer = Object.freeze({
   environments,
   runtimeVariables,
   runRecords,
+  runHistoryTabs,
   runnerControl: new LocalRunnerControlService(),
   scripts,
 })

@@ -19,7 +19,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import RunRecordDetailDrawer from '@/components/RunRecordDetailDrawer.vue'
 import type { RunRecord, RunRecordStatus } from '@/domain/run-record'
 import { services } from '@/services/container'
-import { readRunHistoryTabs, resolveRunHistoryTabs, RUN_HISTORY_TABS_KEY, type RunHistoryEnvironment } from '@/services/run-records/run-history-tabs'
+import { resolveRunHistoryTabs, RUN_HISTORY_TABS_KEY, type RunHistoryEnvironment } from '@/services/run-records/run-history-tabs'
 import { pendingRunScriptCount } from '@/services/run-records/run-record-progress'
 
 const records = ref<RunRecord[]>([])
@@ -283,7 +283,7 @@ function formatDuration(durationMs: number | null): string {
 async function loadEnvironmentTabs(): Promise<void> {
   try {
     configuredEnvironments.value = await services.environments.list()
-    tabIds.value = readRunHistoryTabs()
+    tabIds.value = await services.runHistoryTabs.read()
   } catch {
     ElMessage.error('环境 Tab 加载失败，请刷新页面重试')
   }
@@ -295,9 +295,12 @@ function syncTabSettings(event: StorageEvent): void {
   }
 }
 
+function refreshTabSettings(): void { void loadEnvironmentTabs() }
+
 onMounted(() => {
   void loadEnvironmentTabs()
   window.addEventListener('storage', syncTabSettings)
+  window.addEventListener('focus', refreshTabSettings)
   void loadRecords()
   pollTimer = window.setInterval(() => {
     if (recordsRefreshing.value) return
@@ -307,6 +310,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('storage', syncTabSettings)
+  window.removeEventListener('focus', refreshTabSettings)
   if (pollTimer !== undefined) window.clearInterval(pollTimer)
   detailRequestSequence += 1
 })

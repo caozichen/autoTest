@@ -266,7 +266,7 @@ async function assertInitialDetailStructure(page, {
     '提报详情初始态应显示“已提交”状态',
   ).toBeVisible()
   await expect(
-    page.getByRole('heading', { level: 3, name: /^(?:提報資訊|填报信息|提报信息)$/ }).first(),
+    page.getByRole('heading', { level: 3, name: /^(?:提報資訊|填报信息|提报信息|填報資訊|Submission Information)$/i }).first(),
     '提报详情初始态应显示“提报信息”分区',
   ).toBeVisible()
   const editButton = page.getByRole('button', { name: /^(?:编辑|編輯)$/ })
@@ -500,14 +500,112 @@ async function screenshotFailure(page, submissionId, artifactWriter) {
 
 async function detailAnswersSnapshot(page) {
   await flowExpect(page.locator('.reply-kv__row'), '详情答案必须加载完成').not.toHaveCount(0)
-  return page.locator('.reply-kv__row').evaluateAll((rows) => rows.map((row) => ({
+  const rows = page.locator('.reply-kv__row')
+  const snapshot = await rows.evaluateAll((rows) => rows.map((row) => ({
     label: row.querySelector('.reply-kv__label')?.textContent?.trim() ?? '',
     value: row.querySelector('.reply-kv__value')?.textContent?.replace(/\s+/g, ' ').trim() ?? '',
     images: [...row.querySelectorAll('img[src]')].map((image) => {
       const url = new URL(image.src)
       return `${url.origin}${url.pathname}`
     }),
+    files: [...row.querySelectorAll('.reply-kv__value a[href]')].map((link) => {
+      const url = new URL(link.href)
+      return { name: link.textContent.trim(), href: `${url.origin}${url.pathname}` }
+    }),
   })))
+  for (const [index, entry] of snapshot.entries()) {
+    const matrix = rows.nth(index).locator('button.reply-kv__matrix-view')
+    if (!await matrix.count()) continue
+    await clickWhenReady(matrix)
+    const modal = page.locator('.arco-modal:visible')
+    await flowExpect(modal, '矩阵答案必须展开可见详情').toBeVisible()
+    await flowExpect(modal.locator('table tr'), '矩阵详情必须有实际单元格，不能只检查查看按钮').not.toHaveCount(0)
+    entry.matrix = await modal.locator('table tr').evaluateAll(rows => rows.map(row =>
+      [...row.querySelectorAll('th,td')].map(cell => cell.textContent.replace(/\s+/g, ' ').trim())))
+    await clickWhenReady(modal.locator('.arco-modal-close-btn'))
+    await flowExpect(modal, '矩阵核对完成后应关闭详情').toHaveCount(0)
+  }
+  return snapshot
+}
+
+function stableAnswerValue(value, key = '') {
+  if (Array.isArray(value)) return value.map(entry => stableAnswerValue(entry))
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value)
+    .filter(([name]) => !['answer_token', 'result_token'].includes(name))
+    .map(([name, entry]) => [name, stableAnswerValue(entry, name)]))
+  if (typeof value === 'string' && /^(?:url|src|full_path|thumbnail_url)$/.test(key) && /^https?:\/\//.test(value)) {
+    const url = new URL(value)
+    return `${url.origin}${url.pathname}`
+  }
+  return value
+}
+
+function submissionAnswerSnapshot(payload, { formId, submissionId }) {
+  const data = payload?.data
+  flowExpect(Number(payload?.code), '答案独立回读业务码必须为 0').toBe(0)
+  flowExpect(String(data?.submission?.form_id ?? ''), '答案快照必须属于本次表单').toBe(formId)
+  flowExpect(String(data?.submission?.id ?? ''), '答案快照必须属于本次提报').toBe(submissionId)
+  const revisionNo = Number(data.submission.revision_no)
+  flowExpect(Number.isSafeInteger(revisionNo) && revisionNo > 0, '答案快照必须明确提报的原始版本').toBe(true)
+  flowExpect(Array.isArray(data.items) && data.items.length > 0, '答案快照必须返回原版本题目及答案').toBe(true)
+  const items = data.items.map(item => {
+    flowExpect(String(item.item_key ?? ''), '答案快照题目必须有稳定 item_key').toMatch(/\S+/)
+    flowExpect(Number(item.revision_no), '提报详情题目必须取自提报原版本').toBe(revisionNo)
+    return stableAnswerValue({ item_key: item.item_key, type_code: item.type_code, label: item.label,
+      group_code: item.group_code, item_kind: item.item_kind, sort: Number(item.sort ?? 0), option: item.option, common_config: item.common_config,
+      rule_config: item.rule_config,
+      value: Array.isArray(item.value) ? item.value.map(entry => ({ answer_item_key: entry.answer_item_key, answer: entry.answer })) : item.value,
+      answer: item.answer })
+  }).sort((a, b) => String(a.item_key).localeCompare(String(b.item_key)))
+  flowExpect(new Set(items.map(item => item.item_key)).size, '答案快照题目身份必须唯一').toBe(items.length)
+  return { formId, submissionId, revisionNo, items }
+}
+
+function resolveEditedAnswerKeys(before, editValues) {
+  const editedKeys = new Set()
+  for (const reference of Object.keys(editValues)) {
+    const { label, occurrence } = parseFieldReference(reference)
+    const matches = before.items.filter(item => item.label === label).sort((a, b) => a.sort - b.sort)
+    flowExpect(matches.length, `API 答案必须能定位待修改字段 ${reference}`).toBeGreaterThan(0)
+    if (occurrence === null) flowExpect(matches, `待修改字段 ${reference} 必须唯一`).toHaveLength(1)
+    const item = matches[(occurrence ?? 1) - 1]
+    flowExpect(Boolean(item), `待修改字段 ${reference} 的序号必须有效`).toBe(true)
+    flowExpect(item.item_kind === 'system', '普通编辑不得修改系统字段').toBe(false)
+    flowExpect(['input', 'textarea', 'username', 'mobile', 'email', 'landlinePhone', 'number'].includes(item.type_code),
+      '本轮真实修改仅支持普通输入字段，付款、上传、签名和矩阵必须保留').toBe(true)
+    editedKeys.add(item.item_key)
+  }
+  return editedKeys
+}
+
+function assertSubmissionAnswersPreserved(before, after, editValues = {}) {
+  flowExpect({ formId: after.formId, submissionId: after.submissionId, revisionNo: after.revisionNo },
+    '编辑后提报身份和提交时版本必须保持不变').toEqual({ formId: before.formId, submissionId: before.submissionId, revisionNo: before.revisionNo })
+  const editedKeys = resolveEditedAnswerKeys(before, editValues)
+  flowExpect(after.items.map(item => item.item_key), '编辑后历史题目集合必须保持不变').toEqual(before.items.map(item => item.item_key))
+  for (const [index, original] of before.items.entries()) {
+    const current = after.items[index]
+    if (!editedKeys.has(original.item_key)) {
+      expect(current, `未修改题目 ${original.item_key} 的矩阵、附件、签名及原答案必须保持`).toEqual(original)
+      flowExpect(current, `未修改题目 ${original.item_key} 的答案不得变化`).toEqual(original)
+      continue
+    }
+    const { value: previousValue, answer: previousAnswer, ...originalStructure } = original
+    const { value: currentValue, answer: currentAnswer, ...currentStructure } = current
+    flowExpect(currentStructure, `修改答案不得改变 ${original.item_key} 的历史题目结构或选项`).toEqual(originalStructure)
+    expect({ value: currentValue, answer: currentAnswer }, `真实修改 ${original.item_key} 后 API 答案应变化`)
+      .not.toEqual({ value: previousValue, answer: previousAnswer })
+  }
+}
+
+async function readSubmissionAnswerSnapshot(page, apiBaseUrl, formId, submissionId) {
+  const url = `${apiBaseUrl.replace(/\/+$/, '')}/be/form/${encodeURIComponent(formId)}/submission/${encodeURIComponent(submissionId)}`
+  const result = await page.evaluate(async endpoint => {
+    const response = await fetch(endpoint, { headers: { Authorization: localStorage.getItem('token') ?? '' } })
+    return { ok: response.ok, body: await response.json() }
+  }, url)
+  flowExpect(result.ok, '提报答案独立回读 HTTP 必须成功').toBe(true)
+  return submissionAnswerSnapshot(result.body, { formId, submissionId })
 }
 
 export async function run({
@@ -636,6 +734,8 @@ export async function run({
     await waitForUiReady(page, { timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) })
     const editButton = await assertInitialDetailStructure(page, { submissionId, assertions })
     const originalAnswers = verifyPersistence ? await detailAnswersSnapshot(page) : null
+    const originalApiAnswers = verifyPersistence ? await readSubmissionAnswerSnapshot(page, apiBaseUrl, formId, submissionId) : null
+    if (originalApiAnswers) resolveEditedAnswerKeys(originalApiAnswers, editValues)
     await waitForPrerequisites('进入编辑前')
 
     networkObserver.setPhase('进入编辑态')
@@ -703,6 +803,8 @@ export async function run({
       if (appliedEditFields.length === 0) {
         expect(await detailAnswersSnapshot(page), '原答案直接提交并刷新后，全部详情值和图片应保持一致').toEqual(originalAnswers)
       }
+      assertSubmissionAnswersPreserved(originalApiAnswers,
+        await readSubmissionAnswerSnapshot(page, apiBaseUrl, formId, submissionId), editValues)
     }
     if (captureSuccessScreenshots && artifactWriter?.captureScreenshot) {
       await artifactWriter.captureScreenshot(page, 'screenshots/submission-edit-saved.png', { fullPage: true })
@@ -772,4 +874,7 @@ export {
   parseSubmissionAssertions,
   parseSubmissionEditValues,
   resolveSubmissionContext,
+  submissionAnswerSnapshot,
+  detailAnswersSnapshot,
+  assertSubmissionAnswersPreserved,
 }

@@ -2,9 +2,11 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
-  assertPublishedNotification, assertSavedNotification, notificationFromPayload, resolveNotificationDefaults,
+  assertNotificationPersistence, assertPublishedNotification, assertSavedNotification, configureAutomationNotification, configureManagerNotification, notificationFromPayload, resolveNotificationDefaults,
 } from '../../scripts/support/form-settings-notifications.mjs'
 import { runWithAssertionRecorder } from '../../scripts/support/recorded-expect.mjs'
+import { launchGoogleChrome } from '../../scripts/support/google-chrome.mjs'
+import { assertStoredSettings } from '../../scripts/support/form-post-collection-settings.mjs'
 
 const content = { subject: '自动化测试 TEST-20260915 管理通知', body: '<p>本次<strong>自动化测试</strong>提交成功。</p>' }
 
@@ -133,6 +135,184 @@ function publicationFixture(variant = 'manager') {
   const payload = { code: 0, data: { customized: { [audience]: { submitted_success: { email } } } } }
   return { saved, published, payload, email }
 }
+
+test('skips manager readback explicitly while still rejecting missing user notification content and templates', () => {
+  const fixture = publicationFixture('automation')
+  const settings = {
+    agreement: { configKey: 'privacy_policy', savedParameters: { enabled: 1, agreements: [] } },
+    classificationTags: { skipped: true },
+    managerNotification: { skipped: true, reason: '管理者通知自动配置暂时停用' },
+    automationNotification: { savedParameters: fixture.saved },
+    feedback: { savedParameters: { enabled: 1, body: '反馈' } },
+    promotion: { savedParameters: { enabled: 1, button_text: '查看' } },
+  }
+  const form = {
+    common_config: { privacy_policy: structuredClone(settings.agreement.savedParameters) },
+    notification_config: {
+      user_notification: structuredClone(fixture.saved),
+      customized_feedback: structuredClone(settings.feedback.savedParameters),
+      promotion_link: structuredClone(settings.promotion.savedParameters),
+    },
+  }
+  const recorded = []
+  const check = (value, options) => runWithAssertionRecorder('form-all-fields-publish', item => recorded.push(item),
+    () => assertStoredSettings(value, settings, options))
+  check(form)
+  const published = structuredClone(form)
+  published.notification_config.user_notification = fixture.published
+  const options = { published: true, notificationTemplates: fixture.payload }
+  assert.deepEqual(check(published, options).managerNotification, settings.managerNotification)
+  assert.deepEqual(recorded.filter(item => item.status === 'failed'), [])
+  form.notification_config.user_notification.notifications[0].body = ''
+  assert.throws(() => check(form), /不得为空/)
+  assert.throws(() => check(published, { published: true, notificationTemplates: {} }), /不能以原始默认模板代替/)
+})
+
+for (const variant of ['automation', 'manager']) test(`${variant}: replaces the default variable title, then saves and reads back only after confirming the editor`, { timeout: 20_000 }, async () => {
+  const browser = await launchGoogleChrome()
+  try {
+    const page = await browser.newPage()
+    const formId = 'notification-toggle-fixture'
+    let saved
+    const writes = []
+    const key = variant === 'manager' ? 'admin_notification' : 'user_notification'
+    const audience = variant === 'manager' ? 'admin' : 'user'
+    const switchName = variant === 'manager' ? '管理者通知开关' : '启用消息通知'
+    const recipients = variant === 'manager' ? { users: [{ id: 42, username: '测试管理者' }] } : undefined
+    const original = { subject: '{{表单名称[form.title]}} 提交成功通知', body: '<p>默认正文</p>', ...(recipients ? { recipients } : {}) }
+    const html = `<!doctype html><html><head><meta charset="utf-8"></head><body><section>
+      <button role="switch" aria-label="${switchName}" aria-checked="false">${switchName}</button>
+      <article hidden>
+        <label><span>触发条件 <span aria-hidden="true">*</span></span><button role="combobox">提交成功</button></label>
+        <label><span>通知类型 <span aria-hidden="true">*</span></span><button role="combobox">邮件</button></label>
+        ${recipients ? '<button aria-label="移除测试管理者">测试管理者</button>' : ''}
+        <div class="notification-email-template-subject" contenteditable="true"><span contenteditable="false">表单名称</span> 提交成功通知</div>
+        <div class="notification-email-template-editor"><div contenteditable="true"><p>默认正文</p></div></div>
+        <button id="confirm">确认</button>
+      </article>
+    </section><script>
+      const toggle = document.querySelector('[role="switch"]')
+      const article = document.querySelector('article')
+      toggle.onclick = () => {
+        toggle.setAttribute('aria-checked', 'true')
+        article.hidden = false
+      }
+      // The variable editor retains its token model during native replacement,
+      // and the notification card restores its default when the title becomes empty.
+      const subjectEditor = document.querySelector('.notification-email-template-subject')
+      const defaultSubjectHtml = subjectEditor.innerHTML
+      let subjectValue = ${JSON.stringify(original.subject)}
+      subjectEditor.addEventListener('input', event => {
+        if (event.inputType.startsWith('delete')) {
+          subjectValue = subjectEditor.textContent
+          if (!subjectValue.trim()) {
+            subjectValue = ${JSON.stringify(original.subject)}
+            subjectEditor.innerHTML = defaultSubjectHtml
+          }
+        }
+        else if (event.inputType === 'insertText') {
+          subjectValue += event.data || ''
+          subjectEditor.textContent = subjectValue
+          const selection = getSelection()
+          selection.selectAllChildren(subjectEditor)
+          selection.collapseToEnd()
+        }
+      })
+      // Match MessageVariableInput's paste handler, which replaces the whole
+      // selected range before notifying the parent of the final nonempty value.
+      subjectEditor.addEventListener('paste', event => {
+        event.preventDefault()
+        const range = getSelection().getRangeAt(0)
+        if (!subjectEditor.contains(range.commonAncestorContainer)) throw new Error('title selection must be inside its editor')
+        range.deleteContents()
+        range.insertNode(document.createTextNode(event.clipboardData.getData('text/plain')))
+        subjectValue = subjectEditor.textContent
+      })
+      const editor = document.querySelector('.notification-email-template-editor [contenteditable]')
+      editor.addEventListener('paste', event => {
+        event.preventDefault()
+        editor.innerHTML = event.clipboardData.getData('text/html')
+      })
+      document.querySelector('#confirm').onclick = async () => {
+        const subject = subjectValue
+        const body = editor.innerHTML
+        await fetch('/api/be/form/${formId}/config', {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ notification_config: { ${key}: {
+            enabled: 1, notifications: [{ scenario_code: 'submitted_success', channel: 'email', subject, body,
+              ...${JSON.stringify(recipients ? { recipients } : {})} }],
+          } } }),
+        })
+        await fetch('/api/be/form/${formId}').then(response => response.json())
+        article.replaceChildren()
+        const heading = document.createElement('h3')
+        heading.textContent = subject
+        const display = document.createElement('div')
+        display.className = 'fb-richtext-view'
+        display.innerHTML = body
+        article.append(heading, display)
+      }
+    </script></body></html>`
+    await page.route('https://notification.test/**', async route => {
+      const request = route.request()
+      const path = new URL(request.url()).pathname
+      if (path === '/') return route.fulfill({ contentType: 'text/html', body: html })
+      let data
+      if (path.endsWith('/config') && request.method() === 'PUT') {
+        writes.push(request.postDataJSON())
+        saved = writes.at(-1).notification_config[key]
+        data = {}
+      } else if (path.endsWith('/notification/template')) {
+        data = { original: { [audience]: { submitted_success: { email: original } } },
+          customized: saved ? { [audience]: { submitted_success: { email: saved.notifications[0] } } } : {} }
+      } else if (path === '/api/base/dict/tree') {
+        data = { form_action_behavior: { children: [{ enum_value: 'submitted_success', enum_name: '提交成功' }] } }
+      } else if (path === '/api/be/form/' + formId) {
+        data = { form: { notification_config: saved ? { [key]: saved } : {} } }
+      } else throw new Error('Unexpected fixture request: ' + request.method() + ' ' + path)
+      await route.fulfill({ json: { code: 0, data } })
+    })
+    await page.goto('https://notification.test/')
+    const assertions = []
+    const configure = variant === 'manager' ? configureManagerNotification : configureAutomationNotification
+    const result = await runWithAssertionRecorder('form-all-fields-publish', item => assertions.push(item), () => configure({
+      page, formId, content,
+      readForm: () => page.evaluate(async id => (await fetch('/api/be/form/' + id).then(response => response.json())).data.form, formId),
+    }))
+    assert.equal(writes.length, 1, 'enabling must not require or introduce a separate config write')
+    assert.equal(result.savedParameters.enabled, 1)
+    assert.equal(result.subject, content.subject)
+    assert.equal(result.body, content.body)
+    assert.deepEqual(result.savedParameters, saved)
+    assert.deepEqual(assertions.filter(item => item.status === 'failed'), [])
+  } finally {
+    await browser.close()
+  }
+})
+
+test('draft readback normalizes scenario prefixes and recipient metadata but requires exact content and identity', () => {
+  const submitted = config()
+  const persisted = structuredClone(submitted)
+  persisted.enabled = '1'
+  persisted.notifications[0].scenario_code = 'form.submitted_success'
+  persisted.notifications[0].recipients.users[0].id = '42'
+  persisted.notifications[0].recipients.users[0].is_creator = 1
+  const validate = value => runWithAssertionRecorder('form-all-fields-publish', () => undefined,
+    () => assertNotificationPersistence(value, submitted, { variant: 'manager' }))
+  validate(persisted)
+  for (const field of ['subject', 'body']) {
+    for (const value of ['', '旧内容']) {
+      const invalid = structuredClone(persisted)
+      invalid.notifications[0][field] = value
+      assert.throws(() => validate(invalid), /不得为空|必须匹配本次保存内容/)
+    }
+  }
+  const missing = structuredClone(persisted)
+  missing.notifications = []
+  assert.throws(() => validate(missing), /不得丢失或新增规则/)
+  persisted.notifications[0].recipients.users[0].id = 99
+  assert.throws(() => validate(persisted), /不得改变触发、渠道或收件人身份/)
+})
 
 function validatePublished(fixture, variant = 'manager') {
   return runWithAssertionRecorder('form-all-fields-publish', () => undefined, () => (

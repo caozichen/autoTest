@@ -4,8 +4,8 @@ import { clickWhenReady, waitForUiReady } from './ui-readiness.mjs'
 
 const ACTION_TIMEOUT_MS = 30_000
 const EMAIL_LABEL = /^(邮件|郵件|電郵|Email)$/i
-const SCENARIO_LABEL = /^(触发条件|觸發條件|Trigger condition)$/i
-const TYPE_LABEL = /^(通知类型|通知類型|通知方式|Notify type|Notification type)$/i
+const SCENARIO_LABEL = /^(触发条件|觸發條件|Trigger condition)\s*\*?$/i
+const TYPE_LABEL = /^(通知类型|通知類型|通知方式|Notify type|Notification type)\s*\*?$/i
 const CONFIRM_LABEL = /^(确认|確認|Confirm)$/i
 const EDIT_LABEL = /^(编辑|編輯|Edit)$/i
 // MessageAutomationNoticeSection only imports templates in the form scope;
@@ -143,6 +143,25 @@ function notificationDefaultParameters(notification, variant) {
   return result
 }
 
+export function assertNotificationPersistence(actual, submitted, { variant, label = '通知独立回读' }) {
+  flowExpect(Object.hasOwn(VARIANTS, variant), '通知回读必须明确通知类型').toBe(true)
+  expect(Number(actual?.enabled), `${label}开关应与保存请求一致`).toBe(Number(submitted?.enabled))
+  flowExpect(Number(actual?.enabled), `${label}开关必须持久化`).toBe(Number(submitted?.enabled))
+  flowExpect(Array.isArray(submitted?.notifications), `${label}必须有保存规则作为独立基线`).toBe(true)
+  flowExpect(actual?.notifications, `${label}不得丢失或新增规则`).toHaveLength(submitted.notifications.length)
+  for (const [index, expected] of submitted.notifications.entries()) {
+    const rule = actual.notifications[index]
+    const identity = notificationDefaultParameters(rule, variant)
+    expect(identity, `${label}第 ${index + 1} 条规则应保持触发、渠道和收件人`).toEqual(notificationDefaultParameters(expected, variant))
+    flowExpect(identity, `${label}不得改变触发、渠道或收件人身份`).toEqual(notificationDefaultParameters(expected, variant))
+    for (const field of ['subject', 'body']) {
+      flowExpect(String(rule?.[field] ?? '').trim(), `${label}邮件 ${field} 不得为空`).toMatch(/\S+/)
+      expect(rule[field], `${label}邮件 ${field} 应完整持久化`).toBe(expected[field])
+      flowExpect(rule[field], `${label}邮件 ${field} 必须匹配本次保存内容`).toBe(expected[field])
+    }
+  }
+}
+
 function resolveNotificationDefaults({ config, template, dictionary, display, variant }) {
   const audience = variant === 'manager' ? 'admin' : 'user'
   let rules = config?.notifications
@@ -232,14 +251,11 @@ async function configureNotification({ page, formId, content, readForm, logger =
   const initialForm = typeof readForm === 'function'
     ? await readForm()
     : (await readNotificationApi(page, `be/form/${encodeURIComponent(formId)}`, `${label}初始配置`))?.form
-  let initialConfig = initialForm?.notification_config?.[key]
+  const initialConfig = initialForm?.notification_config?.[key]
   if (await toggle.getAttribute('aria-checked') !== 'true') {
-    const [response] = await actionWithResponses(page, [{ method: 'PUT', path: `/be/form/${formId}/config` }], () => clickWhenReady(toggle))
-    await requireBusinessResponse(response, `开启${label}`)
-    const payload = response.request().postDataJSON()
-    expect(Number(payload?.notification_config?.[key]?.enabled), `${label}开关应真实保存 enabled=1`).toBe(1)
-    flowExpect(Number(payload?.notification_config?.[key]?.enabled), `${label}开关必须真实保存 enabled=1`).toBe(1)
-    if (!initialConfig?.notifications?.length) initialConfig = payload.notification_config[key]
+    // Enabling opens the editor; the config is saved only after Confirm.
+    // Assert enabled=1 together with the actual content in assertSavedNotification.
+    await clickWhenReady(toggle)
   }
   await expect(toggle, `${label}应显示开启状态`).toHaveAttribute('aria-checked', 'true')
   await flowExpect(toggle, `${label}必须显示开启状态`).toHaveAttribute('aria-checked', 'true')
@@ -269,8 +285,23 @@ async function configureNotification({ page, formId, content, readForm, logger =
     flowExpect(defaults.triggerCondition, '自动化通知界面必须保持提交成功').toMatch(/^(提交成功|Submitted successfully|Submission successful)$/i)
   }
   const subject = article.locator('.notification-email-template-subject')
-  await subject.fill(content.subject)
+  // Empty titles restore the default variable template. Replace the selection
+  // in one paste event through the editor's normal handler, without an empty update.
+  await clickWhenReady(subject)
+  await subject.evaluate((element, value) => {
+    element.focus()
+    const selection = window.getSelection()
+    const range = document.createRange()
+    range.selectNodeContents(element)
+    selection.removeAllRanges()
+    selection.addRange(range)
+    const clipboardData = new DataTransfer()
+    clipboardData.setData('text/plain', value)
+    element.dispatchEvent(new ClipboardEvent('paste', { clipboardData, bubbles: true, cancelable: true }))
+  }, content.subject)
+  await subject.press('Tab')
   await expect(subject, `${label}邮件标题应完整回显`).toHaveText(content.subject)
+  await flowExpect(subject, `${label}邮件标题必须完整替换默认内容才能保存`).toHaveText(content.subject)
   const bodyEditor = article.locator('.notification-email-template-editor [contenteditable="true"]')
   await flowExpect(bodyEditor, `${label}邮件正文必须只有一个编辑器`).toHaveCount(1)
   const editorBody = await fillNotificationBody(bodyEditor, content.body, label)
@@ -289,8 +320,9 @@ async function configureNotification({ page, formId, content, readForm, logger =
   })
   const detail = await requireBusinessResponse(detailResponse, `${label}保存后独立回读`)
   const persistedConfig = notificationFromPayload(detail, key)
-  expect(persistedConfig, `${label}独立回读必须与完整保存配置一致`).toEqual(submittedConfig)
-  flowExpect(persistedConfig, `${label}标题、富文本正文和默认参数必须持久化`).toEqual(submittedConfig)
+  assertNotificationPersistence(persistedConfig, submittedConfig, { variant, label: `${label}独立回读` })
+  const persistedTemplates = await readNotificationApi(page, `be/form/${encodeURIComponent(formId)}/notification/template`, `${label}保存后模板`)
+  assertPublishedNotification(persistedConfig, submittedConfig, persistedTemplates, { variant })
   await flowExpect(section.locator('.notification-email-template-subject'), `${label}保存后应退出编辑状态`).toHaveCount(0)
   const displayedBody = section.locator('article .fb-richtext-view')
   await expect(displayedBody, `${label}保存后应显示富文本正文`).toBeVisible()

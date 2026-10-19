@@ -6,7 +6,9 @@ import { expect as flowExpect } from './support/environment-timeouts.mjs'
 import { expect } from './support/recorded-expect.mjs'
 import { attachNetworkObserver } from './support/api-response-recorder.mjs'
 import { launchGoogleChrome } from './support/google-chrome.mjs'
+import { readResponseText, preserveMutationResponseBeforeNavigation } from './support/navigation-response-body.mjs'
 import { createFormEmailData } from './support/form-test-email.mjs'
+import { assertSubmissionQuotaPersistence } from './support/form-post-collection-settings.mjs'
 import {
   FIELD_TYPE_CODES,
   pageFieldKeysFor,
@@ -976,7 +978,7 @@ async function waitForPublicMutation(
   const responseOutcome = await responsePromise
   if (responseOutcome.error) throw responseOutcome.error
   const { response } = responseOutcome
-  const responseRead = await response.text().then(
+  const responseRead = await readResponseText(response).then(
     (text) => ({ text }),
     (error) => ({
       text: '',
@@ -1196,7 +1198,34 @@ async function assertVisibleSubmissionResult(
   await expect(page.getByRole('heading', { level: 1 }).first(), '提交后应显示结果页主标题').toBeVisible({
     timeout,
   })
+  const screen = page.locator('[data-submit-success-screen]')
+  await expect(screen, '提交结果必须显示唯一业务结果视图').toHaveCount(1, { timeout })
+  await expect(screen, '提交结果必须是成功态，读取失败标题不得当作提交成功').toHaveAttribute('data-submit-status', 'success', { timeout })
+  await flowExpect(screen, '提交结果读取失败时必须停止后续流程').toHaveAttribute('data-submit-status', 'success', { timeout })
   return result.getAttribute('submission-id')
+}
+
+function waitForSubmissionResultRead(page, publicOrigin, formId) {
+  return page.waitForResponse(response => {
+    const url = new URL(response.url())
+    const path = url.pathname.replace(/^\/api(?=\/)/, '')
+    return response.request().method() === 'GET' && url.origin === publicOrigin
+      && path.startsWith(`/f/form/${encodeURIComponent(formId)}/submission/`)
+      && !path.slice(`/f/form/${encodeURIComponent(formId)}/submission/`.length).includes('/')
+      && url.searchParams.get('with_answer') === '0'
+  }, { timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) })
+}
+
+async function assertSubmissionResultRead(response, { formId, submissionId, credential }) {
+  const body = await response.json()
+  flowExpect(response.ok(), '提交结果读取接口 HTTP 必须成功').toBe(true)
+  flowExpect(Number(body?.code), '提交结果读取接口业务码必须为 0').toBe(0)
+  flowExpect(String(body?.data?.submission?.form_id ?? ''), '结果接口必须返回本次提交的表单').toBe(formId)
+  flowExpect(String(body?.data?.submission?.id ?? ''), '结果接口必须返回本次提交的提报').toBe(submissionId)
+  // Never include credentials as assertion operands or ordinary run variables.
+  flowExpect(Boolean(credential && response.request().headers()['x-form-result-token'] === credential), '结果读取必须使用本次提交签发的临时凭证').toBe(true)
+  expect(Object.hasOwn(body.data, 'answers'), '普通结果页不得请求或返回完整答案').toBe(false)
+  return body.data
 }
 
 async function goToNextPage(page, publicOrigin, currentPage, logger, formId = FORM_ID, pageFieldKeys = PAGE_FIELD_KEYS) {
@@ -1397,6 +1426,23 @@ async function screenshotFailure(page, runId, artifactWriter) {
   )
 }
 
+export function assertSubmissionQuotaRejection(submission, expected) {
+  expect(submission.response.status(), '满额拦截接口 HTTP 状态应为 200').toBe(200)
+  flowExpect(submission.response.status(), '满额拦截接口 HTTP 状态必须为 200').toBe(200)
+  expect([40004, 800003], '第二次填写应返回数量不足或禁止新增的业务码')
+    .toContain(Number(submission.body?.code))
+  flowExpect([40004, 800003], '第二次填写必须返回数量不足或禁止新增的业务码')
+    .toContain(Number(submission.body?.code))
+  expect(submission.body?.message, '满额拦截接口应返回已保存的完整提示语').toBe(expected.message)
+  flowExpect(submission.body?.message, '数量限制业务提示必须逐字匹配配置').toBe(expected.message)
+  expect(submission.body?.data?.submission_id ?? submission.body?.data?.id ?? submission.body?.submission_id ?? '',
+    '满额拦截不应返回新的提报 ID').toBe('')
+  flowExpect(submission.body?.data?.submission_id ?? submission.body?.data?.id ?? submission.body?.submission_id ?? '',
+    '满额拦截不得返回新的提报 ID').toBe('')
+  expect(submission.body?.data?.result_token, '满额拦截不应签发成功结果凭证').toBeUndefined()
+  flowExpect(submission.body?.data?.result_token, '满额拦截不得签发成功结果凭证').toBeUndefined()
+}
+
 export async function run({
   scriptId = SCRIPT_ID,
   scriptName = scriptId,
@@ -1425,11 +1471,19 @@ export async function run({
   const configuredFormId = new URL(formUrl).searchParams.get('id')?.trim()
   if (!configuredFormId) throw new Error('公开表单路径必须包含非空 form ID')
   const linkedFormContract = parseFormLinkContract(variables.FORM_CONTRACT)
-  const data = createTestData()
+  const initialData = createTestData()
+  let activeRunId = initialData.runId
+  const submissionQuota = linkedFormContract?.settings?.submissionQuota
+  if (submissionQuota) {
+    flowExpect(submissionQuota.enabled, '联动数量限制必须开启').toBe(true)
+    flowExpect(submissionQuota.quota, '联动数量上限必须为 2').toBe(2)
+    flowExpect(submissionQuota.message, '联动已满提示必须记录且非空').toMatch(/\S+/)
+  }
   let browser
   let context
   let page
   let stopAbortClose = () => undefined
+  let stopPreservingSubmission = async () => undefined
   let networkObserver = {
     setPhase: () => undefined,
     stop: async () => undefined,
@@ -1437,7 +1491,7 @@ export async function run({
 
   try {
     throwIfRunAborted(signal)
-    const fixtures = await createUploadFixtures(data.runId, artifactWriter)
+    const initialFixtures = await createUploadFixtures(initialData.runId, artifactWriter)
     throwIfRunAborted(signal)
     logger('info', '已根据所选环境域名拼接公开表单地址', {
       scriptId,
@@ -1494,414 +1548,480 @@ export async function run({
       }
     })
 
-    networkObserver.setPhase('公开表单加载')
-    const publishedConfigResponsePromise = page.waitForResponse((response) => {
-      const url = new URL(response.url())
-      return url.origin === publicOrigin
-        && url.pathname.endsWith(`/f/form/${configuredFormId}`)
-        && response.request().method() === 'GET'
-    }, { timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) })
-    await page.goto(formUrl, { waitUntil: 'domcontentloaded' })
-    const publishedConfigResponse = await publishedConfigResponsePromise
-    expect(
-      publishedConfigResponse.ok(),
-      `公开表单配置接口应返回成功 HTTP 状态，实际 ${publishedConfigResponse.status()}`,
-    ).toBe(true)
-    const publishedConfigBody = await publishedConfigResponse.json().catch(() => null)
-    const publishedContract = assertPublishedFormContract(
-      publishedConfigBody,
-      configuredFormId,
-      linkedFormContract,
-    )
-    const FIELD_KEYS = publishedContract.fieldKeys
-    const PAGE_FIELD_KEYS = publishedContract.pageFieldKeys
-    const EXPECTED_FORM_TITLE = publishedContract.title
-    await expect(page, '公开表单应保持在所选环境对应域名').toHaveURL(new RegExp(`^${publicOrigin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/`))
-    expect(new URL(page.url()).searchParams.get('id'), '公开表单地址应保持为目标 form ID')
-      .toBe(configuredFormId)
-    await expect(page, '页面标题应与目标表单名称完全匹配').toHaveTitle(EXPECTED_FORM_TITLE)
-    await expect(page.getByText(EXPECTED_FORM_TITLE, { exact: true }), '页面中应显示目标表单名称').toBeVisible()
-    await expect(page.getByText(FORM_SUBTITLE, { exact: true }), '页面中应显示发布脚本配置的表单描述').toBeVisible()
-    for (const text of [FORM_CONTENT_HEADING, ...FORM_CONTENT_ITEMS]) {
-      await expect(page.getByText(text, { exact: true }), `页面中应显示填写须知“${text}”`).toBeVisible()
-    }
-    const pageLocale = await page.locator('html').getAttribute('lang')
-    logger('info', '目标公开表单加载完成，发布脚本契约断言执行完成', {
-      title: EXPECTED_FORM_TITLE,
-      formId: configuredFormId,
-      locale: pageLocale || 'unknown',
-      revisionNo: publishedContract.revisionNo,
-      requiredRootQuestionCount: publishedContract.requiredRootKeys.length,
-      dateRange: publishedContract.dateRange,
-    })
+    let completedSubmission
+    for (let attempt = 1; attempt <= (submissionQuota ? 2 : 1); attempt += 1) {
+      const isQuotaAttempt = attempt === 2
+      const data = attempt === 1 ? initialData : createTestData()
+      activeRunId = data.runId
+      const fixtures = attempt === 1 ? initialFixtures : await createUploadFixtures(data.runId, artifactWriter)
+      const setAttemptPhase = name => networkObserver.setPhase(`第 ${attempt} 次公开填写 · ${name}`)
+      logger('info', isQuotaAttempt ? '开始第二次完整填写，预期触发数量上限拦截' : '开始首次完整填写，预期提交成功', { attempt })
+      setAttemptPhase('公开表单加载')
+      const publishedConfigResponsePromise = page.waitForResponse((response) => {
+        const url = new URL(response.url())
+        return url.origin === publicOrigin
+          && url.pathname.endsWith(`/f/form/${configuredFormId}`)
+          && response.request().method() === 'GET'
+      }, { timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) })
+      await page.goto(formUrl, { waitUntil: 'domcontentloaded' })
+      const publishedConfigResponse = await publishedConfigResponsePromise
+      expect(
+        publishedConfigResponse.ok(),
+        `公开表单配置接口应返回成功 HTTP 状态，实际 ${publishedConfigResponse.status()}`,
+      ).toBe(true)
+      const publishedConfigBody = await publishedConfigResponse.json().catch(() => null)
+      const publishedContract = assertPublishedFormContract(
+        publishedConfigBody,
+        configuredFormId,
+        linkedFormContract,
+      )
+      if (submissionQuota) {
+        assertSubmissionQuotaPersistence(publishedConfigBody.data?.form?.submit_config?.submission_quota,
+          submissionQuota, `第 ${attempt} 次公开配置数量限制`)
+      }
+      const FIELD_KEYS = publishedContract.fieldKeys
+      const PAGE_FIELD_KEYS = publishedContract.pageFieldKeys
+      const EXPECTED_FORM_TITLE = publishedContract.title
+      await expect(page, '公开表单应保持在所选环境对应域名').toHaveURL(new RegExp(`^${publicOrigin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/`))
+      expect(new URL(page.url()).searchParams.get('id'), '公开表单地址应保持为目标 form ID')
+        .toBe(configuredFormId)
+      await expect(page, '页面标题应与目标表单名称完全匹配').toHaveTitle(EXPECTED_FORM_TITLE)
+      await expect(page.getByText(EXPECTED_FORM_TITLE, { exact: true }), '页面中应显示目标表单名称').toBeVisible()
+      await expect(page.getByText(FORM_SUBTITLE, { exact: true }), '页面中应显示发布脚本配置的表单描述').toBeVisible()
+      for (const text of [FORM_CONTENT_HEADING, ...FORM_CONTENT_ITEMS]) {
+        await expect(page.getByText(text, { exact: true }), `页面中应显示填写须知“${text}”`).toBeVisible()
+      }
+      const pageLocale = await page.locator('html').getAttribute('lang')
+      logger('info', '目标公开表单加载完成，发布脚本契约断言执行完成', {
+        title: EXPECTED_FORM_TITLE,
+        formId: configuredFormId,
+        locale: pageLocale || 'unknown',
+        revisionNo: publishedContract.revisionNo,
+        requiredRootQuestionCount: publishedContract.requiredRootKeys.length,
+        dateRange: publishedContract.dateRange,
+      })
 
-    networkObserver.setPhase('第 1 页空表校验')
-    await assertCurrentPage(page, 1, PAGE_FIELD_KEYS[0], PAGE_FIELD_LABELS[0], PAGE_CARD_COUNTS[0], logger)
-    await assertClientValidationBlocked(page, {
-      currentPage: 1,
-      expectedFields: PAGE_FIELD_KEYS[0].map((key, index) => ({ key, label: PAGE_FIELD_LABELS[0][index] })),
-      getMutationCount: () => pageValidationRequestCount,
-      pageFieldKeys: PAGE_FIELD_KEYS,
-      logger,
-    })
-    // Finish the old document's API bodies and images before intentionally
-    // replacing it. A quick reload can otherwise strand Chrome network events.
-    const initialNetworkComplete = await networkObserver.waitForIdle({ timeoutMs: scaleTimeout(NAVIGATION_TIMEOUT_MS), signal })
-    flowExpect(initialNetworkComplete, '空表校验后，公开页接口或资源必须加载完成后才能重新加载及继续提报').toBe(true)
-    logger('info', '公开页接口和资源已加载完成，准备重新加载以清除空表校验状态')
-    networkObserver.setPhase('第 1 页重新加载')
-    await page.reload({ waitUntil: 'domcontentloaded' })
-    await assertCurrentPage(page, 1, PAGE_FIELD_KEYS[0], PAGE_FIELD_LABELS[0], PAGE_CARD_COUNTS[0], logger)
+      setAttemptPhase('第 1 页空表校验')
+      await assertCurrentPage(page, 1, PAGE_FIELD_KEYS[0], PAGE_FIELD_LABELS[0], PAGE_CARD_COUNTS[0], logger)
+      await assertClientValidationBlocked(page, {
+        currentPage: 1,
+        expectedFields: PAGE_FIELD_KEYS[0].map((key, index) => ({ key, label: PAGE_FIELD_LABELS[0][index] })),
+        getMutationCount: () => pageValidationRequestCount,
+        pageFieldKeys: PAGE_FIELD_KEYS,
+        logger,
+      })
+      // Finish the old document's API bodies and images before intentionally
+      // replacing it. A quick reload can otherwise strand Chrome network events.
+      const initialNetworkComplete = await networkObserver.waitForIdle({ timeoutMs: scaleTimeout(NAVIGATION_TIMEOUT_MS), signal })
+      flowExpect(initialNetworkComplete, '空表校验后，公开页接口或资源必须加载完成后才能重新加载及继续提报').toBe(true)
+      logger('info', '公开页接口和资源已加载完成，准备重新加载以清除空表校验状态')
+      setAttemptPhase('第 1 页重新加载')
+      await page.reload({ waitUntil: 'domcontentloaded' })
+      await assertCurrentPage(page, 1, PAGE_FIELD_KEYS[0], PAGE_FIELD_LABELS[0], PAGE_CARD_COUNTS[0], logger)
 
-    networkObserver.setPhase('第 1 页填写')
-    const username = await assertField(page, FIELD_KEYS.username, '姓名')
-    await selectOption(page, username.locator('[role="combobox"]'), data.nameTitle, '姓名-称谓', logger)
-    await fillAndAssert(username.locator('input').first(), data.username, '姓名')
-    const mobile = await assertField(page, FIELD_KEYS.mobile, '手机号')
-    await expect(mobile.getByRole('combobox'), '手机号区号应为中国大陆 +86').toContainText('+86')
-    await fillAndAssert(mobile.locator('input').first(), data.invalidMobile, '手机号非法边界值')
-    const email = await assertField(page, FIELD_KEYS.email, '邮箱')
-    await fillAndAssert(email.locator('input').first(), data.email, '邮箱')
-    const idCard = await assertField(page, FIELD_KEYS.idCard, '身份证件')
-    await expect(idCard.getByRole('combobox'), '证件类型应为身份证').toContainText(/身份证|身份證/)
-    await fillAndAssert(idCard.locator('input').first(), data.idCard, '身份证件')
-    const landline = await assertField(page, FIELD_KEYS.landlinePhone, '固定电话')
-    await fillAndAssert(landline.locator('input').first(), data.landlinePhone, '固定电话')
-    const address = await assertField(page, FIELD_KEYS.address, '地址')
-    const addressSelects = address.locator('[role="combobox"]')
-    data.province = await selectOption(page, addressSelects.nth(0), ADDRESS_OPTION_ALIASES.province, '地址-省份', logger)
-    data.city = await selectOption(page, addressSelects.nth(1), ADDRESS_OPTION_ALIASES.city, '地址-城市', logger)
-    data.district = await selectOption(page, addressSelects.nth(2), ADDRESS_OPTION_ALIASES.district, '地址-区县', logger)
-    await fillAndAssert(address.locator('input').first(), data.street, '详细地址')
-    const birthday = await assertField(page, FIELD_KEYS.birthday, '生日')
-    const birthdaySelects = birthday.locator('[role="combobox"]')
-    await selectOption(page, birthdaySelects.nth(0), data.birthday.year, '生日-年份', logger)
-    await selectOption(page, birthdaySelects.nth(1), data.birthday.month, '生日-月份', logger)
-    await selectOption(page, birthdaySelects.nth(2), data.birthday.day, '生日-日期', logger)
+      setAttemptPhase('第 1 页填写')
+      const username = await assertField(page, FIELD_KEYS.username, '姓名')
+      await selectOption(page, username.locator('[role="combobox"]'), data.nameTitle, '姓名-称谓', logger)
+      await fillAndAssert(username.locator('input').first(), data.username, '姓名')
+      const mobile = await assertField(page, FIELD_KEYS.mobile, '手机号')
+      await expect(mobile.getByRole('combobox'), '手机号区号应为中国大陆 +86').toContainText('+86')
+      await fillAndAssert(mobile.locator('input').first(), data.invalidMobile, '手机号非法边界值')
+      const email = await assertField(page, FIELD_KEYS.email, '邮箱')
+      await fillAndAssert(email.locator('input').first(), data.email, '邮箱')
+      const idCard = await assertField(page, FIELD_KEYS.idCard, '身份证件')
+      await expect(idCard.getByRole('combobox'), '证件类型应为身份证').toContainText(/身份证|身份證/)
+      await fillAndAssert(idCard.locator('input').first(), data.idCard, '身份证件')
+      const landline = await assertField(page, FIELD_KEYS.landlinePhone, '固定电话')
+      await fillAndAssert(landline.locator('input').first(), data.landlinePhone, '固定电话')
+      const address = await assertField(page, FIELD_KEYS.address, '地址')
+      const addressSelects = address.locator('[role="combobox"]')
+      data.province = await selectOption(page, addressSelects.nth(0), ADDRESS_OPTION_ALIASES.province, '地址-省份', logger)
+      data.city = await selectOption(page, addressSelects.nth(1), ADDRESS_OPTION_ALIASES.city, '地址-城市', logger)
+      data.district = await selectOption(page, addressSelects.nth(2), ADDRESS_OPTION_ALIASES.district, '地址-区县', logger)
+      await fillAndAssert(address.locator('input').first(), data.street, '详细地址')
+      const birthday = await assertField(page, FIELD_KEYS.birthday, '生日')
+      const birthdaySelects = birthday.locator('[role="combobox"]')
+      await selectOption(page, birthdaySelects.nth(0), data.birthday.year, '生日-年份', logger)
+      await selectOption(page, birthdaySelects.nth(1), data.birthday.month, '生日-月份', logger)
+      await selectOption(page, birthdaySelects.nth(2), data.birthday.day, '生日-日期', logger)
 
-    networkObserver.setPhase('第 1 页服务端校验')
-    await assertRuleValidationBlocked(page, publicOrigin, {
-      currentPage: 1,
-      key: FIELD_KEYS.mobile,
-      label: '手机号',
-      formId: configuredFormId,
-      pageFieldKeys: PAGE_FIELD_KEYS,
-      logger,
-    })
-    await replaceWithUserInputAndBlur(mobile.locator('input').first(), data.mobile, '手机号合法恢复值')
-    await assertEmailFormatBoundary(email.locator('input').first(), data.invalidEmail, data.email)
-    logger('success', '邮箱格式边界已通过原生 email 控件验证，并已恢复合法值')
-    logger('info', '第 1 页联系人题目填写及逐项断言执行完成', {
-      nameTitle: data.nameTitle,
-      username: data.username,
-      mobile: data.mobile,
-      email: data.email,
-      address: `${data.province}/${data.city}/${data.district}/${data.street}`,
-      birthday: `${data.birthday.year}-${data.birthday.month}-${data.birthday.day}`,
-    })
-    networkObserver.setPhase('第 1 页翻页')
-    await goToNextPage(page, publicOrigin, 1, logger, configuredFormId, PAGE_FIELD_KEYS)
-
-    networkObserver.setPhase('第 2 页填写')
-    await assertCurrentPage(page, 2, PAGE_FIELD_KEYS[1], PAGE_FIELD_LABELS[1], PAGE_CARD_COUNTS[1], logger)
-    const input = await assertField(page, FIELD_KEYS.input, '单行文本')
-    const singleLineInput = input.locator('input').first()
-    await singleLineInput.fill(data.singleLineTooLong)
-    const overLimitSingleLineValue = await singleLineInput.inputValue()
-    expect(overLimitSingleLineValue.length, '单行文本控件不应把 21 字边界值扩展为更长内容').toBeLessThanOrEqual(21)
-    if (overLimitSingleLineValue.length <= 20) {
-      expect(overLimitSingleLineValue, '单行文本控件截断后应精确保留 20 字边界值').toBe(data.singleLine)
-      logger('success', '单行文本第 21 字已被控件按 max=20 截断')
-    }
-    const textarea = await assertField(page, FIELD_KEYS.textarea, '多行文本')
-    await fillAndAssert(textarea.locator('textarea').first(), data.multiLine, '多行文本')
-    const radio = await assertField(page, FIELD_KEYS.radio, '单项选择')
-    const radioControls = radio.locator('.fb-ui-radio-group-item')
-    await expect(radioControls, '单项选择应显示 3 个选项控件').toHaveCount(3)
-    const radioImages = radio.locator('img')
-    await expect(radioImages, '单项选择前两个选项应实际渲染图片').toHaveCount(2)
-    for (let index = 0; index < 2; index += 1) {
-      await expect(radioImages.nth(index), `单项选择第 ${index + 1} 张图片应包含地址`).toHaveAttribute('src', /^https?:\/\//)
-    }
-    const customizedRadio = radioControls.nth(2)
-    await clickWhenReady(customizedRadio)
-    await expect(customizedRadio, '单项选择“其他”应进入选中状态').toHaveAttribute('data-state', 'checked')
-    const customizedRadioInput = radio.locator('input[type="text"]:visible')
-    await expect(customizedRadioInput, '选择“其他”后应显示一个自定义文本输入框').toHaveCount(1)
-    await fillAndAssert(customizedRadioInput, '其他边界选项', '单项选择-其他')
-    const radioChoice = radioControls.nth(data.radioIndex)
-    await clickWhenReady(radioChoice)
-    await expect(radioChoice, '单项选择应选中“选项1”').toHaveAttribute('data-state', 'checked')
-    await expect(customizedRadio, '切回普通选项后“其他”应取消选中').toHaveAttribute('data-state', 'unchecked')
-    const checkbox = await assertField(page, FIELD_KEYS.checkbox, '多项选择')
-    const checkboxControls = checkbox.locator('.fb-ui-checkbox-root')
-    await expect(checkboxControls, '多项选择应显示 3 个选项控件').toHaveCount(3)
-    await clickWhenReady(checkboxControls.nth(0))
-    await expect(checkboxControls.nth(0), '多项选择应先只选 1 项以覆盖最小值下界').toHaveAttribute('data-state', 'checked')
-    const select = await assertField(page, FIELD_KEYS.select, '下拉选择')
-    await selectOption(page, select.locator('[role="combobox"]'), data.select, '下拉选择', logger)
-    const number = await assertField(page, FIELD_KEYS.number, '数字')
-    const numberInput = number.locator('input').first()
-    await fillAndAssert(numberInput, data.numberTooLarge, '数字上边界越界值')
-    const date = await assertField(page, FIELD_KEYS.date, '日期')
-    const dateTrigger = date.locator('button').first()
-    const datePlaceholder = (await dateTrigger.innerText()).trim()
-    await clickWhenReady(dateTrigger)
-    const dateOverlay = page.locator('[data-fb-date-overlay]')
-    await expect(dateOverlay, '日期题应打开日期面板').toBeVisible()
-    await expect(dateOverlay.locator('button[disabled]'), '日期面板应禁用范围外日期').not.toHaveCount(0)
-    await expect(dateOverlay.locator('button:not([disabled])'), '日期面板应保留范围内可选日期').not.toHaveCount(0)
-    await clickWhenReady(dateOverlay.locator('button.fb-ring-1:not([disabled])'))
-    await expect.poll(async () => (await dateTrigger.innerText()).trim(), {
-      message: '日期题选择日期后应更新回显',
-    }).not.toBe(datePlaceholder)
-    data.selectedDate = (await dateTrigger.innerText()).trim()
-    const time = await assertField(page, FIELD_KEYS.time, '时间')
-    const timeTrigger = time.locator('button').first()
-    const timePlaceholder = (await timeTrigger.innerText()).trim()
-    await clickWhenReady(timeTrigger)
-    const timePanel = page.locator('.fb-timepicker-container:visible')
-    await expect(timePanel, '时间题应打开时间面板').toBeVisible()
-    const timeActions = timePanel.locator('button.fb-h-7.fb-min-w-14')
-    await expect(timeActions, '时间面板应显示设为当前时间和确认两个操作').toHaveCount(2)
-    await clickWhenReady(timeActions.nth(0))
-    await clickWhenReady(timeActions.nth(1))
-    await expect(timePanel, '确认时间后时间面板应关闭').toBeHidden()
-    await expect.poll(async () => (await timeTrigger.innerText()).trim(), {
-      message: '时间题选择时间后应更新回显',
-    }).not.toBe(timePlaceholder)
-    data.selectedTime = (await timeTrigger.innerText()).trim()
-    const imageUpload = await assertField(page, FIELD_KEYS.imageUpload, '图片上传')
-    await uploadAndAssert(imageUpload, fixtures.imagePath, '图片上传')
-    const fileUpload = await assertField(page, FIELD_KEYS.fileUpload, '文件上传')
-    await uploadAndAssert(fileUpload, fixtures.filePath, '文件上传')
-
-    networkObserver.setPhase('第 2 页规则校验')
-    if (overLimitSingleLineValue.length > 20) {
+      setAttemptPhase('第 1 页服务端校验')
       await assertRuleValidationBlocked(page, publicOrigin, {
-        currentPage: 2,
-        key: FIELD_KEYS.input,
-        label: '单行文本 21 字边界',
+        currentPage: 1,
+        key: FIELD_KEYS.mobile,
+        label: '手机号',
         formId: configuredFormId,
         pageFieldKeys: PAGE_FIELD_KEYS,
         logger,
       })
-      await replaceWithUserInputAndBlur(singleLineInput, data.singleLine, '单行文本 20 字合法上边界')
-    }
-    await assertRuleValidationBlocked(page, publicOrigin, {
-      currentPage: 2,
-      key: FIELD_KEYS.checkbox,
-      label: '多项选择仅 1 项',
-      formId: configuredFormId,
-      pageFieldKeys: PAGE_FIELD_KEYS,
-      logger,
-    })
-    await clickWhenReady(checkboxControls.nth(1))
-    await expect(checkbox.locator('.fb-ui-checkbox-root[data-state="checked"]'), '多项选择选 2 项应达到合法最小边界').toHaveCount(2)
-    await clickWhenReady(checkboxControls.nth(2))
-    await expect(checkbox.locator('.fb-ui-checkbox-root[data-state="checked"]'), '多项选择选满 3 项应达到合法最大边界').toHaveCount(3)
+      await replaceWithUserInputAndBlur(mobile.locator('input').first(), data.mobile, '手机号合法恢复值')
+      await assertEmailFormatBoundary(email.locator('input').first(), data.invalidEmail, data.email)
+      logger('success', '邮箱格式边界已通过原生 email 控件验证，并已恢复合法值')
+      logger('info', '第 1 页联系人题目填写及逐项断言执行完成', {
+        nameTitle: data.nameTitle,
+        username: data.username,
+        mobile: data.mobile,
+        email: data.email,
+        address: `${data.province}/${data.city}/${data.district}/${data.street}`,
+        birthday: `${data.birthday.year}-${data.birthday.month}-${data.birthday.day}`,
+      })
+      setAttemptPhase('第 1 页翻页')
+      await goToNextPage(page, publicOrigin, 1, logger, configuredFormId, PAGE_FIELD_KEYS)
 
-    await assertRuleValidationBlocked(page, publicOrigin, {
-      currentPage: 2,
-      key: FIELD_KEYS.number,
-      label: '数字 100.01 越过上边界',
-      formId: configuredFormId,
-      pageFieldKeys: PAGE_FIELD_KEYS,
-      logger,
-    })
-    await replaceWithUserInputAndBlur(numberInput, data.number, '数字 100.00 合法上边界')
-    logger('info', '第 2 页通用题目填写及逐项断言执行完成', {
-      radio: data.radio,
-      checkbox: data.checkbox,
-      select: data.select,
-      number: data.number,
-      date: data.selectedDate,
-      time: data.selectedTime,
-      imageFixture: fixtures.imagePath,
-      fileFixture: fixtures.filePath,
-    })
-    networkObserver.setPhase('第 2 页翻页')
-    await goToNextPage(page, publicOrigin, 2, logger, configuredFormId, PAGE_FIELD_KEYS)
-
-    networkObserver.setPhase('跨页答案保持')
-    await assertCurrentPage(page, 3, PAGE_FIELD_KEYS[2], PAGE_FIELD_LABELS[2], PAGE_CARD_COUNTS[2], logger)
-    await goToPreviousPage(page, 3, logger, PAGE_FIELD_KEYS)
-    await assertCurrentPage(page, 2, PAGE_FIELD_KEYS[1], PAGE_FIELD_LABELS[1], PAGE_CARD_COUNTS[1], logger)
-    await expect(fieldCard(page, FIELD_KEYS.input).locator('input').first(), '跨页返回后单行文本 20 字边界答案不应丢失')
-      .toHaveValue(data.singleLine)
-    await expect(fieldCard(page, FIELD_KEYS.textarea).locator('textarea').first(), '跨页返回后多行文本答案不应丢失')
-      .toHaveValue(data.multiLine)
-    await expect(fieldCard(page, FIELD_KEYS.number).locator('input').first(), '跨页返回后数字上边界答案不应丢失')
-      .toHaveValue(data.number)
-    await expect(fieldCard(page, FIELD_KEYS.checkbox).locator('.fb-ui-checkbox-root[data-state="checked"]'), '跨页返回后多选最大边界答案不应丢失')
-      .toHaveCount(3)
-    await expect(fieldCard(page, FIELD_KEYS.imageUpload).locator('.fb-runtime-upload-image-preview img'), '跨页返回后图片上传结果不应丢失')
-      .toHaveAttribute('alt', fixtures.imagePath.split(/[\\/]/).pop())
-    await expect(fieldCard(page, FIELD_KEYS.fileUpload), '跨页返回后文件上传结果不应丢失')
-      .toContainText(fixtures.filePath.split(/[\\/]/).pop())
-    logger('success', '上一页/下一页往返后，文本、选择、数字和上传答案均保持')
-    await goToNextPage(page, publicOrigin, 2, logger, configuredFormId, PAGE_FIELD_KEYS)
-    await assertCurrentPage(page, 3, PAGE_FIELD_KEYS[2], PAGE_FIELD_LABELS[2], PAGE_CARD_COUNTS[2], logger)
-    networkObserver.setPhase('第 3 页空表校验')
-    await assertClientValidationBlocked(page, {
-      currentPage: 3,
-      expectedFields: [
-        { key: FIELD_KEYS.cascader, label: '级联选择' },
-        { key: FIELD_KEYS.signature, label: '手写签名' },
-        { key: FIELD_KEYS.matrix, label: '矩阵题' },
-        { key: FIELD_KEYS.matrixChoice, label: '矩阵选择' },
-        { key: FIELD_KEYS.ranking, label: '排序题' },
-        { key: FIELD_KEYS.rating, label: '评分题' },
-        { key: FIELD_KEYS.nps, label: 'NPS' },
-      ],
-      getMutationCount: () => submissionRequestCount,
-      mutationLabel: '最终提交',
-      pageFieldKeys: PAGE_FIELD_KEYS,
-      action: () => clickWhenReady(page.locator('.fb-runtime-submit-button-wrap button.fb-runtime-submit-button')),
-      logger,
-    })
-    await expect(fieldCard(page, FIELD_KEYS.fieldGroup).locator('.fb-runtime-field-error'), '空题组实例应只拦截必填的姓名和手机号，邮箱保持可选')
-      .toHaveCount(2)
-    networkObserver.setPhase('第 3 页填写')
-    const cascader = await assertField(page, FIELD_KEYS.cascader, '级联选择')
-    const cascaderTrigger = cascader.locator('.fb-runtime-cascader-trigger')
-    await selectCascaderPath(page, cascaderTrigger, data.cascader, logger)
-    const signature = await assertField(page, FIELD_KEYS.signature, '手写签名')
-    await drawSignature(page, signature, logger)
-    const fieldGroup = await assertField(page, FIELD_KEYS.fieldGroup, '题组')
-    const groupInstances = fieldGroup.locator('.fb-runtime-field-group-instance')
-    await expect(groupInstances, '题组应默认显示一个信息实例').toHaveCount(1)
-    const groupContent = groupInstances.first().locator('.fb-runtime-field-group-instance-content')
-    await expect(groupContent, '题组实例内容应可见').toBeVisible()
-    const groupInputs = groupContent.locator('input')
-    await expect(groupInputs, '题组实例应包含姓名、手机号和邮箱三个输入控件').toHaveCount(3)
-    await fillAndAssert(groupInputs.nth(0), data.groupUsername, '题组-姓名')
-    await expect(groupContent.getByRole('combobox'), '题组手机号区号应为中国大陆 +86').toContainText('+86')
-    await fillAndAssert(groupInputs.nth(1), data.groupMobile, '题组-手机号')
-    await fillAndAssert(groupInputs.nth(2), data.groupEmail, '题组-邮箱')
-    await assertField(page, FIELD_KEYS.description, '描述说明')
-    await assertField(page, FIELD_KEYS.divider, '分割线')
-    const matrix = await assertField(page, FIELD_KEYS.matrix, '矩阵题')
-    const matrixInputs = matrix.locator('tbody input[type="text"]')
-    await expect(matrixInputs, '矩阵题应有 3×3 共 9 个输入格').toHaveCount(9)
-    for (let row = 0; row < 3; row += 1) {
-      for (let column = 0; column < 3; column += 1) {
-        const value = data.matrix[row][column]
-        const cell = matrixInputs.nth(row * 3 + column)
-        await cell.fill(value)
-        await expect(cell, `矩阵题“题目${row + 1}/项目${column + 1}”应回显匹配答案`).toHaveValue(value)
+      setAttemptPhase('第 2 页填写')
+      await assertCurrentPage(page, 2, PAGE_FIELD_KEYS[1], PAGE_FIELD_LABELS[1], PAGE_CARD_COUNTS[1], logger)
+      const input = await assertField(page, FIELD_KEYS.input, '单行文本')
+      const singleLineInput = input.locator('input').first()
+      await singleLineInput.fill(data.singleLineTooLong)
+      const overLimitSingleLineValue = await singleLineInput.inputValue()
+      expect(overLimitSingleLineValue.length, '单行文本控件不应把 21 字边界值扩展为更长内容').toBeLessThanOrEqual(21)
+      if (overLimitSingleLineValue.length <= 20) {
+        expect(overLimitSingleLineValue, '单行文本控件截断后应精确保留 20 字边界值').toBe(data.singleLine)
+        logger('success', '单行文本第 21 字已被控件按 max=20 截断')
       }
-    }
-    const matrixChoice = await assertField(page, FIELD_KEYS.matrixChoice, '矩阵选择')
-    const matrixRadios = matrixChoice.getByRole('radio')
-    await expect(matrixRadios, '矩阵选择应有 3×3 共 9 个选项').toHaveCount(9)
-    for (const index of data.matrixChoiceIndexes) {
-      await clickWhenReady(matrixRadios.nth(index))
-      await expect(matrixRadios.nth(index), `矩阵选择第 ${Math.floor(index / 3) + 1} 行应选中目标列`).toBeChecked()
-    }
-    const ranking = await assertField(page, FIELD_KEYS.ranking, '排序题')
-    await rankOptions(ranking, data.ranking)
-    const rankedLabels = await ranking.locator('.fb-runtime-ranking-ranked-list .fb-runtime-ranking-label').allTextContents()
-    expect(rankedLabels.map((value) => value.trim()), '排序题顺序应与测试数据完全匹配').toEqual(data.ranking)
-    const rating = await assertField(page, FIELD_KEYS.rating, '评分题')
-    const ratingButtons = rating.locator('button.rating-item')
-    await expect(ratingButtons, '评分题应显示 5 个评分按钮').toHaveCount(5)
-    await clickWhenReady(ratingButtons.first())
-    await expect(ratingButtons.first().locator('.rating-icon--accent'), '评分题应支持选择 1 分下边界').toBeVisible()
-    await clickWhenReady(ratingButtons.nth(data.rating - 1))
-    await expect(ratingButtons.nth(data.rating - 1).locator('.rating-icon--accent'), '评分题应选择 5 分').toBeVisible()
-    const nps = await assertField(page, FIELD_KEYS.nps, 'NPS')
-    const npsButtons = nps.locator('button.nps-scale__score-btn')
-    await expect(npsButtons, 'NPS 应显示 1 到 10 共 10 个分值').toHaveCount(10)
-    const npsMinimumButton = npsButtons.filter({ hasText: /^1$/ })
-    await clickWhenReady(npsMinimumButton)
-    await expect(npsMinimumButton, 'NPS 应支持选择 1 分下边界').toHaveClass(/fb-text-white/)
-    const npsButton = nps.locator('button.nps-scale__score-btn').filter({ hasText: new RegExp(`^${data.nps}$`) })
-    await clickWhenReady(npsButton)
-    await expect(npsButton, 'NPS 应支持选择 10 分上边界').toHaveClass(/fb-text-white/)
-    await expect(npsMinimumButton, '选择 NPS 10 分后，1 分应取消选中').not.toHaveClass(/fb-text-white/)
-    logger('info', '第 3 页高级题目和题组填写及逐项断言执行完成', {
-      cascader: data.cascader,
-      groupUsername: data.groupUsername,
-      groupMobile: data.groupMobile,
-      groupEmail: data.groupEmail,
-      matrixCells: 9,
-      matrixChoice: ['题目1/选项1', '题目2/选项2', '题目3/选项3'],
-      ranking: data.ranking,
-      rating: data.rating,
-      nps: data.nps,
-    })
+      const textarea = await assertField(page, FIELD_KEYS.textarea, '多行文本')
+      await fillAndAssert(textarea.locator('textarea').first(), data.multiLine, '多行文本')
+      const radio = await assertField(page, FIELD_KEYS.radio, '单项选择')
+      const radioControls = radio.locator('.fb-ui-radio-group-item')
+      await expect(radioControls, '单项选择应显示 3 个选项控件').toHaveCount(3)
+      const radioImages = radio.locator('img')
+      await expect(radioImages, '单项选择前两个选项应实际渲染图片').toHaveCount(2)
+      for (let index = 0; index < 2; index += 1) {
+        await expect(radioImages.nth(index), `单项选择第 ${index + 1} 张图片应包含地址`).toHaveAttribute('src', /^https?:\/\//)
+      }
+      const customizedRadio = radioControls.nth(2)
+      await clickWhenReady(customizedRadio)
+      await expect(customizedRadio, '单项选择“其他”应进入选中状态').toHaveAttribute('data-state', 'checked')
+      const customizedRadioInput = radio.locator('input[type="text"]:visible')
+      await expect(customizedRadioInput, '选择“其他”后应显示一个自定义文本输入框').toHaveCount(1)
+      await fillAndAssert(customizedRadioInput, '其他边界选项', '单项选择-其他')
+      const radioChoice = radioControls.nth(data.radioIndex)
+      await clickWhenReady(radioChoice)
+      await expect(radioChoice, '单项选择应选中“选项1”').toHaveAttribute('data-state', 'checked')
+      await expect(customizedRadio, '切回普通选项后“其他”应取消选中').toHaveAttribute('data-state', 'unchecked')
+      const checkbox = await assertField(page, FIELD_KEYS.checkbox, '多项选择')
+      const checkboxControls = checkbox.locator('.fb-ui-checkbox-root')
+      await expect(checkboxControls, '多项选择应显示 3 个选项控件').toHaveCount(3)
+      await clickWhenReady(checkboxControls.nth(0))
+      await expect(checkboxControls.nth(0), '多项选择应先只选 1 项以覆盖最小值下界').toHaveAttribute('data-state', 'checked')
+      const select = await assertField(page, FIELD_KEYS.select, '下拉选择')
+      await selectOption(page, select.locator('[role="combobox"]'), data.select, '下拉选择', logger)
+      const number = await assertField(page, FIELD_KEYS.number, '数字')
+      const numberInput = number.locator('input').first()
+      await fillAndAssert(numberInput, data.numberTooLarge, '数字上边界越界值')
+      const date = await assertField(page, FIELD_KEYS.date, '日期')
+      const dateTrigger = date.locator('button').first()
+      const datePlaceholder = (await dateTrigger.innerText()).trim()
+      await clickWhenReady(dateTrigger)
+      const dateOverlay = page.locator('[data-fb-date-overlay]')
+      await expect(dateOverlay, '日期题应打开日期面板').toBeVisible()
+      await expect(dateOverlay.locator('button[disabled]'), '日期面板应禁用范围外日期').not.toHaveCount(0)
+      await expect(dateOverlay.locator('button:not([disabled])'), '日期面板应保留范围内可选日期').not.toHaveCount(0)
+      await clickWhenReady(dateOverlay.locator('button.fb-ring-1:not([disabled])'))
+      await expect.poll(async () => (await dateTrigger.innerText()).trim(), {
+        message: '日期题选择日期后应更新回显',
+      }).not.toBe(datePlaceholder)
+      data.selectedDate = (await dateTrigger.innerText()).trim()
+      const time = await assertField(page, FIELD_KEYS.time, '时间')
+      const timeTrigger = time.locator('button').first()
+      const timePlaceholder = (await timeTrigger.innerText()).trim()
+      await clickWhenReady(timeTrigger)
+      const timePanel = page.locator('.fb-timepicker-container:visible')
+      await expect(timePanel, '时间题应打开时间面板').toBeVisible()
+      const timeActions = timePanel.locator('button.fb-h-7.fb-min-w-14')
+      await expect(timeActions, '时间面板应显示设为当前时间和确认两个操作').toHaveCount(2)
+      await clickWhenReady(timeActions.nth(0))
+      await clickWhenReady(timeActions.nth(1))
+      await expect(timePanel, '确认时间后时间面板应关闭').toBeHidden()
+      await expect.poll(async () => (await timeTrigger.innerText()).trim(), {
+        message: '时间题选择时间后应更新回显',
+      }).not.toBe(timePlaceholder)
+      data.selectedTime = (await timeTrigger.innerText()).trim()
+      const imageUpload = await assertField(page, FIELD_KEYS.imageUpload, '图片上传')
+      await uploadAndAssert(imageUpload, fixtures.imagePath, '图片上传')
+      const fileUpload = await assertField(page, FIELD_KEYS.fileUpload, '文件上传')
+      await uploadAndAssert(fileUpload, fixtures.filePath, '文件上传')
 
-    networkObserver.setPhase('最终提交')
-    logger('info', '所有题目填写完成，点击“提交”并等待提交接口响应')
-    const submission = await waitForPublicMutation(
-      page,
-      publicOrigin,
-      `/f/form/${configuredFormId}/submission`,
-      () => clickWhenReady(page.locator('.fb-runtime-submit-button-wrap button.fb-runtime-submit-button')),
-      '提交表单',
-      { expectBusinessSuccess: false },
-    )
-    const requestPayload = parseSubmissionRequestPayload(submission.response.request())
-    const payloadAssertion = assertSubmissionPayload(requestPayload, data, publishedContract)
-    const responseSubmissionId = String(
-      submission.body?.data?.submission_id
-      ?? submission.body?.data?.id
-      ?? submission.body?.submission_id
-      ?? '',
-    )
-    networkObserver.setPhase('提交结果验证')
-    await expect(page, '提交后应进入普通表单结果页').toHaveURL(SUBMISSION_RESULT_URL_PATTERN, {
-      timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS),
-    })
-    const renderedSubmissionId = await assertVisibleSubmissionResult(page, configuredFormId)
-    if (responseSubmissionId) {
-      expect(renderedSubmissionId, '结果页组件的提交 ID 应与提交接口响应一致').toBe(responseSubmissionId)
-    }
-    const submissionId = responseSubmissionId || renderedSubmissionId || ''
-    expect(authorizationLeaks, '公开表单域名的所有请求都不应携带后台环境 Token').toEqual([])
-    expect(publicRequestCount, '应观察到公开表单域名的业务请求').toBeGreaterThan(0)
-    expect(submissionRequestCount, '必填失败不应误提交，整个脚本只应产生一次最终提交请求').toBe(1)
-    logger('success', '新表单提交成功，题目、答案和提交请求业务断言执行完成', {
-      formId: configuredFormId,
-      submissionId: submissionId || '响应未返回可识别 ID',
-      publicRequestCount,
-      pageValidationRequestCount,
-      submissionRequestCount,
-      assertedAnswerFieldCount: payloadAssertion.answerFieldCount,
-      indexedSubmissionFieldCount: payloadAssertion.indexedFieldCount,
-      authorizationLeakCount: authorizationLeaks.length,
-      token: '[REDACTED]',
-    })
+      setAttemptPhase('第 2 页规则校验')
+      if (overLimitSingleLineValue.length > 20) {
+        await assertRuleValidationBlocked(page, publicOrigin, {
+          currentPage: 2,
+          key: FIELD_KEYS.input,
+          label: '单行文本 21 字边界',
+          formId: configuredFormId,
+          pageFieldKeys: PAGE_FIELD_KEYS,
+          logger,
+        })
+        await replaceWithUserInputAndBlur(singleLineInput, data.singleLine, '单行文本 20 字合法上边界')
+      }
+      await assertRuleValidationBlocked(page, publicOrigin, {
+        currentPage: 2,
+        key: FIELD_KEYS.checkbox,
+        label: '多项选择仅 1 项',
+        formId: configuredFormId,
+        pageFieldKeys: PAGE_FIELD_KEYS,
+        logger,
+      })
+      await clickWhenReady(checkboxControls.nth(1))
+      await expect(checkbox.locator('.fb-ui-checkbox-root[data-state="checked"]'), '多项选择选 2 项应达到合法最小边界').toHaveCount(2)
+      await clickWhenReady(checkboxControls.nth(2))
+      await expect(checkbox.locator('.fb-ui-checkbox-root[data-state="checked"]'), '多项选择选满 3 项应达到合法最大边界').toHaveCount(3)
 
-    networkObserver.setPhase('运行结果汇总')
-    return {
-      scriptId,
-      scriptName,
-      formId: configuredFormId,
-      formUrl,
-      title: EXPECTED_FORM_TITLE,
-      submissionId,
-      submissionAssertions: createSubmissionAssertions(EXPECTED_FORM_TITLE, data),
-      status: 'submitted',
-      browser: 'chrome',
-      headless: true,
-      pageCount: 3,
-      fieldCount: PAGE_FIELD_LABELS.flat().length,
-      fieldKeys: FIELD_KEYS,
-      linkedContractUsed: Boolean(linkedFormContract),
-      publicRequestCount,
-      pageValidationRequestCount,
-      submissionRequestCount,
-      assertedAnswerFieldCount: payloadAssertion.answerFieldCount,
-      authorizationLeakCount: authorizationLeaks.length,
+      await assertRuleValidationBlocked(page, publicOrigin, {
+        currentPage: 2,
+        key: FIELD_KEYS.number,
+        label: '数字 100.01 越过上边界',
+        formId: configuredFormId,
+        pageFieldKeys: PAGE_FIELD_KEYS,
+        logger,
+      })
+      await replaceWithUserInputAndBlur(numberInput, data.number, '数字 100.00 合法上边界')
+      logger('info', '第 2 页通用题目填写及逐项断言执行完成', {
+        radio: data.radio,
+        checkbox: data.checkbox,
+        select: data.select,
+        number: data.number,
+        date: data.selectedDate,
+        time: data.selectedTime,
+        imageFixture: fixtures.imagePath,
+        fileFixture: fixtures.filePath,
+      })
+      setAttemptPhase('第 2 页翻页')
+      await goToNextPage(page, publicOrigin, 2, logger, configuredFormId, PAGE_FIELD_KEYS)
+
+      setAttemptPhase('跨页答案保持')
+      await assertCurrentPage(page, 3, PAGE_FIELD_KEYS[2], PAGE_FIELD_LABELS[2], PAGE_CARD_COUNTS[2], logger)
+      await goToPreviousPage(page, 3, logger, PAGE_FIELD_KEYS)
+      await assertCurrentPage(page, 2, PAGE_FIELD_KEYS[1], PAGE_FIELD_LABELS[1], PAGE_CARD_COUNTS[1], logger)
+      await expect(fieldCard(page, FIELD_KEYS.input).locator('input').first(), '跨页返回后单行文本 20 字边界答案不应丢失')
+        .toHaveValue(data.singleLine)
+      await expect(fieldCard(page, FIELD_KEYS.textarea).locator('textarea').first(), '跨页返回后多行文本答案不应丢失')
+        .toHaveValue(data.multiLine)
+      await expect(fieldCard(page, FIELD_KEYS.number).locator('input').first(), '跨页返回后数字上边界答案不应丢失')
+        .toHaveValue(data.number)
+      await expect(fieldCard(page, FIELD_KEYS.checkbox).locator('.fb-ui-checkbox-root[data-state="checked"]'), '跨页返回后多选最大边界答案不应丢失')
+        .toHaveCount(3)
+      await expect(fieldCard(page, FIELD_KEYS.imageUpload).locator('.fb-runtime-upload-image-preview img'), '跨页返回后图片上传结果不应丢失')
+        .toHaveAttribute('alt', fixtures.imagePath.split(/[\\/]/).pop())
+      await expect(fieldCard(page, FIELD_KEYS.fileUpload), '跨页返回后文件上传结果不应丢失')
+        .toContainText(fixtures.filePath.split(/[\\/]/).pop())
+      logger('success', '上一页/下一页往返后，文本、选择、数字和上传答案均保持')
+      await goToNextPage(page, publicOrigin, 2, logger, configuredFormId, PAGE_FIELD_KEYS)
+      await assertCurrentPage(page, 3, PAGE_FIELD_KEYS[2], PAGE_FIELD_LABELS[2], PAGE_CARD_COUNTS[2], logger)
+      setAttemptPhase('第 3 页空表校验')
+      await assertClientValidationBlocked(page, {
+        currentPage: 3,
+        expectedFields: [
+          { key: FIELD_KEYS.cascader, label: '级联选择' },
+          { key: FIELD_KEYS.signature, label: '手写签名' },
+          { key: FIELD_KEYS.matrix, label: '矩阵题' },
+          { key: FIELD_KEYS.matrixChoice, label: '矩阵选择' },
+          { key: FIELD_KEYS.ranking, label: '排序题' },
+          { key: FIELD_KEYS.rating, label: '评分题' },
+          { key: FIELD_KEYS.nps, label: 'NPS' },
+        ],
+        getMutationCount: () => submissionRequestCount,
+        mutationLabel: '最终提交',
+        pageFieldKeys: PAGE_FIELD_KEYS,
+        action: () => clickWhenReady(page.locator('.fb-runtime-submit-button-wrap button.fb-runtime-submit-button')),
+        logger,
+      })
+      await expect(fieldCard(page, FIELD_KEYS.fieldGroup).locator('.fb-runtime-field-error'), '空题组实例应只拦截必填的姓名和手机号，邮箱保持可选')
+        .toHaveCount(2)
+      setAttemptPhase('第 3 页填写')
+      const cascader = await assertField(page, FIELD_KEYS.cascader, '级联选择')
+      const cascaderTrigger = cascader.locator('.fb-runtime-cascader-trigger')
+      await selectCascaderPath(page, cascaderTrigger, data.cascader, logger)
+      const signature = await assertField(page, FIELD_KEYS.signature, '手写签名')
+      await drawSignature(page, signature, logger)
+      const fieldGroup = await assertField(page, FIELD_KEYS.fieldGroup, '题组')
+      const groupInstances = fieldGroup.locator('.fb-runtime-field-group-instance')
+      await expect(groupInstances, '题组应默认显示一个信息实例').toHaveCount(1)
+      const groupContent = groupInstances.first().locator('.fb-runtime-field-group-instance-content')
+      await expect(groupContent, '题组实例内容应可见').toBeVisible()
+      const groupInputs = groupContent.locator('input')
+      await expect(groupInputs, '题组实例应包含姓名、手机号和邮箱三个输入控件').toHaveCount(3)
+      await fillAndAssert(groupInputs.nth(0), data.groupUsername, '题组-姓名')
+      await expect(groupContent.getByRole('combobox'), '题组手机号区号应为中国大陆 +86').toContainText('+86')
+      await fillAndAssert(groupInputs.nth(1), data.groupMobile, '题组-手机号')
+      await fillAndAssert(groupInputs.nth(2), data.groupEmail, '题组-邮箱')
+      await assertField(page, FIELD_KEYS.description, '描述说明')
+      await assertField(page, FIELD_KEYS.divider, '分割线')
+      const matrix = await assertField(page, FIELD_KEYS.matrix, '矩阵题')
+      const matrixInputs = matrix.locator('tbody input[type="text"]')
+      await expect(matrixInputs, '矩阵题应有 3×3 共 9 个输入格').toHaveCount(9)
+      for (let row = 0; row < 3; row += 1) {
+        for (let column = 0; column < 3; column += 1) {
+          const value = data.matrix[row][column]
+          const cell = matrixInputs.nth(row * 3 + column)
+          await cell.fill(value)
+          await expect(cell, `矩阵题“题目${row + 1}/项目${column + 1}”应回显匹配答案`).toHaveValue(value)
+        }
+      }
+      const matrixChoice = await assertField(page, FIELD_KEYS.matrixChoice, '矩阵选择')
+      const matrixRadios = matrixChoice.getByRole('radio')
+      await expect(matrixRadios, '矩阵选择应有 3×3 共 9 个选项').toHaveCount(9)
+      for (const index of data.matrixChoiceIndexes) {
+        await clickWhenReady(matrixRadios.nth(index))
+        await expect(matrixRadios.nth(index), `矩阵选择第 ${Math.floor(index / 3) + 1} 行应选中目标列`).toBeChecked()
+      }
+      const ranking = await assertField(page, FIELD_KEYS.ranking, '排序题')
+      await rankOptions(ranking, data.ranking)
+      const rankedLabels = await ranking.locator('.fb-runtime-ranking-ranked-list .fb-runtime-ranking-label').allTextContents()
+      expect(rankedLabels.map((value) => value.trim()), '排序题顺序应与测试数据完全匹配').toEqual(data.ranking)
+      const rating = await assertField(page, FIELD_KEYS.rating, '评分题')
+      const ratingButtons = rating.locator('button.rating-item')
+      await expect(ratingButtons, '评分题应显示 5 个评分按钮').toHaveCount(5)
+      await clickWhenReady(ratingButtons.first())
+      await expect(ratingButtons.first().locator('.rating-icon--accent'), '评分题应支持选择 1 分下边界').toBeVisible()
+      await clickWhenReady(ratingButtons.nth(data.rating - 1))
+      await expect(ratingButtons.nth(data.rating - 1).locator('.rating-icon--accent'), '评分题应选择 5 分').toBeVisible()
+      const nps = await assertField(page, FIELD_KEYS.nps, 'NPS')
+      const npsButtons = nps.locator('button.nps-scale__score-btn')
+      await expect(npsButtons, 'NPS 应显示 1 到 10 共 10 个分值').toHaveCount(10)
+      const npsMinimumButton = npsButtons.filter({ hasText: /^1$/ })
+      await clickWhenReady(npsMinimumButton)
+      await expect(npsMinimumButton, 'NPS 应支持选择 1 分下边界').toHaveClass(/fb-text-white/)
+      const npsButton = nps.locator('button.nps-scale__score-btn').filter({ hasText: new RegExp(`^${data.nps}$`) })
+      await clickWhenReady(npsButton)
+      await expect(npsButton, 'NPS 应支持选择 10 分上边界').toHaveClass(/fb-text-white/)
+      await expect(npsMinimumButton, '选择 NPS 10 分后，1 分应取消选中').not.toHaveClass(/fb-text-white/)
+      logger('info', '第 3 页高级题目和题组填写及逐项断言执行完成', {
+        cascader: data.cascader,
+        groupUsername: data.groupUsername,
+        groupMobile: data.groupMobile,
+        groupEmail: data.groupEmail,
+        matrixCells: 9,
+        matrixChoice: ['题目1/选项1', '题目2/选项2', '题目3/选项3'],
+        ranking: data.ranking,
+        rating: data.rating,
+        nps: data.nps,
+      })
+
+      setAttemptPhase('最终提交')
+      logger('info', '所有题目填写完成，点击“提交”并等待提交接口响应')
+      stopPreservingSubmission = await preserveMutationResponseBeforeNavigation(page, {
+        origin: publicOrigin, path: `/f/form/${configuredFormId}/submission`,
+      })
+      const resultReadPromise = isQuotaAttempt ? null
+        : waitForSubmissionResultRead(page, publicOrigin, configuredFormId)
+          .then(response => ({ response }), error => ({ error }))
+      const submission = await waitForPublicMutation(
+        page,
+        publicOrigin,
+        `/f/form/${configuredFormId}/submission`,
+        () => clickWhenReady(page.locator('.fb-runtime-submit-button-wrap button.fb-runtime-submit-button')),
+        '提交表单',
+        { expectBusinessSuccess: false },
+      )
+      const requestPayload = parseSubmissionRequestPayload(submission.response.request())
+      const payloadAssertion = assertSubmissionPayload(requestPayload, data, publishedContract)
+      const responseSubmissionId = String(
+        submission.body?.data?.submission_id
+        ?? submission.body?.data?.id
+        ?? submission.body?.submission_id
+        ?? '',
+      )
+      if (isQuotaAttempt) {
+        assertSubmissionQuotaRejection(submission, submissionQuota)
+        const message = page.getByText(submissionQuota.message, { exact: true })
+        await flowExpect(message, '第二次填写应显示保存的完整已满提示').toBeVisible()
+        await expect(message, '页面已满提示应与配置及接口逐字一致').toHaveText(submissionQuota.message)
+        await flowExpect(page, '满额拦截后应停留在填写页').toHaveURL(formUrl)
+        await flowExpect(page.locator('[data-submit-status="success"]'), '满额拦截不得误显示提交成功态').toHaveCount(0)
+        flowExpect(submissionRequestCount, '两次填写应且只能各发送一次最终提交，不得重试').toBe(2)
+        flowExpect(authorizationLeaks, '满额验证的公开请求不得携带后台 Token').toEqual([])
+        flowExpect(await networkObserver.waitForIdle({ timeoutMs: scaleTimeout(NAVIGATION_TIMEOUT_MS), signal }),
+          '满额提示出现后接口正文和资源必须全部加载完成').toBe(true)
+        const artifact = await artifactWriter.captureScreenshot(page, 'screenshots/submission-quota-blocked.png',
+          { fullPage: true, animations: 'disabled' })
+        const quotaCheck = { status: 'blocked', quota: submissionQuota.quota, message: submissionQuota.message,
+          businessCode: Number(submission.body.code), attemptedSubmissions: submissionRequestCount,
+          acceptedSubmissionId: completedSubmission.submissionId, artifact }
+        await artifactWriter.writeFile('submission-quota-check.json', JSON.stringify(quotaCheck, null, 2),
+          { encoding: 'utf8', type: 'attachment', mimeType: 'application/json' })
+        logger('success', '第二次公开填写已被数量上限拦截，接口、提示语及资源检查完成', quotaCheck)
+        return { ...completedSubmission, quotaCheck, publicRequestCount, pageValidationRequestCount, submissionRequestCount }
+      }
+      flowExpect(Number(submission.body?.code), '最终提交业务码必须成功，才能检查结果页').toBe(0)
+      flowExpect(responseSubmissionId, '最终提交必须返回本次提报 ID').toMatch(/\S+/)
+      const resultCredential = submission.body?.data?.result_token
+      flowExpect(/^[a-f0-9]{64}$/.test(String(resultCredential ?? '')), '最终提交必须签发有效的临时结果凭证').toBe(true)
+      const resultRead = await resultReadPromise
+      if (resultRead.error) throw resultRead.error
+      await assertSubmissionResultRead(resultRead.response, { formId: configuredFormId, submissionId: responseSubmissionId, credential: resultCredential })
+      setAttemptPhase('提交结果验证')
+      await expect(page, '提交后应进入普通表单结果页').toHaveURL(SUBMISSION_RESULT_URL_PATTERN, {
+        timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS),
+      })
+      const renderedSubmissionId = await assertVisibleSubmissionResult(page, configuredFormId)
+      if (responseSubmissionId) {
+        expect(renderedSubmissionId, '结果页组件的提交 ID 应与提交接口响应一致').toBe(responseSubmissionId)
+      }
+      const submissionId = responseSubmissionId || renderedSubmissionId || ''
+      const storedCredentialMatches = await page.evaluate(({ formId, submissionId, credential }) => {
+        const key = `form-result-token:${encodeURIComponent(formId)}:${encodeURIComponent(submissionId)}`
+        try { return JSON.parse(sessionStorage.getItem(key) ?? 'null')?.result_token === credential } catch { return false }
+      }, { formId: configuredFormId, submissionId, credential: resultCredential })
+      flowExpect(storedCredentialMatches, '提交结果凭证必须保存在当前会话以支持刷新').toBe(true)
+      flowExpect(new URL(page.url()).searchParams.has('result_token') || /result_token=/.test(new URL(page.url()).hash), '结果凭证应从地址栏清除').toBe(false)
+      flowExpect(await networkObserver.waitForIdle({ timeoutMs: scaleTimeout(NAVIGATION_TIMEOUT_MS), signal }),
+        '结果页接口和资源必须加载完成后才能刷新').toBe(true)
+      const refreshedRead = await Promise.all([
+        waitForSubmissionResultRead(page, publicOrigin, configuredFormId),
+        page.reload({ waitUntil: 'domcontentloaded' }),
+      ])
+      await assertSubmissionResultRead(refreshedRead[0], { formId: configuredFormId, submissionId, credential: resultCredential })
+      expect(await assertVisibleSubmissionResult(page, configuredFormId), '刷新后必须保持同一提报并显示成功态').toBe(submissionId)
+      flowExpect(await networkObserver.waitForIdle({ timeoutMs: scaleTimeout(NAVIGATION_TIMEOUT_MS), signal }),
+        '刷新后的结果页接口和资源必须加载完成后才能结束').toBe(true)
+      expect(authorizationLeaks, '公开表单域名的所有请求都不应携带后台环境 Token').toEqual([])
+      expect(publicRequestCount, '应观察到公开表单域名的业务请求').toBeGreaterThan(0)
+      expect(submissionRequestCount, '首次填写的必填失败不应误提交，只应产生一次成功提交请求').toBe(1)
+      logger('success', '新表单提交成功，题目、答案和提交请求业务断言执行完成', {
+        formId: configuredFormId,
+        submissionId: submissionId || '响应未返回可识别 ID',
+        publicRequestCount,
+        pageValidationRequestCount,
+        submissionRequestCount,
+        assertedAnswerFieldCount: payloadAssertion.answerFieldCount,
+        indexedSubmissionFieldCount: payloadAssertion.indexedFieldCount,
+        authorizationLeakCount: authorizationLeaks.length,
+        token: '[REDACTED]',
+      })
+
+      setAttemptPhase('运行结果汇总')
+      completedSubmission = {
+        scriptId,
+        scriptName,
+        formId: configuredFormId,
+        formUrl,
+        title: EXPECTED_FORM_TITLE,
+        submissionId,
+        submissionAssertions: createSubmissionAssertions(EXPECTED_FORM_TITLE, data),
+        status: 'submitted',
+        browser: 'chrome',
+        headless: true,
+        pageCount: 3,
+        fieldCount: PAGE_FIELD_LABELS.flat().length,
+        fieldKeys: FIELD_KEYS,
+        linkedContractUsed: Boolean(linkedFormContract),
+        publicRequestCount,
+        pageValidationRequestCount,
+        submissionRequestCount,
+        assertedAnswerFieldCount: payloadAssertion.answerFieldCount,
+        authorizationLeakCount: authorizationLeaks.length,
+      }
+      await stopPreservingSubmission()
+      stopPreservingSubmission = async () => undefined
     }
+    return completedSubmission
   } catch (error) {
     if (signal?.aborted) {
       logger('info', '已响应强制停止，正在清理 Chrome 无头浏览器')
     } else if (page) {
       try {
-        const screenshot = await screenshotFailure(page, data.runId, artifactWriter)
+        const screenshot = await screenshotFailure(page, activeRunId, artifactWriter)
         logger('error', `脚本“${scriptName}”执行失败，已保存当前页面全页截图`, {
           scriptId,
           scriptName,
@@ -1920,6 +2040,7 @@ export async function run({
   } finally {
     networkObserver.setPhase('结束清理')
     await networkObserver.stop({ signal })
+    await stopPreservingSubmission()
     const abortCloseStarted = await stopAbortClose()
     if (!abortCloseStarted) await closePlaywrightHandles({ context, browser }, { logger })
   }
@@ -1944,6 +2065,7 @@ export {
   assertRuleValidationBlocked,
   assertSubmissionPayload,
   assertVisibleSubmissionResult,
+  assertSubmissionResultRead,
   buildFormUrl,
   createSubmissionAssertions,
   createTestData,

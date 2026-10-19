@@ -798,7 +798,10 @@ export function createSubmissionListHtml({
       })
     })
     document.querySelector('[data-action="search"]').addEventListener('click', () => executeSearch().catch(showError))
-    document.querySelector('[data-action="reset"]').addEventListener('click', resetFilters)
+    document.querySelector('[data-action="reset"]').addEventListener('click', () => {
+      resetFilters()
+      executeSearch().catch(showError)
+    })
     document.querySelector('[data-action="expand"]').addEventListener('click', () => {})
     document.querySelector('[data-action="cancel-settings"]').addEventListener('click', () => {
       document.querySelector('[data-modal="field-settings"]').hidden = true

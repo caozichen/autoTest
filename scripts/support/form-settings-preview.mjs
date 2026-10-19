@@ -51,6 +51,7 @@ export async function inspectSettingsPreview({
   logger = () => undefined,
   signal,
   timeoutMs = scaleTimeout(45_000),
+  phase = '设置页预览',
 }) {
   if (!artifactWriter?.captureScreenshot || !artifactWriter?.writeFile) {
     throw new Error('预览检查必须提供截图及 JSON 制品写入器')
@@ -124,7 +125,7 @@ export async function inspectSettingsPreview({
     touch()
   }
   const observer = attachNetworkObserver(page, {
-    initialPhase: '发布前设置页预览',
+    initialPhase: phase,
     shouldRecord,
     onNetworkEntry: touch,
     onApiResponse: entry => observedApi.push(entry),
@@ -139,7 +140,7 @@ export async function inspectSettingsPreview({
   page.on('requestfailed', onFinished)
   const drain = async ({ mounted = true } = {}) => {
     const deadline = Date.now() + timeoutMs
-    await requireGate('发布前预览接口正文及页面资源应全部完成加载', async () => {
+    await requireGate(`${phase}接口正文及页面资源应全部完成加载`, async () => {
       await flowExpect.poll(async () => {
         signal?.throwIfAborted()
         const idle = await observer.waitForIdle({
@@ -199,7 +200,7 @@ export async function inspectSettingsPreview({
     savedEvidence = true
     return result
   }
-  const requireNetworkHealth = network => requireGate('发布前预览全部接口及资源应通过 HTTP、业务码和完整性检查', async () => {
+  const requireNetworkHealth = network => requireGate(`${phase}全部接口及资源应通过 HTTP、业务码和完整性检查`, async () => {
     flowExpect(network.failedApiCount).toBe(0)
     flowExpect(network.failedResourceCount).toBe(0)
     flowExpect(network.failedApiBodyCount).toBe(0)
@@ -212,7 +213,7 @@ export async function inspectSettingsPreview({
     started = true
     touch()
     await clickWhenReady(page.getByRole('button', { name: /^(预览|預覽|Preview)$/i }), { timeout: timeoutMs })
-    await requireGate('发布前预览抽屉和表单渲染器应挂载并显示', async () => {
+    await requireGate(`${phase}抽屉和表单渲染器应挂载并显示`, async () => {
       await flowExpect(drawer).toHaveCount(1, { timeout: timeoutMs })
       await flowExpect(renderer).toHaveCount(1, { timeout: timeoutMs })
       // The custom-element host alone can exist before its renderer is ready.
@@ -228,9 +229,9 @@ export async function inspectSettingsPreview({
       api: observedApi, resources: observedResources, summary: { pendingAtSeal: pendingRequests.size },
     }))
     // Keep observing through unmount: a late request or an abort caused by close
-    // must still prevent publication. Readiness has just been established above.
+    // must still fail validation. Readiness has just been established above.
     await drawer.locator('.arco-drawer-close-btn').click({ timeout: timeoutMs })
-    await requireGate('发布前预览抽屉关闭后应完成卸载', async () => {
+    await requireGate(`${phase}抽屉关闭后应完成卸载`, async () => {
       await flowExpect(page.locator('.settings-preview-drawer:visible')).toHaveCount(0, { timeout: timeoutMs })
       await flowExpect(page.locator('.settings-preview-renderer')).toHaveCount(0, { timeout: timeoutMs })
     })
@@ -238,7 +239,7 @@ export async function inspectSettingsPreview({
     evidence = await observer.stop({ discardPending: true, signal })
     const network = await saveEvidence()
     await requireNetworkHealth(network)
-    logger('success', '发布前预览加载和网络检查通过，已截图并关闭预览', {
+    logger('success', `${phase}加载和网络检查通过，已截图并关闭预览`, {
       apiCount: network.apiCount, resourceCount: network.resourceCount,
       screenshotPath: screenshot?.absolutePath,
     })
@@ -246,7 +247,7 @@ export async function inspectSettingsPreview({
   } catch (error) {
     if (!evidence) evidence = await observer.stop({ signal })
     if (!savedEvidence) await saveEvidence()
-    logger('error', '发布前预览检查失败，已停止发布并保留预览网络证据')
+    logger('error', `${phase}检查失败，已停止后续流程并保留预览网络证据`)
     throw error
   } finally {
     page.off('request', onRequest)

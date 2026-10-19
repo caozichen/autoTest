@@ -27,6 +27,7 @@ import {
   assertRuleValidationBlocked,
   assertSubmissionPayload,
   assertVisibleSubmissionResult,
+  assertSubmissionResultRead,
   buildFormUrl,
   createSubmissionAssertions,
   createTestData,
@@ -771,7 +772,7 @@ test('accepts visible result content when the result component host is hidden', 
     await page.setContent(`
       <form-submission-result form-id="${FORM_ID}" submission-id="submission-123" hidden>
       </form-submission-result>
-      <main><h1>Submitted successfully</h1></main>
+      <main data-submit-success-screen data-submit-status="success"><h1>Submitted successfully</h1></main>
     `)
     assert.equal(await page.locator(SUBMISSION_RESULT_SELECTOR).isVisible(), false)
     assert.equal(await assertVisibleSubmissionResult(page, { timeout: 1_000 }), 'submission-123')
@@ -787,7 +788,7 @@ test('validates the result component against a configured form ID', async () => 
     await page.setContent(`
       <form-submission-result form-id="dynamic-form-id" submission-id="submission-456" hidden>
       </form-submission-result>
-      <main><h1>Submitted successfully</h1></main>
+      <main data-submit-success-screen data-submit-status="success"><h1>Submitted successfully</h1></main>
     `)
     assert.equal(
       await assertVisibleSubmissionResult(page, 'dynamic-form-id', { timeout: 1_000 }),
@@ -796,6 +797,34 @@ test('validates the result component against a configured form ID', async () => 
   } finally {
     await browser.close()
   }
+})
+
+test('rejects a visible result error view even when the form, submission and heading exist', async () => {
+  const browser = await launchGoogleChrome()
+  try {
+    const page = await browser.newPage()
+    await page.setContent(`<form-submission-result form-id="${FORM_ID}" submission-id="submission-123"></form-submission-result>
+      <main data-submit-success-screen data-submit-status="error"><h1>读取失败</h1></main>`)
+    await assert.rejects(() => assertVisibleSubmissionResult(page, { timeout: 50 }), /读取失败标题不得当作提交成功/)
+  } finally { await browser.close() }
+})
+
+test('requires the result API to match this POST identity and credential without recording the token', async () => {
+  const credential = 'd'.repeat(64)
+  const response = (data, code = 0, supplied = credential) => ({
+    ok: () => true, json: async () => ({ code, data }),
+    request: () => ({ headers: () => ({ 'x-form-result-token': supplied }) }),
+  })
+  const data = { submission: { id: 'submission-123', form_id: FORM_ID, revision_no: 1 }, participants: [] }
+  const expected = { formId: FORM_ID, submissionId: 'submission-123', credential }
+  assert.deepEqual(await assertSubmissionResultRead(response(data), expected), data)
+  await assert.rejects(() => assertSubmissionResultRead(response(data, 30001), expected), /业务码必须为 0/)
+  await assert.rejects(() => assertSubmissionResultRead(response({ ...data, submission: { ...data.submission, id: 'other' } }), expected), /本次提交的提报/)
+  await assert.rejects(() => assertSubmissionResultRead(response(data, 0, 'bad-token'), expected), /本次提交签发/)
+  const records = []
+  await runWithAssertionRecorder('form-lpxavn-submit', entry => records.push(entry),
+    () => assertSubmissionResultRead(response(data), expected))
+  assert.doesNotMatch(JSON.stringify(records), new RegExp(credential))
 })
 
 test('records a missing result component and returns without a secondary locator timeout', async () => {

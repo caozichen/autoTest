@@ -3,7 +3,7 @@
   "revision": 1,
   "id": "form-all-fields-publish-mainland",
   "name": "创建完整表单（内地版）",
-  "description": "适配内地环境联系人流程，创建三页全题型表单；共用必填及题型限制、头图配色、协议、分类标签、邮件通知、富文本反馈、推广、分享渠道和发布前预览，发布后输出联动参数。",
+  "description": "适配内地环境联系人流程，创建三页全题型表单；共用必填及题型限制、头图配色、协议、分类标签、管理者和用户邮件通知、富文本反馈、推广和分享渠道；先发布表单，再检查预览并输出联动参数，供后续多语言翻译和发布使用。",
   "directory": "scripts",
   "entryFile": "form-all-fields-publish-mainland.ui.spec.mjs",
   "timeoutMs": 600000,

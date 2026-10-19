@@ -41,6 +41,9 @@ Invoke-RestMethod http://127.0.0.1:4310/health
 | 方法与路径 | 用途 |
 | --- | --- |
 | `GET /health` | Runner 健康检查。 |
+| `GET /app-settings` | 读取环境、流程、Tab 偏好和导入的登录态。 |
+| `PATCH /app-settings` | 通过 expectedRevision 原子保存 changes，冲突返回 409。 |
+| `POST /app-settings/migrations/local-storage-v1` | 幂等迁移旧浏览器配置，仅填充从未保存的键。 |
 | `POST /pipeline-executions` | 提交完整流水线，接收后立即返回，Runner 独立执行全部步骤。 |
 | `GET /pipeline-executions` | 查询后台流水线及重启后待恢复批次，用于刷新页面后恢复状态。 |
 | `POST /runs` | 校验并执行已注册脚本；连接会保持到执行完成。 |
@@ -78,7 +81,15 @@ Invoke-RestMethod http://127.0.0.1:4310/health
 - Runner 只执行持久配置中的已启用脚本 ID。入口必须是真实存在的 `.mjs` 文件，且在解析
   符号链接后的真实路径仍位于仓库 `scripts/` 目录。Runner 同时校验 API 与授权来源同源，
   并在保存日志前脱敏 Token、Authorization 和环境密钥。
-- Runner 只允许本地 `10085`、`4173` 端口的管理端 Origin 调用。
+- Runner 只允许 `config/local-services.json` 中的 Web 端口（默认 `10085`）及预览端口 `4173` 的本地管理端 Origin 调用。修改 `webPort` 并重启全部服务后，Vite、Runner 和 Supervisor 自动使用同一配置；不会放开任意本地端口。
+
+## 应用配置存储
+
+环境、自动化流程、运行记录 Tab 偏好和导入的登录态保存在 `data/app-settings/settings.json`，独立于浏览器 Origin。写入使用版本校验、串行事务及同目录原子替换，上一版保留为 `settings.json.bak`；目录权限为 `0700`、文件为 `0600`，目录已被 Git 忽略。文件含凭据和 Token，未加密，迁移电脑时需单独妥善备份。
+
+`PATCH /app-settings` 请求体为 `{ "expectedRevision": 0, "changes": { "autotest.run-history-tabs.v1": "[]" } }`。值为编码后的 JSON 字符串或删除标记 `null`；仅接受环境 v7、自动化流程 v1、运行记录 Tab v1 和环境登录态 v1 键。请求体最大 4 MB，单项最大 1 MB。临时的平台登录与运行时变量不在存储范围内。
+
+旧浏览器配置通过 `{ "entries": { ... } }` 迁移，已有键（包括空列表和删除标记）不会被旧来源覆盖。Web 保留浏览器原数据作为升级备份，后续读写统一走 Runner；磁盘损坏时拒绝写入，保留原文件供恢复。更换前端端口、刷新或更换浏览器均读取同一份配置。
 
 ## 运行记录存储
 

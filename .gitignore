@@ -9,5 +9,6 @@ test-results/
 blob-report/
 outputs/
 /data/run-records/
+/data/app-settings/
 *.tsbuildinfo
 *.log

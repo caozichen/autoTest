@@ -18,7 +18,7 @@ const ACTION_TIMEOUT_MS = 30_000
 const SEARCH_RESPONSE_TIMEOUT_MS = 15_000
 const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
 
-const DETAILS_TAB_PATTERN = /(?:提报详情|提報詳情|Submission Details?)/i
+const DETAILS_TAB_PATTERN = /(?:提报详情|提報詳情|Submission Details?|填报详情|填報詳情|填报记录|填報記錄|Responses)/i
 const CONTACT_TAB_PATTERN = /(?:联系人信息|聯絡人資訊|聯繫人資訊|Contact Information)/i
 const CONTACT_TAG_PATTERN = /^(?:联系人|聯絡人|聯繫人|Contacts?)$/i
 const VIEW_PATTERN = /^(?:查看|檢視|View)$/i
@@ -650,7 +650,8 @@ async function fieldSettings(page) {
     basicValues.add(value)
     await expect(checkbox, `基础字段“${label || value}”应可用`).toBeEnabled()
     if (!await checkbox.isChecked()) {
-      await clickWhenReady(checkbox.locator('xpath=ancestor::label[1]'), { timeout: scaleTimeout(5000) })
+      // Field toggles stay on this page; checked and linked-field assertions verify the result below.
+      await clickWhenReady(checkbox.locator('xpath=ancestor::label[1]'), { timeout: scaleTimeout(5000), noWaitAfter: true })
       selectedBasicCount += 1
     }
     await expect(checkbox, `基础字段“${label || value}”应保持勾选`).toBeChecked()
@@ -675,7 +676,7 @@ async function fieldSettings(page) {
     const checkbox = searchCheckboxes.nth(index)
     const definition = searchDefinitions[index]
     if (!await checkbox.isChecked()) {
-      await clickWhenReady(checkbox.locator('xpath=ancestor::label[1]'), { timeout: scaleTimeout(5000) })
+      await clickWhenReady(checkbox.locator('xpath=ancestor::label[1]'), { timeout: scaleTimeout(5000), noWaitAfter: true })
       selectedSearchCount += 1
     }
     await expect(
@@ -1159,7 +1160,12 @@ async function runContactChecks(page, {
   } else {
     logger('info', '联系人初始列表没有可用提交日期，跳过时间筛选；姓名筛选结果及已有失败断言保留')
   }
+  const resetResponsePromise = suppressUnhandledRejection(waitForRequiredResponse(page, response => {
+    if (!isContactListResponse(response, apiContext)) return false
+    return ![...new URL(response.url()).searchParams].some(([key, value]) => key.startsWith('filter[') && value !== '')
+  }, '联系人筛选重置后列表接口'))
   await resetFilterCard(filterCard)
+  await inspectContactResponse(await resetResponsePromise, names, '联系人筛选重置后列表接口')
   return { attemptedCount, succeededCount }
 }
 

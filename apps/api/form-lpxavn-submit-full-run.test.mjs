@@ -33,7 +33,7 @@ async function close(server) {
   })
 }
 
-async function runPublicSubmissionFixture(t, { withSettings = false } = {}) {
+async function runPublicSubmissionFixture(t, { withSettings = false, withQuota = false, acceptsSecondSubmission = false } = {}) {
   const formId = 'full-run-form-id'
   const formCode = 'legacy-full-run-code'
   assert.notEqual(formId, formCode)
@@ -79,12 +79,28 @@ async function runPublicSubmissionFixture(t, { withSettings = false } = {}) {
       promotion: { enabled: true, buttonText: promotion.button_text, type: 'href', link: promotion.actions[0].link },
     }
   }
+  const quota = { enabled: 1, quota: 2, message: '本表单填报名额已满（上限2人），暂不接受新的填报。' }
+  if (withQuota) {
+    fixture.data.form.submit_config = { submission_quota: quota }
+    linkedContract.settings = { ...linkedContract.settings, submissionQuota: { ...quota, enabled: true } }
+  }
+  const submittedPayloads = []
   const artifactRoot = await mkdtemp(join(tmpdir(), 'autotest-all-fields-full-run-'))
   const observedRequests = []
+  const resultToken = 'b'.repeat(64)
+  const resultEndpoint = `/f/form/${formId}/submission/full-run-submission-001?with_answer=0`
+  const resultLoader = `
+    const resultKey = 'form-result-token:' + encodeURIComponent(${JSON.stringify(formId)}) + ':full-run-submission-001'
+    const credential = JSON.parse(sessionStorage.getItem(resultKey) || 'null')
+    const resultBody = await fetch(${JSON.stringify(resultEndpoint)}, { headers: { 'X-Form-Result-Token': credential?.result_token || '' } }).then(r => r.json())
+    document.querySelector('main').setAttribute('data-submit-success-screen', '')
+    document.querySelector('main').setAttribute('data-submit-status', Number(resultBody.code) === 0 ? 'success' : 'error')
+  `
   let submittedPayload = null
   let siteBaseUrl = ''
   let documents = 0
   let initialLoadsFinished = 0
+  let resultImagesFinished = 0
   let loadsFinishedBeforeReload = null
 
   const server = createServer(async (request, response) => {
@@ -107,8 +123,40 @@ async function runPublicSubmissionFixture(t, { withSettings = false } = {}) {
           fieldKeys: linkedContract.fieldKeys,
           formSettings: fixture.data.form,
         })
+        if (withQuota) html = html.replace('const submissionId = String(body.data', `
+          if (Number(body.code) !== 0) {
+            const dialog = document.createElement('div')
+            dialog.setAttribute('role', 'dialog')
+            const message = document.createElement('p')
+            message.textContent = body.message
+            dialog.append(message)
+            const image = document.createElement('img')
+            image.src = '/quota-error.png'
+            dialog.append(image)
+            document.body.append(dialog)
+            return
+          }
+          const submissionId = String(body.data`)
         if (documents === 1) html = html.replace('</body>', '<img src="/slow-initial.png"><script>fetch("/api/area/tree")</script></body>')
+        html = html.replace("history.pushState({}, '', '/form/submission-result/')", `
+          sessionStorage.setItem('form-result-token:' + encodeURIComponent(formId) + ':' + encodeURIComponent(submissionId), JSON.stringify({ result_token: body.data.result_token }))
+          location.assign('/form/submission-result/?form_id=' + formId + '&submission_id=' + submissionId)
+          return`)
         response.end(html)
+        return
+      }
+      if (request.method === 'GET' && requestUrl.pathname === '/form/submission-result/') {
+        response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+        response.end(`<html><head><link rel="icon" href="data:,"></head><body>
+          <form-submission-result form-id="${formId}" submission-id="full-run-submission-001"></form-submission-result>
+          <main><h1>提交成功</h1></main><img src="/slow-result.png"><script>(async () => { ${resultLoader} })()</script></body></html>`)
+        return
+      }
+      if (request.method === 'GET' && requestUrl.pathname === `/f/form/${formId}/submission/full-run-submission-001`) {
+        response.writeHead(200, { 'Content-Type': 'application/json' })
+        const valid = request.headers['x-form-result-token'] === resultToken
+        response.end(JSON.stringify(valid ? { code: 0, data: { submission: { id: 'full-run-submission-001', form_id: formId, revision_no: 1 }, participants: [] } }
+          : { code: 403, message: 'invalid credential' }))
         return
       }
       if (requestUrl.pathname === '/slow-initial.png' || requestUrl.pathname === '/api/area/tree') {
@@ -119,6 +167,12 @@ async function runPublicSubmissionFixture(t, { withSettings = false } = {}) {
           initialLoadsFinished++
           response.end(isImage ? ONE_PIXEL_PNG : '{"code":0,"data":[]}')
         }, 2500)
+        return
+      }
+      if (requestUrl.pathname === '/slow-result.png') {
+        response.writeHead(200, { 'Content-Type': 'image/png' })
+        response.flushHeaders()
+        setTimeout(() => { resultImagesFinished++; response.end(ONE_PIXEL_PNG) }, 2600)
         return
       }
       if (request.method === 'GET' && requestUrl.pathname === `/f/form/${formId}`) {
@@ -137,12 +191,18 @@ async function runPublicSubmissionFixture(t, { withSettings = false } = {}) {
       if (request.method === 'POST' && requestUrl.pathname === `/f/form/${formId}/submission`) {
         const chunks = []
         for await (const chunk of request) chunks.push(chunk)
-        submittedPayload = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+        const payload = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+        submittedPayloads.push(payload)
+        submittedPayload ??= payload
         response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' })
-        response.end(JSON.stringify({
-          code: 0,
-          data: { submission_id: 'full-run-submission-001' },
-        }))
+        response.end(JSON.stringify(withQuota && submittedPayloads.length === 2 && !acceptsSecondSubmission
+          ? { code: 800003, message: quota.message, data: null }
+          : { code: 0, data: { submission_id: 'full-run-submission-001', result_token: resultToken } }))
+        return
+      }
+      if (request.method === 'GET' && requestUrl.pathname === '/quota-error.png') {
+        response.writeHead(200, { 'Content-Type': 'image/png' })
+        response.end(ONE_PIXEL_PNG)
         return
       }
       if (request.method === 'GET' && requestUrl.pathname === '/fixture-assets/radio-option.png') {
@@ -182,6 +242,16 @@ async function runPublicSubmissionFixture(t, { withSettings = false } = {}) {
     },
   }, { artifactRootDirectory: artifactRoot })
 
+  if (acceptsSecondSubmission) {
+    assert.equal(result.ok, false, 'an unexpectedly accepted second submission must fail the run')
+    assert.match(result.error, /第二次填写必须返回数量不足或禁止新增的业务码/)
+    assert.ok(result.assertions.some(entry => entry.status === 'failed'
+      && entry.name === '第二次填写应返回数量不足或禁止新增的业务码'))
+    assert.equal(submittedPayloads.length, 2, 'failure must not cause an extra submission or retry')
+    assert.ok(result.artifacts.some(entry => entry.type === 'screenshot'))
+    return
+  }
+
   assert.equal(
     result.ok,
     true,
@@ -216,8 +286,8 @@ async function runPublicSubmissionFixture(t, { withSettings = false } = {}) {
   )
   assert.equal(result.result.pageCount, 3)
   assert.equal(result.result.linkedContractUsed, true)
-  assert.equal(result.result.pageValidationRequestCount, 3)
-  assert.equal(result.result.submissionRequestCount, 1)
+  assert.equal(result.result.pageValidationRequestCount, withQuota ? 6 : 3)
+  assert.equal(result.result.submissionRequestCount, withQuota ? 2 : 1)
   assert.equal(result.result.assertedAnswerFieldCount, 27)
   assert.equal(result.result.authorizationLeakCount, 0)
   assert.equal(result.assertions.some(({ status }) => status === 'failed'), false)
@@ -228,8 +298,13 @@ async function runPublicSubmissionFixture(t, { withSettings = false } = {}) {
   const submissionRequests = observedRequests.filter(({ method, path }) => (
     method === 'POST' && path === `/f/form/${formId}/submission`
   ))
-  assert.equal(validationRequests.length, 3)
-  assert.equal(submissionRequests.length, 1)
+  assert.equal(validationRequests.length, withQuota ? 6 : 3)
+  assert.equal(submissionRequests.length, withQuota ? 2 : 1)
+  assert.equal(observedRequests.filter(({ method, path }) => method === 'GET' && path === resultEndpoint).length, 2)
+  assert.equal(resultImagesFinished, 2, 'both result documents must finish their images before reload or cleanup')
+  const capturedSubmission = result.apiResponses.find(entry => entry.method === 'POST' && new URL(entry.url).pathname === `/f/form/${formId}/submission`)
+  assert.equal(capturedSubmission.responseBody.code, 0)
+  assert.notEqual(capturedSubmission.incomplete, true, 'a full document navigation must not discard the captured POST body')
   for (const [method, path] of [
     ['GET', `/f/form/${formId}`],
     ['POST', `/f/form/${formId}/submission/validate-page`],
@@ -243,6 +318,7 @@ async function runPublicSubmissionFixture(t, { withSettings = false } = {}) {
   assert.ok(observedRequests.every(({ path }) => !path.includes(`/f/form/${formCode}`)))
   assert.ok(observedRequests.every(({ authorization }) => authorization === undefined))
   assert.doesNotMatch(JSON.stringify(result), /full-run-sensitive-token/)
+  assert.doesNotMatch(JSON.stringify(result), new RegExp(resultToken))
 
   assert.ok(submittedPayload)
   const serializedSubmission = JSON.stringify(submittedPayload)
@@ -261,8 +337,17 @@ async function runPublicSubmissionFixture(t, { withSettings = false } = {}) {
     SCRIPT_ID,
     'attempt-full-run-001',
   )
-  assert.equal(result.artifacts.length, 2)
-  assert.ok(result.artifacts.every(({ type }) => type === 'fixture'))
+  assert.equal(result.artifacts.length, withQuota ? 6 : 2)
+  assert.equal(result.artifacts.filter(({ type }) => type === 'fixture').length, withQuota ? 4 : 2)
+  if (withQuota) {
+    assert.equal(result.result.quotaCheck.status, 'blocked')
+    assert.equal(result.result.quotaCheck.businessCode, 800003)
+    assert.equal(result.result.quotaCheck.message, quota.message)
+    assert.equal(result.result.quotaCheck.acceptedSubmissionId, 'full-run-submission-001')
+    assert.equal(result.resourceResponses.some(entry => entry.url.endsWith('/quota-error.png') && entry.ok), true)
+    assert.equal(result.apiResponses.filter(entry => entry.method === 'POST' && entry.responseBody?.code === 800003).length, 1)
+    assert.notEqual(JSON.stringify(submittedPayloads[0]), JSON.stringify(submittedPayloads[1]), 'second attempt must fill fresh answers')
+  }
   assert.ok(result.artifacts.every(({ stepId }) => stepId === SCRIPT_ID))
   assert.ok(result.artifacts.every(({ absolutePath }) => absolutePath.startsWith(`${expectedAttemptDirectory}/`)))
 }
@@ -273,4 +358,12 @@ test('registered production entry uses formId for public GET, validation, submis
 
 test('public submission remains compatible with a passive agreement, rich feedback, promotion and additive settings contract', async (t) => {
   await runPublicSubmissionFixture(t, { withSettings: true })
+})
+
+test('second complete public filling is blocked by saved quota while preserving the first successful record', async (t) => {
+  await runPublicSubmissionFixture(t, { withSettings: true, withQuota: true })
+})
+
+test('an unexpectedly accepted second submission records a failed quota assertion without retrying', async (t) => {
+  await runPublicSubmissionFixture(t, { withSettings: true, withQuota: true, acceptsSecondSubmission: true })
 })

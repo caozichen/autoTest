@@ -26,6 +26,7 @@ import {
 } from '@/domain/environment'
 import type { RuntimeVariable } from '@/domain/runtime-variable'
 import { services } from '@/services/container'
+import type { EnvironmentSession } from '@/services/environments/local-environment-session.service'
 import { applyResponseVariable as applyLoginResponseVariable } from '@/services/environments/apply-response-variable'
 
 const environments = ref<TestEnvironment[]>([])
@@ -37,7 +38,7 @@ const pageSize = ref(20)
 const editorVisible = ref(false)
 const editorSaving = ref(false)
 const editingEnvironment = ref<TestEnvironment | null>(null)
-const sessionRevision = ref(0)
+const sessions = ref<Record<string, EnvironmentSession | null>>({})
 const loginTestingId = ref('')
 const loginResultVisible = ref(false)
 const loginResultEnvironment = ref<TestEnvironment | null>(null)
@@ -72,6 +73,7 @@ async function loadEnvironments(showSuccess = false): Promise<void> {
   loading.value = true
   try {
     environments.value = await services.environments.list()
+    await loadSessions()
     const lastPage = Math.max(1, Math.ceil(filteredEnvironments.value.length / pageSize.value))
     currentPage.value = Math.min(currentPage.value, lastPage)
     if (showSuccess) ElMessage.success('环境列表已刷新')
@@ -79,6 +81,16 @@ async function loadEnvironments(showSuccess = false): Promise<void> {
     ElMessage.error('环境列表加载失败')
   } finally {
     loading.value = false
+  }
+}
+
+async function loadSessions(): Promise<void> {
+  try {
+    const entries = await Promise.all(environments.value.map(async environment =>
+      [environment.id, await services.environmentSessions.get(environment)] as const))
+    sessions.value = Object.fromEntries(entries)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '登录态加载失败')
   }
 }
 
@@ -126,9 +138,9 @@ async function removeEnvironment(environment: TestEnvironment): Promise<void> {
   try {
     await services.environments.remove(environment.id)
     try {
-      services.environmentSessions.clear(environment.id)
+      await services.environmentSessions.clear(environment.id)
     } catch {
-      ElMessage.warning('环境已删除，但本地登录态清理失败，请检查浏览器存储权限')
+      ElMessage.warning('环境已删除，但登录态清理失败，请检查本地 Runner')
     }
     await loadEnvironments()
     ElMessage.success('环境已删除')
@@ -144,7 +156,7 @@ async function testLogin(environment: TestEnvironment): Promise<void> {
   appliedLoginVariable.value = null
   try {
     const reuse = environment.auth.strategy === 'reuse-session'
-    const result = await services.environmentLogin.login(environment, reuse ? services.environmentSessions.get(environment) : undefined)
+    const result = await services.environmentLogin.login(environment, reuse ? await services.environmentSessions.get(environment) : undefined)
     loginResult.value = result
     if (!reuse && result.businessSuccess) {
       appliedLoginVariable.value = applyRuntimeVariable({
@@ -220,8 +232,7 @@ function enabledVariableCount(environment: TestEnvironment): number {
 }
 
 function sessionStatus(environment: TestEnvironment): string {
-  void sessionRevision.value
-  const session = services.environmentSessions.get(environment)
+  const session = sessions.value[environment.id]
   if (!session) return '未导入匹配的登录态'
   if (session.expiresAt !== null && session.expiresAt <= Date.now()) return '已过期，请更新'
   return session.accountLabel ? `已保存 · ${session.accountLabel}` : '已保存登录态'
@@ -387,7 +398,7 @@ onMounted(() => loadEnvironments())
       :environment="editingEnvironment"
       :saving="editorSaving"
       @save="saveEnvironment"
-      @session-changed="sessionRevision++"
+      @session-changed="loadSessions"
     />
     <EnvironmentLoginResultDialog
       v-model="loginResultVisible"

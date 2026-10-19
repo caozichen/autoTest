@@ -271,6 +271,83 @@ test('context observer separates APIs and resources and snapshots request phase 
   assert.equal(result.summary.resources.succeeded, 1)
 })
 
+for (const resourceType of ['fetch', 'xhr']) {
+  for (const status of [200, 404]) {
+    test(`records ${resourceType} region data with HTTP ${status} as a resource without reading its body`, async () => {
+      const target = new FakeNetworkTarget()
+      const observer = attachNetworkObserver(target, { initialPhase: '繁体翻译回读' })
+      const request = fakeRequest({
+        resourceType,
+        url: 'https://example.test/form-building/v0.0.5/area-tree.en-US.83295e280aec.json?locale=en-US',
+      })
+      const response = fakeResponse(request, { status })
+      let bodyReads = 0
+      response.text = async () => {
+        bodyReads += 1
+        throw new Error('Response body is not available for a response that was navigated away from')
+      }
+      target.emit('request', request)
+      observer.setPhase('英文翻译回读')
+      target.emit('response', response)
+      target.emit('requestfinished', request)
+      const result = await observer.stop()
+
+      assert.equal(bodyReads, 0)
+      assert.equal(result.api.length, 0)
+      assert.equal(result.resources.length, 1)
+      const entry = result.resources[0]
+      assert.equal(entry.resourceType, resourceType)
+      assert.equal(entry.phase, '繁体翻译回读')
+      assert.equal(entry.status, status)
+      assert.equal(entry.ok, status === 200)
+      assert.equal(entry.warning, undefined)
+      assert.equal(result.summary.resources.failed, status === 404 ? 1 : 0)
+      if (status === 404) assert.equal(entry.failureKind, 'http')
+    })
+  }
+}
+
+test('keeps JSON business routes, static-looking writes, preflights and streams in API capture', async () => {
+  const target = new FakeNetworkTarget()
+  const observer = attachNetworkObserver(target)
+  for (const options of [
+    { url: 'https://example.test/api/be/form/export.json' },
+    { url: 'https://example.test/regions.json' },
+    { url: 'https://example.test/assets/api/regions.json' },
+    { method: 'POST', url: 'https://example.test/static/settings.json' },
+    { method: 'OPTIONS', url: 'https://example.test/assets/settings.json', resourceType: 'other' },
+    { url: 'https://example.test/assets/events.json', resourceType: 'eventsource' },
+  ]) {
+    const request = fakeRequest(options)
+    finish(target, request, fakeResponse(request, { body: '{"code":30001,"message":"业务校验失败"}' }))
+  }
+  const result = await observer.stop()
+  assert.equal(result.resources.length, 0)
+  assert.equal(result.api.length, 6)
+  assert.ok(result.api.filter(entry => !entry.streaming).every(entry => entry.responseBody.code === 30001))
+})
+
+test('begins capturing a business response before a following navigation discards the body', async () => {
+  const target = new FakeNetworkTarget()
+  const observer = attachNetworkObserver(target)
+  const request = fakeRequest({ method: 'POST' })
+  const response = fakeResponse(request)
+  let navigated = false
+  response.text = async () => {
+    if (navigated) throw new Error('Response body is not available after navigation')
+    return '{"code":30001,"message":"邮件内容不能为空"}'
+  }
+  target.emit('request', request)
+  target.emit('response', response)
+  navigated = true
+  target.emit('requestfinished', request)
+  const result = await observer.stop()
+
+  assert.deepEqual(result.api[0].responseBody, { code: 30001, message: '邮件内容不能为空' })
+  assert.equal(result.api[0].warning, undefined)
+  assert.equal(result.summary.api.incomplete, 0)
+})
+
 test('marks HTTP and transport failures while downgrading normal navigation aborts', async () => {
   const context = new FakeNetworkTarget()
   const observer = attachNetworkObserver(context)

@@ -191,7 +191,7 @@ function normalizeEnvironment(value: unknown, applyLingxiDefaults: boolean): Tes
   }
 }
 
-function normalizeEnvironmentArray(value: unknown, applyLingxiDefaults = false): TestEnvironment[] | null {
+export function normalizeEnvironmentArray(value: unknown, applyLingxiDefaults = false): TestEnvironment[] | null {
   if (!Array.isArray(value)) return null
   const environments = value.map((environment) => normalizeEnvironment(environment, applyLingxiDefaults))
   if (environments.some((environment) => environment === null)) return null

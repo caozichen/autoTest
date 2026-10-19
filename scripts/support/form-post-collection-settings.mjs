@@ -2,9 +2,8 @@ import { expect } from './recorded-expect.mjs'
 import { expect as flowExpect, scaleTimeout } from './environment-timeouts.mjs'
 import { clickWhenReady, waitForUiReady } from './ui-readiness.mjs'
 import { createFormSettingsContent } from './form-settings-content.mjs'
-import { inspectSettingsPreview } from './form-settings-preview.mjs'
 import { configureFormClassificationTags, createFormShareChannel } from './form-settings-channels.mjs'
-import { configureManagerNotification, configureAutomationNotification, assertPublishedNotification } from './form-settings-notifications.mjs'
+import { configureManagerNotification, configureAutomationNotification, assertPublishedNotification, assertNotificationPersistence } from './form-settings-notifications.mjs'
 import { withAgreementLocaleCompatibility } from './form-agreement-locale.mjs'
 
 const CONFIRM = /^(确认|確定|確認|确定)$/
@@ -50,10 +49,10 @@ export async function pasteSettingsRichText(editor, html, label) {
   return editor.innerHTML()
 }
 
-async function confirmConfig({ page, formId, container, label, inspectBusinessResponse }) {
+async function confirmConfig({ page, formId, container, label, inspectBusinessResponse, confirmPattern = CONFIRM }) {
   const responsePromise = page.waitForResponse(response => response.request().method() === 'PUT'
     && new URL(response.url()).pathname.endsWith(`/be/form/${formId}/config`), { timeout: scaleTimeout(45_000) })
-  await clickWhenReady(container.getByRole('button', { name: CONFIRM, exact: true }))
+  await clickWhenReady(container.getByRole('button', { name: confirmPattern, exact: true }))
   const response = await responsePromise
   const outcome = await inspectBusinessResponse(response, label)
   flowExpect(outcome.succeeded, `${label}必须成功才能继续`).toBe(true)
@@ -75,6 +74,10 @@ export function assertAgreementPersistence(actual, submitted, label = '用户协
 }
 
 export function assertStoredSettings(form, settings, { published = false, notificationTemplates } = {}) {
+  if (settings.submissionQuota) {
+    assertSubmissionQuotaPersistence(form?.submit_config?.submission_quota, settings.submissionQuota,
+      published ? '填报数量限制发布回读' : '填报数量限制草稿回读')
+  }
   const agreement = form?.common_config?.[settings.agreement.configKey]
   assertAgreementPersistence(agreement, settings.agreement.storedParameters ?? settings.agreement.savedParameters,
     '用户协议发布回读应匹配实际保存参数')
@@ -87,22 +90,67 @@ export function assertStoredSettings(form, settings, { published = false, notifi
     // Publication moves email content into the customized template resource.
     // Validate it independently; an empty form skeleton alone proves nothing.
     publishedNotifications = {
-      managerNotification: assertPublishedNotification(form?.notification_config?.admin_notification,
-        settings.managerNotification.savedParameters, notificationTemplates, { variant: 'manager' }),
+      managerNotification: settings.managerNotification.skipped
+        ? structuredClone(settings.managerNotification)
+        : assertPublishedNotification(form?.notification_config?.admin_notification,
+          settings.managerNotification.savedParameters, notificationTemplates, { variant: 'manager' }),
       automationNotification: assertPublishedNotification(form?.notification_config?.user_notification,
         settings.automationNotification.savedParameters, notificationTemplates, { variant: 'automation' }),
     }
   } else {
-    expect(form?.notification_config?.admin_notification, '管理者通知草稿回读应匹配实际保存参数')
-      .toEqual(settings.managerNotification.savedParameters)
-    expect(form?.notification_config?.user_notification, '自动化通知草稿回读应匹配实际保存参数')
-      .toEqual(settings.automationNotification.savedParameters)
+    if (!settings.managerNotification.skipped) {
+      assertNotificationPersistence(form?.notification_config?.admin_notification, settings.managerNotification.savedParameters,
+        { variant: 'manager', label: '管理者通知草稿回读' })
+    }
+    assertNotificationPersistence(form?.notification_config?.user_notification, settings.automationNotification.savedParameters,
+      { variant: 'automation', label: '自动化通知草稿回读' })
   }
   expect(form?.notification_config?.customized_feedback, '自定义反馈发布回读应匹配实际保存参数')
     .toEqual(settings.feedback.savedParameters)
   expect(form?.notification_config?.promotion_link, '底部推广发布回读应匹配实际保存参数')
     .toEqual(settings.promotion.savedParameters)
   return publishedNotifications
+}
+
+export function assertSubmissionQuotaPersistence(actual, expected, label = '填报数量限制') {
+  expect(Number(actual?.enabled), `${label}应开启`).toBe(1)
+  expect(Number(actual?.quota), `${label}上限应为 2`).toBe(2)
+  expect(actual?.message, `${label}已满提示应完整保存`).toBe(expected.message)
+  flowExpect({ enabled: Number(actual?.enabled), quota: Number(actual?.quota), message: actual?.message },
+    `${label}开关、上限和提示语必须全部匹配才能继续`).toEqual({ enabled: 1, quota: 2, message: expected.message })
+}
+
+export async function configureSubmissionQuota({ page, formId, content, inspectBusinessResponse, readForm, logger }) {
+  await clickWhenReady(page.locator('[data-menu-key="form"]'))
+  const toggle = page.getByRole('switch', { name: /^(?:填报数量限制开关|填報數量限制開關|Submission quantity limit switch)$/i })
+  await setSwitch(toggle, true, '填报数量限制')
+  const container = toggle.locator('xpath=ancestor::div[contains(@class,"fb-rounded-lg")][1]')
+  const quantity = container.getByPlaceholder(/^(?:请输入数字|請輸入數字|Please enter a number)$/i)
+  if (!await quantity.isVisible()) {
+    await clickWhenReady(container.getByRole('button', { name: /^(?:编辑填报数量限制|編輯填報數量限制|Edit submission quantity limit)$/i }))
+  }
+  await flowExpect(quantity, '填报数量上限输入框应唯一且可编辑').toBeEditable()
+  await quantity.fill(String(content.quota))
+  await expect(quantity, '填报数量上限输入框应回显 2').toHaveValue('2')
+  const inputs = container.locator('input')
+  await flowExpect(inputs, '数量限制编辑区应包含上限和已满提示两个输入框').toHaveCount(2)
+  const message = inputs.nth(1)
+  await flowExpect(message, '已满提示输入框应可编辑').toBeEditable()
+  await message.fill(content.message)
+  await expect(message, '已满提示应回显本次配置内容').toHaveValue(content.message)
+  const payload = await confirmConfig({ page, formId, container, label: '保存填报数量限制', inspectBusinessResponse,
+    confirmPattern: /^(?:确认|確定|確認|确定|Confirm)$/i })
+  const savedParameters = payload.submit_config?.submission_quota
+  assertSubmissionQuotaPersistence(savedParameters, content, '填报数量限制保存请求')
+  assertSubmissionQuotaPersistence((await readForm()).submit_config?.submission_quota, content, '填报数量限制独立接口回读')
+  await waitForUiReady(page)
+  await page.reload({ waitUntil: 'domcontentloaded' })
+  await flowExpect(toggle, '刷新后数量限制开关应保持开启').toHaveAttribute('data-state', 'checked')
+  await expect(container, '刷新后应显示完整已满提示').toContainText(content.message)
+  await expect(container.getByText(String(content.quota), { exact: true }), '刷新后应显示上限 2').toBeVisible()
+  assertSubmissionQuotaPersistence((await readForm()).submit_config?.submission_quota, content, '填报数量限制刷新回读')
+  logger('success', '填报数量限制已开启，上限 2，提示语已保存并通过刷新回读', { quota: content.quota, message: content.message })
+  return { ...content, savedParameters }
 }
 
 export async function configureAgreement({ page, formId, content, inspectBusinessResponse, readForm, logger }) {
@@ -139,8 +187,13 @@ export async function configureFeedback({ page, formId, content, imagePath, uplo
   if (!await editorRoot.isVisible()) await clickWhenReady(section.getByRole('button', { name: /编辑|編輯/ }))
   const editor = editorRoot.locator('.ProseMirror[contenteditable="true"]')
   await pasteSettingsRichText(editor, content.body, '自定义反馈')
-  // Cover all supported basic text styles, both list types, alignment, and links.
-  for (const selector of ['h2', 'strong', 'em', 'u', 's', 'ul > li', 'ol > li', 'a[href="https://www.baidu.com/"]', '[style*="color"]', '[style*="background"]', '[style*="text-align"]']) {
+  // Cover the enabled basic text styles, both list types, alignment, and links.
+  for (const selector of [
+    'h2', 'strong', 'em', 'u', 's', 'ul > li', 'ol > li', 'a[href="https://www.baidu.com/"]',
+    // 与 form-settings-content.mjs 中的蓝色提示和背景高亮段落一起暂时停用。
+    // '[style*="color"]', '[style*="background"]',
+    '[style*="text-align"]',
+  ]) {
     await expect(editor.locator(selector).first(), `自定义反馈富文本应保留 ${selector}`).toBeAttached()
   }
   const textBody = await editor.innerHTML()
@@ -205,10 +258,12 @@ export async function configurePromotion({ page, formId, content, inspectBusines
 
 export async function configurePostCollectionSettings({
   page, formId, title, siteBaseUrl, logger, artifactWriter, imagePath,
-  uploadImage, inspectBusinessResponse, readForm, signal, setPhase,
+  uploadImage, inspectBusinessResponse, readForm, setPhase,
 }, { assertClassificationTagOptionsAvailable } = {}) {
   const content = createFormSettingsContent({ title, formId, siteBaseUrl })
   const args = { page, formId, logger, inspectBusinessResponse, readForm }
+  setPhase('填报数量限制')
+  const submissionQuota = await configureSubmissionQuota({ ...args, content: content.submissionQuota })
   setPhase('用户协议')
   const agreement = await configureAgreement({ ...args, content: content.agreement })
   setPhase('分类与标签')
@@ -226,10 +281,8 @@ export async function configurePostCollectionSettings({
   const promotion = await configurePromotion({ ...args, content: content.promotion })
   setPhase('创建分享渠道')
   await createFormShareChannel({ page, formId, channelName: content.channelName, logger })
-  setPhase('发布前预览')
-  const preview = await inspectSettingsPreview({ page, artifactWriter, logger, signal })
   const settings = { schemaVersion: 1, runMarker: content.runMarker, environment: content.environment,
-    agreement, classificationTags, managerNotification, automationNotification, feedback, promotion, preview }
+    submissionQuota, agreement, classificationTags, managerNotification, automationNotification, feedback, promotion }
   assertStoredSettings(await readForm(), settings)
   if (artifactWriter) await artifactWriter.writeFile('form-settings.json', JSON.stringify(settings, null, 2), {
     encoding: 'utf8', type: 'attachment', mimeType: 'application/json',

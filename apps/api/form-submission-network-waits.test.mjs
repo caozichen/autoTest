@@ -57,6 +57,14 @@ async function fixture(t, { hangAt, onAreaRequest, withBackground = false } = {}
       timers.add(timer)
       return
     }
+    if (request.method === 'GET' && pathname === updatePath) {
+      sendJson({ code: 0, data: {
+        submission: { id: 'existing-reply', form_id: 'existing-form', revision_no: 1 },
+        items: [{ item_key: 'name', type_code: 'username', label: '姓名', revision_no: 1,
+          value: [{ answer_item_key: 'name', answer: state.updates.at(-1)?.body.answers.name ?? '原姓名' }] }],
+      } })
+      return
+    }
     if (request.method === 'PUT' && pathname === updatePath) {
       const chunks = []
       for await (const chunk of request) chunks.push(chunk)

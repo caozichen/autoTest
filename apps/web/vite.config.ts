@@ -2,6 +2,7 @@ import { fileURLToPath, URL } from 'node:url'
 
 import vue from '@vitejs/plugin-vue'
 import { defineConfig } from 'vite'
+import { WEB_PORT } from '../../shared/local-services.mjs'
 
 export default defineConfig({
   plugins: [vue()],
@@ -12,7 +13,7 @@ export default defineConfig({
   },
   server: {
     host: '127.0.0.1',
-    port: 10085,
+    port: WEB_PORT,
     strictPort: true,
   },
   preview: {

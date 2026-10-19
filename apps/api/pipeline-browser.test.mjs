@@ -10,6 +10,8 @@ import { expect } from '@playwright/test'
 import { launchGoogleChrome } from '../../scripts/support/google-chrome.mjs'
 import { createRunnerServer } from './server.mjs'
 import { RunRecordFileStore } from './run-record-store.mjs'
+import { AppSettingsStore } from './app-settings-store.mjs'
+import { WEB_ORIGIN } from '../../shared/local-services.mjs'
 
 // Entirely local fixture: all default Runner requests are intercepted before they
 // reach port 4310. No real environment authentication or business scripts run.
@@ -22,7 +24,7 @@ test('Chrome refresh/close/reopen preserves the entire pipeline and can stop it 
     inputParameters: [], responseVariableBindings: [] }))
   const calls = []
   const releases = new Map()
-  const runner = createRunnerServer({ runRecordStore: records,
+  const runner = createRunnerServer({ runRecordStore: records, appSettingsStore: new AppSettingsStore({ directory: join(directory, 'settings') }),
     scriptConfigRepository: { list: async () => configs, get: async id => configs.find(config => config.id === id) },
     validateRequest: payload => ({ scriptId: payload.scriptId, executionId: payload.executionId }),
     pipelineLogin: async () => ({ token: 'local-fixture', scheme: 'Bearer' }),
@@ -51,7 +53,7 @@ test('Chrome refresh/close/reopen preserves the entire pipeline and can stop it 
   const context = await browser.newContext()
   await context.route('http://127.0.0.1:4310/**', async route => {
     const upstream = await route.fetch({ url: runnerUrl + new URL(route.request().url()).pathname,
-      headers: { ...route.request().headers(), origin: 'http://127.0.0.1:10085' } })
+      headers: { ...route.request().headers(), origin: WEB_ORIGIN } })
     await route.fulfill({ response: upstream, headers: { ...upstream.headers(), 'access-control-allow-origin': webUrl } })
   })
   await context.addInitScript(({ timestamp }) => {
@@ -125,7 +127,7 @@ test('Chrome runs three environments, restores them after reload and selects exa
     directory: 'scripts', entryFile: `${id}.mjs`, timeoutMs: 30000, enabled: true, tags: [], createdAt: timestamp, updatedAt: timestamp,
     inputParameters: [], responseVariableBindings: [] }))
   const calls = []; const releases = new Map()
-  const runner = createRunnerServer({ runRecordStore: records,
+  const runner = createRunnerServer({ runRecordStore: records, appSettingsStore: new AppSettingsStore({ directory: join(directory, 'settings') }),
     scriptConfigRepository: { list: async () => configs, get: async id => configs.find(config => config.id === id) },
     validateRequest: payload => ({ scriptId: payload.scriptId, executionId: payload.executionId }),
     pipelineLogin: async env => ({ token: `fixture-${env.code}`, scheme: 'Bearer' }), recordMaintenanceIntervalMs: 20,
@@ -152,7 +154,7 @@ test('Chrome runs three environments, restores them after reload and selects exa
   const context = await browser.newContext()
   await context.route('http://127.0.0.1:4310/**', async route => {
     const upstream = await route.fetch({ url: runnerUrl + new URL(route.request().url()).pathname,
-      headers: { ...route.request().headers(), origin: 'http://127.0.0.1:10085' } })
+      headers: { ...route.request().headers(), origin: WEB_ORIGIN } })
     await route.fulfill({ response: upstream, headers: { ...upstream.headers(), 'access-control-allow-origin': webUrl } })
   })
   await context.addInitScript(({ timestamp, codes }) => {

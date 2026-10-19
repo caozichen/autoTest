@@ -12,8 +12,71 @@ import {
   parseSubmissionEditValues,
   resolveSubmissionContext,
   run,
+  submissionAnswerSnapshot,
+  assertSubmissionAnswersPreserved,
+  detailAnswersSnapshot,
 } from '../../scripts/form-submission-reply-edit.ui.spec.mjs'
 import { runWithAssertionRecorder } from '../../scripts/support/recorded-expect.mjs'
+import { launchGoogleChrome } from '../../scripts/support/google-chrome.mjs'
+
+test('reads actual matrix cells for the current Chinese, Hong Kong and English detail buttons', async () => {
+  const browser = await launchGoogleChrome()
+  try {
+    const page = await browser.newPage()
+    for (const label of ['点击查看', '按一下查看', 'Click to view']) {
+      await page.setContent(`<div class="reply-kv__row"><span class="reply-kv__label">矩阵题</span>
+        <div class="reply-kv__value"><button class="reply-kv__matrix-view">${label}</button></div></div>
+        <div class="reply-kv__row"><span class="reply-kv__label">附件</span>
+        <div class="reply-kv__value"><a href="https://files.test/report.pdf?signature=rotating">report.pdf</a></div></div>
+        <div class="arco-modal" style="display:none"><button class="arco-modal-close-btn">关闭</button>
+        <table><tr><th>项目</th><th>答案</th></tr><tr><td>A</td><td>保留的矩阵答案</td></tr></table></div>
+        <script>(() => {
+          const modal = document.querySelector('.arco-modal')
+          document.querySelector('.reply-kv__matrix-view').onclick = () => { modal.style.display = 'block' }
+          document.querySelector('.arco-modal-close-btn').onclick = () => { modal.style.display = 'none' }
+        })()</script>`)
+      const snapshot = await detailAnswersSnapshot(page)
+      assert.deepEqual(snapshot[0].matrix, [['项目', '答案'], ['A', '保留的矩阵答案']])
+      assert.deepEqual(snapshot[1].files, [{ name: 'report.pdf', href: 'https://files.test/report.pdf' }])
+      assert.equal(await page.locator('.arco-modal:visible').count(), 0)
+    }
+  } finally { await browser.close() }
+})
+
+test('historical answer snapshots preserve matrix cells, upload identities and immutable items by item_key', () => {
+  const context = { formId: 'form-history', submissionId: 'submission-v1' }
+  const payload = { code: 0, data: {
+    submission: { id: context.submissionId, form_id: context.formId, revision_no: 1 },
+    items: [
+      { item_key: 'text', type_code: 'input', label: '单行输入', revision_no: 1, value: [{ id: 1, answer_item_key: 'text', answer: { value: '旧答案' } }] },
+      { item_key: 'matrix', type_code: 'matrix', label: '矩阵', revision_no: 1, value: [{ answer_item_key: 'matrix', answer: { row1: { col1: 'A', col2: 'B' } } }] },
+      { item_key: 'upload', type_code: 'fileUpload', label: '附件', revision_no: 1, value: [{ answer_item_key: 'upload', answer: { id: 42, url: 'https://files.test/a.pdf?signature=old' } }] },
+      { item_key: 'system', item_kind: 'system', type_code: 'input', label: '系统字段', revision_no: 1, value: [] },
+    ],
+  } }
+  const before = submissionAnswerSnapshot(payload, context)
+  const renewed = structuredClone(payload)
+  renewed.data.items[0].value[0].id = 999
+  renewed.data.items[2].value[0].answer.url = 'https://files.test/a.pdf?signature=new'
+  assert.deepEqual(submissionAnswerSnapshot(renewed, context), before)
+  const edited = structuredClone(renewed)
+  edited.data.items[0].value[0].answer.value = '新答案'
+  assertSubmissionAnswersPreserved(before, submissionAnswerSnapshot(edited, context), { '单行输入': '新答案' })
+  for (const mutate of [
+    p => { p.data.items[1].value[0].answer.row1.col2 = '丢失内容' },
+    p => { p.data.items[2].value[0].answer.id = 88 },
+    p => { p.data.items[2].value[0].answer.url = 'https://files.test/other.pdf' },
+  ]) {
+    const invalid = structuredClone(payload)
+    mutate(invalid)
+    assert.throws(() => assertSubmissionAnswersPreserved(before, submissionAnswerSnapshot(invalid, context)), /答案必须保持|答案不得变化/)
+  }
+  const wrongVersion = structuredClone(payload)
+  wrongVersion.data.items[0].revision_no = 2
+  assert.throws(() => submissionAnswerSnapshot(wrongVersion, context), /提报原版本/)
+  assert.throws(() => assertSubmissionAnswersPreserved(before, before, { '系统字段': '不允许修改' }), /不得修改系统字段/)
+  assert.throws(() => assertSubmissionAnswersPreserved(before, before, { '附件': '不允许修改' }), /付款、上传、签名和矩阵必须保留/)
+})
 
 function createScreenshotArtifactWriter(captures) {
   return {

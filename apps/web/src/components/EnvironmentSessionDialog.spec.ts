@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { createApp, h, nextTick, ref, type App } from 'vue'
-import ElementPlus from 'element-plus'
+import ElementPlus, { ElMessage } from 'element-plus'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { LocalEnvironmentSessionService } from '@/services/environments/local-environment-session.service'
 import { LocalEnvironmentService } from '@/services/environments/local-environment.service'
@@ -53,6 +53,29 @@ afterEach(() => {
 })
 
 describe('saved session expiry editing', () => {
+  it.each([true, false])('only reports success after confirmed persistence and keeps failed edits open: %s', async confirmed => {
+    const environment = (await new LocalEnvironmentService(localStorage).list())[0]!
+    const session = await services.environmentSessions.save(environment, { token: 'fixture-token', accountLabel: '' })
+    let resolve!: (value: typeof session) => void
+    let reject!: (error: Error) => void
+    vi.spyOn(services.environmentSessions, 'save').mockImplementation(() => new Promise((done, fail) => { resolve = done; reject = fail }))
+    const success = vi.spyOn(ElMessage, 'success')
+    const failure = vi.spyOn(ElMessage, 'error')
+    await openDialog(environment)
+    await saveDialog()
+    expect(success).not.toHaveBeenCalled()
+    expect(document.querySelector('[aria-label="已有登录态 Token"]')).not.toBeNull()
+    if (confirmed) resolve(session)
+    else reject(new Error('磁盘写入失败'))
+    await settle()
+    if (confirmed) expect(success).toHaveBeenCalledOnce()
+    else {
+      expect(success).not.toHaveBeenCalled()
+      expect(failure).toHaveBeenCalledWith('磁盘写入失败')
+      expect(document.querySelector<HTMLInputElement>('[aria-label="已有登录态 Token"]')?.value).toBe('Bearer fixture-token')
+    }
+  })
+
   it.each([false, true])('preserves the local expiry and milliseconds when editing the account label: %s', async (editLabel) => {
     const environment = (await new LocalEnvironmentService(localStorage).list())[0]!
     const expiresAt = new Date(2030, 0, 2, 13, 14, 15, 678).getTime()
@@ -83,7 +106,7 @@ describe('saved session expiry editing', () => {
     await openDialog(environment)
     await saveDialog()
 
-    expect(services.environmentSessions.get(environment)?.expiresAt).toBe(expiresAt)
+    expect((await services.environmentSessions.get(environment))?.expiresAt).toBe(expiresAt)
   })
 
   it('saves an explicitly edited expiry using local time with millisecond precision', async () => {
@@ -98,7 +121,7 @@ describe('saved session expiry editing', () => {
     await settle()
     await saveDialog()
 
-    expect(services.environmentSessions.get(environment)?.expiresAt)
+    expect((await services.environmentSessions.get(environment))?.expiresAt)
       .toBe(new Date(2030, 1, 3, 14, 15, 16, 789).getTime())
   })
 
@@ -122,6 +145,6 @@ describe('saved session expiry editing', () => {
     await settle()
     await saveDialog()
 
-    expect(services.environmentSessions.get(environment)?.expiresAt).toBe(isJwt ? jwtExpiresAt : null)
+    expect((await services.environmentSessions.get(environment))?.expiresAt).toBe(isJwt ? jwtExpiresAt : null)
   })
 })

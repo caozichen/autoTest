@@ -23,7 +23,7 @@ export async function authenticateEnvironment(
   isCancelled: () => boolean = () => false,
 ): Promise<RuntimeVariable | null> {
   if (environment.auth.strategy === 'reuse-session') {
-    const session = dependencies.environmentSessions?.get(environment)
+    const session = await dependencies.environmentSessions?.get(environment)
     if (!session) throw new Error(`“${environment.name}”没有匹配的登录态，请到环境管理 → 编辑环境 → 登录与 Token 导入；环境地址变更后需要重新导入`)
     if (session.expiresAt !== null && session.expiresAt <= Date.now()) {
       throw new Error(`“${environment.name}”的登录态已过期，请手动登录后到环境管理更新登录态`)

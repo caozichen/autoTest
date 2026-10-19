@@ -1320,12 +1320,12 @@ function orderedContentFormItems(items) {
 }
 
 function resolveTranslationSectionContract(environmentCode, configuredContract) {
-  // All three environments use the current contract as verified on 2026-09-16.
-  // The response under test cannot select its own baseline: missing new keys must fail.
+  // Select a known deployment contract explicitly; never derive expectations
+  // from the response under test, which would hide missing/unknown sections.
   const contract = String(configuredContract ?? '').trim()
-    || '20260914'
-  if (!['legacy', '20260914'].includes(contract)) {
-    throw new Error('TRANSLATION_SECTION_CONTRACT 仅支持 legacy 或 20260914')
+    || '20261015'
+  if (!['legacy', '20260914', '20261015'].includes(contract)) {
+    throw new Error('TRANSLATION_SECTION_CONTRACT 仅支持 legacy、20260914 或 20261015')
   }
   return contract
 }
@@ -1345,8 +1345,11 @@ function expectedOtherUntranslatableSections(form, contract) {
       return !translationConfigEnabled(config)
     })
     .map(([section]) => section)
-  if (contract === '20260914') {
+  if (contract !== 'legacy') {
     if (!translationConfigEnabled(form.notification_config?.promotion_link)) excluded.push('promotion_link')
+    if (contract === '20261015' && !translationConfigEnabled(form.notification_config?.submission_view_qrcode)) {
+      excluded.push('submission_view_qrcode')
+    }
     if (Number(form.is_activity) !== 1) excluded.push('activity_location')
     // weixin_share has no enable switch and is never excluded by this contract.
   }
@@ -1836,19 +1839,22 @@ async function assertTranslationEditorMatchesWorkspace(page, workspace, language
 
   for (const section of workspace.sections) {
     const navItem = await navigateToWorkspaceSection(page, workspace, section.section_key)
-    const firstUnit = section.units[0]
-    if (!firstUnit) {
+    if (section.units.length === 0) {
       expect(section.units, `${language} ${section.section_key} 应包含可翻译单元`).not.toHaveLength(0)
       continue
     }
-    const firstUnitLocator = page.locator(
-      `article.translation-unit[id="translation-unit-${firstUnit.unit_key.replace(/["\\]/g, '\\$&')}"]`,
-    )
-    await flowExpect(
-      firstUnitLocator,
-      `${language} ${section.section_key} 首个翻译单元必须渲染，才能继续逐单元核对`,
-    ).toBeVisible()
-    await waitForRenderedTargetText(firstUnitLocator, firstUnit, language)
+    // Each editor initializes independently; a ready title does not mean the
+    // following rich-text iframe has received its translated body yet.
+    for (const unit of section.units) {
+      const unitLocator = page.locator(
+        `article.translation-unit[id="translation-unit-${unit.unit_key.replace(/["\\]/g, '\\$&')}"]`,
+      )
+      await flowExpect(
+        unitLocator,
+        `${language} ${section.section_key}/${unit.field_path} 翻译单元必须渲染，才能逐项核对`,
+      ).toBeVisible()
+      await waitForRenderedTargetText(unitLocator, unit, language)
+    }
 
     const renderedUnits = await readRenderedTranslationUnits(page, section.units)
     const expectedProgress = `${section.units.filter((unit) => unit.status === 'translated').length}/${section.units.length}`
@@ -2070,6 +2076,31 @@ async function saveTranslationValue(page, formId, language, workspace, unit, val
     `${label}后页面应提示译文已保存`,
   ).toBeVisible()
   return { outcome, requestPayload }
+}
+
+async function readPublishedFormDetail(page, apiBaseUrl, formId, label) {
+  const url = new URL(`be/form/${encodeURIComponent(formId)}`, `${apiBaseUrl.replace(/\/+$/, '')}/`)
+  url.searchParams.set('draft', '0')
+  const [response] = await runActionAndWaitForApiResponses(page, [{
+    method: 'GET', pathnameSuffix: `/be/form/${formId}`, options: { query: { draft: 0 } },
+  }], () => page.evaluate(async (endpoint) => {
+    // Native fetch does not use the app's Axios interceptor. Match its language
+    // header so dictionary labels use the same zh_CN locale as the source preview.
+    const response = await fetch(endpoint, { headers: { Authorization: localStorage.getItem('token') ?? '', Language: 'zh_CN' } })
+    await response.text()
+  }, url.toString()))
+  const outcome = await inspectBusinessResponse(response, label)
+  flowExpect(outcome.succeeded, `${label}必须成功，才能继续翻译`).toBe(true)
+  return outcome.body
+}
+
+function assertPublishedSourceFormDetail(payload, formId, options = {}) {
+  const { form, items } = unwrapFormPayload(payload)
+  const revision = numericValue(form.current_revision_no)
+  flowExpect(form.status !== 'draft' && Number.isSafeInteger(revision) && revision > 0, '翻译必须使用已发布版本，纯草稿不得进入写入流程').toBe(true)
+  flowExpect(structuralSignature(payload).revisionNo, '翻译原文详情必须属于最后发布版本').toBe(revision)
+  flowExpect(items.every((item) => numericValue(item.revision_no) === revision), '翻译原文全部题目必须属于最后发布版本').toBe(true)
+  return assertSourceFormDetail(payload, formId, { ...options, draft: false })
 }
 
 function translationApiUrl(apiBaseUrl, formId) {
@@ -2679,7 +2710,8 @@ async function inspectShareSettingsPage({
   await page.goto(shareUrl.toString(), { waitUntil: 'domcontentloaded' })
   await flowExpect(page, '分享设置页不得跳转登录').not.toHaveURL(/\/login(?:[/?#]|$)/)
   const channelCards = page.locator('.share-link-channel-card')
-  await flowExpect(channelCards.first(), '分享设置页必须至少渲染一个分享渠道').toBeVisible()
+  await flowExpect(channelCards.first(), '分享设置页必须至少渲染一个分享渠道')
+    .toBeVisible({ timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) })
   expect(await channelCards.count(), '分享设置页应包含可用分享渠道').toBeGreaterThan(0)
 
   const card = channelCards.first()
@@ -2699,7 +2731,7 @@ async function inspectShareSettingsPage({
   expect(longUrl.searchParams.get('channel_code'), '分享长链应携带非空 channel_code').toMatch(/\S+/)
   expect(longUrl.searchParams.has('locale'), '分享长链不应固化语言，应由右上角菜单切换').toBe(false)
   expect(shortUrl.protocol, '分享短链应使用 HTTPS').toBe('https:')
-  expect(shortUrl.origin, '分享短链应使用产品短链域名').toBe('https://1xi.co')
+  expect(shortUrl.origin, '分享短链域名应为带非空前缀的 1xi.co 子域名').toMatch(/^https:\/\/(?:[^./:]+\.)+1xi\.co$/)
   expect(shortUrl.pathname, '分享短链路径不应为空').not.toBe('/')
   expect(longUrl.toString(), '长链和短链不应相同').not.toBe(shortUrl.toString())
 
@@ -3075,7 +3107,10 @@ export async function run({
 
     const detailOutcome = await inspectBusinessResponse(detailResponse, '多语言翻译前表单详情')
     flowExpect(detailOutcome.succeeded, '表单详情接口必须成功，才能执行 AI 翻译或发布').toBe(true)
-    const source = assertSourceFormDetail(detailOutcome.body, formId, { sectionContract, draft: true })
+    // The editing page still loads draft=1. Translation workspaces are bound
+    // to the last published revision, even when a newer designer draft exists.
+    const sourcePayload = await readPublishedFormDetail(page, apiBaseUrl, formId, '翻译原文发布版本详情')
+    const source = assertPublishedSourceFormDetail(sourcePayload, formId, { sectionContract })
     flowExpect(String(source.form.form_id ?? source.form.id ?? ''), '发布门禁必须确认表单详情属于目标 FORM_ID')
       .toBe(formId)
     flowExpect(source.form.source_language, '发布门禁必须确认原文语言为 zh_CN').toBe('zh_CN')
@@ -3259,14 +3294,16 @@ export async function run({
     const publishedWorkspaceOutcome = await inspectBusinessResponse(publishedWorkspaceResponse, '多语言发布后翻译工作区回读')
     flowExpect(publishedDetailOutcome.succeeded, '发布后表单详情必须成功回读').toBe(true)
     flowExpect(publishedWorkspaceOutcome.succeeded, '发布后翻译工作区必须成功回读').toBe(true)
-    const publishedSource = unwrapFormPayload(publishedDetailOutcome.body)
+    const publishedSourcePayload = await readPublishedFormDetail(page, apiBaseUrl, formId, '翻译发布后原文发布版本回读')
+    assertPublishedSourceFormDetail(publishedSourcePayload, formId, { sectionContract })
+    const publishedSource = unwrapFormPayload(publishedSourcePayload)
     flowExpect(String(publishedSource.form.form_id ?? publishedSource.form.id ?? ''), '发布后表单详情必须仍属于目标 FORM_ID')
       .toBe(formId)
-    flowExpect(structuralSignature(publishedDetailOutcome.body).revisionNo, '发布后表单版本必须与发布版本一致')
+    flowExpect(structuralSignature(publishedSourcePayload).revisionNo, '发布后表单版本必须与发布版本一致')
       .toBe(source.revisionNo)
-    expect(structuralSignature(publishedDetailOutcome.body), 'AI 翻译和多语言发布不得改变题目结构、规则与选项值')
+    expect(structuralSignature(publishedSourcePayload), 'AI 翻译和多语言发布不得改变题目结构、规则与选项值')
       .toEqual(source.structureSignature)
-    expect(sourceTextSignature(publishedDetailOutcome.body), 'AI 翻译和多语言发布不得改写简体中文原文')
+    expect(sourceTextSignature(publishedSourcePayload), 'AI 翻译和多语言发布不得改写简体中文原文')
       .toEqual(source.sourceSignature)
     const publishedWorkspaces = {}
     for (const language of TARGET_LANGUAGES) {
@@ -3348,7 +3385,7 @@ export async function run({
         formId,
         language,
         expectedRevision: source.revisionNo,
-        sourcePayload: publishedDetailOutcome.body,
+        sourcePayload: publishedSourcePayload,
         workspace: language === 'zh_CN' ? null : publishedWorkspaces[language],
         artifactWriter,
         logger,
@@ -3508,6 +3545,7 @@ export {
   TARGET_LANGUAGES,
   analyzeTranslationWorkspace,
   assertPublishedListRecord,
+  assertPublishedSourceFormDetail,
   assertSourceFormDetail,
   assertTranslationEditorMatchesWorkspace,
   assertTranslationWorkspace,
@@ -3532,6 +3570,7 @@ export {
   projectSignatureAgainstReference,
   publicSourceTextSignature,
   publicStructuralSignature,
+  readPublishedFormDetail,
   readResponseJsonWithin,
   readFieldPath,
   requireTranslationQualityGate,

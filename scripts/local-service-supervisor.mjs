@@ -2,18 +2,16 @@ import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { WEB_ORIGIN, WEB_ORIGINS } from '../shared/local-services.mjs'
 
 const SUPERVISOR_HOST = '127.0.0.1'
 const SUPERVISOR_PORT = 4311
 const SUPERVISOR_ORIGIN = `http://${SUPERVISOR_HOST}:${SUPERVISOR_PORT}`
-const WEB_URL = 'http://127.0.0.1:10085/'
+const WEB_URL = `${WEB_ORIGIN}/`
 const RUNNER_HEALTH_URL = 'http://127.0.0.1:4310/health'
 const CONTROL_HEADER = 'x-autotest-control'
 const CONTROL_HEADER_VALUE = 'start-runner'
-const ALLOWED_ORIGINS = new Set([
-  'http://127.0.0.1:10085',
-  'http://localhost:10085',
-])
+const ALLOWED_ORIGINS = new Set(WEB_ORIGINS)
 const SCRIPT_DIRECTORY = dirname(fileURLToPath(import.meta.url))
 const WORKSPACE_DIRECTORY = resolve(SCRIPT_DIRECTORY, '..')
 const WEB_DIRECTORY = resolve(WORKSPACE_DIRECTORY, 'apps', 'web')

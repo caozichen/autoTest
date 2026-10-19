@@ -14,6 +14,7 @@ import {
 } from './support/form-link-contract.mjs'
 import { launchGoogleChrome } from './support/google-chrome.mjs'
 import { configurePostCollectionSettings, assertStoredSettings } from './support/form-post-collection-settings.mjs'
+import { inspectSettingsPreview } from './support/form-settings-preview.mjs'
 
 import {
   closePlaywrightHandles,
@@ -1151,6 +1152,7 @@ export async function run({
   prepareContactFields = initializeContactFields,
   configureContactSettings = ensureIgnoreStrategyInSettings,
   configureAdditionalSettings = configurePostCollectionSettings,
+  inspectPublishedPreview = inspectSettingsPreview,
 } = {}) {
   if (!siteBaseUrl) throw new Error('运行环境必须提供 Web 基址')
   if (!apiBaseUrl) throw new Error('运行环境必须提供 API 基址')
@@ -1384,6 +1386,18 @@ export async function run({
     await expect(titleLink, '已发布列表中应找到本次创建的全题型表单').toHaveCount(1)
     await expect(titleLink, '列表中的表单标题应完全匹配').toHaveText(title)
     logger('info', '已发布列表断言执行完成', { formId, title })
+
+    if (settings) {
+      // Preview loads translation prompts, which require a published form.
+      // Reopen settings only after publication and list readback have completed.
+      flowExpect(publishedRecord?.status, '预览前必须确认表单已发布').toBe('published')
+      networkObserver.setPhase('发布后预览')
+      const previewUrl = new URL('/form-activity/settings', siteBaseUrl)
+      previewUrl.searchParams.set('id', formId)
+      previewUrl.searchParams.set('step', 'share')
+      await page.goto(previewUrl.toString(), { waitUntil: 'domcontentloaded' })
+      settings.preview = await inspectPublishedPreview({ page, artifactWriter, logger, signal, phase: '发布后预览' })
+    }
 
     networkObserver.setPhase('读取发布契约')
     const formDetailResponse = await fetchFormDetail(page, apiBaseUrl, formId, authorization)

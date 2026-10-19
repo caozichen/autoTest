@@ -12,6 +12,9 @@ const token = ref('')
 const accountLabel = ref('')
 const expiresAt = ref('')
 const saved = ref<EnvironmentSession | null>(null)
+const loading = ref(false)
+const loadFailed = ref(false)
+const saving = ref(false)
 const savedExpiryInput = computed(() => {
   if (saved.value?.expiresAt == null) return ''
   const date = new Date(saved.value.expiresAt)
@@ -23,26 +26,42 @@ const status = computed(() => !saved.value ? '尚未导入匹配的登录态'
   : saved.value.expiresAt !== null && saved.value.expiresAt <= Date.now() ? '已过期，请更新'
     : '已保存，实际有效性以服务器校验为准')
 
-watch(() => [props.modelValue, props.environment] as const, ([visible, environment]) => {
+watch(() => [props.modelValue, props.environment] as const, async ([visible, environment], _previous, onCleanup) => {
+  let cancelled = false
+  onCleanup(() => { cancelled = true })
   token.value = ''
+  saved.value = null
+  accountLabel.value = ''
+  expiresAt.value = ''
+  loadFailed.value = false
   if (!visible || !environment) {
     saved.value = null
     return
   }
-  saved.value = services.environmentSessions.get(environment)
-  token.value = saved.value ? `${saved.value.scheme} ${saved.value.token}` : ''
-  accountLabel.value = saved.value?.accountLabel ?? ''
-  expiresAt.value = savedExpiryInput.value
+  loading.value = true
+  try {
+    const session = await services.environmentSessions.get(environment)
+    if (cancelled) return
+    saved.value = session
+    token.value = session ? `${session.scheme} ${session.token}` : ''
+    accountLabel.value = session?.accountLabel ?? ''
+    expiresAt.value = savedExpiryInput.value
+  } catch (error) {
+    if (cancelled) return
+    loadFailed.value = true
+    ElMessage.error(error instanceof Error ? error.message : '登录态加载失败，请重新打开后重试')
+  } finally { if (!cancelled) loading.value = false }
 }, { immediate: true })
 
-function save(): void {
-  if (!props.environment) return
+async function save(): Promise<void> {
+  if (!props.environment || loading.value || loadFailed.value || saving.value) return
+  saving.value = true
   try {
     // Keep the original instant when a repeated local hour is ambiguous during a DST change.
     const expiry = expiresAt.value === savedExpiryInput.value
       ? saved.value?.expiresAt ?? null
       : expiresAt.value ? new Date(expiresAt.value).getTime() : null
-    services.environmentSessions.save(props.environment, {
+    await services.environmentSessions.save(props.environment, {
       token: token.value,
       accountLabel: accountLabel.value,
       expiresAt: expiry,
@@ -53,22 +72,23 @@ function save(): void {
     ElMessage.success('登录态已保存，后续运行将复用；未向目标网站提交登录请求')
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '登录态保存失败')
-  }
+  } finally { saving.value = false }
 }
 
-function clear(): void {
-  if (!props.environment) return
+async function clear(): Promise<void> {
+  if (!props.environment || loading.value || saving.value) return
+  saving.value = true
   try {
-    services.environmentSessions.clear(props.environment.id)
+    await services.environmentSessions.clear(props.environment.id)
     saved.value = null
     token.value = ''
     accountLabel.value = ''
     expiresAt.value = ''
     emit('changed')
     ElMessage.success('保存的登录态已清除，下次运行需要重新导入；正在执行的任务不受影响')
-  } catch {
-    ElMessage.error('登录态清除失败，请检查浏览器本地存储权限')
-  }
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '登录态清除失败，请检查本地 Runner')
+  } finally { saving.value = false }
 }
 </script>
 
@@ -76,6 +96,7 @@ function clear(): void {
   <el-dialog
     :model-value="modelValue" :title="`管理登录态 · ${environment?.name ?? ''}`"
     width="640px" destroy-on-close class="environment-session-dialog"
+    :close-on-click-modal="!saving" :close-on-press-escape="!saving" :show-close="!saving"
     @update:model-value="emit('update:modelValue', $event)"
   >
     <template v-if="environment">
@@ -96,7 +117,7 @@ function clear(): void {
           <p>本功能复用 Token，不会接管已有标签页。仅依赖 Cookie 的网站暂不适用。</p>
         </el-collapse-item>
       </el-collapse>
-      <el-form label-position="top" @submit.prevent="save">
+      <el-form v-loading="loading" :disabled="loading || loadFailed || saving" label-position="top" @submit.prevent="save">
         <el-form-item :label="saved ? 'Token（可直接修改）' : '已有登录态 Token'" required>
           <el-input v-model="token" type="text" autocomplete="off" :spellcheck="false" aria-label="已有登录态 Token" placeholder="Token 或 Bearer 开头的完整 Authorization 值" />
         </el-form-item>
@@ -107,13 +128,13 @@ function clear(): void {
           <el-input v-model="expiresAt" type="datetime-local" step="0.001" aria-label="失效时间" />
         </el-form-item>
       </el-form>
-      <p class="session-details">Token 保存在当前浏览器的本地存储中，不是加密保险箱；不会明文写入运行日志。JWT 自带的过期时间优先于更晚的手动时间。</p>
+      <p class="session-details">Token 保存在本机项目配置文件中，更换前端端口后仍可使用；配置文件未加密，不会明文写入运行日志。JWT 自带的过期时间优先于更晚的手动时间。</p>
       <p class="session-details">如脚本提示未登录、Token 失效或 HTTP 401，请重新手动登录并更新此处的 Token。</p>
     </template>
     <template #footer>
-      <el-button v-if="saved" type="danger" plain @click="clear">清除登录态</el-button>
-      <el-button @click="emit('update:modelValue', false)">取消</el-button>
-      <el-button type="primary" :disabled="!token.trim()" @click="save">保存登录态</el-button>
+      <el-button v-if="saved" type="danger" plain :disabled="saving || loading" @click="clear">清除登录态</el-button>
+      <el-button :disabled="saving" @click="emit('update:modelValue', false)">取消</el-button>
+      <el-button type="primary" :loading="saving" :disabled="!token.trim() || loading || loadFailed" @click="save">保存登录态</el-button>
     </template>
   </el-dialog>
 </template>

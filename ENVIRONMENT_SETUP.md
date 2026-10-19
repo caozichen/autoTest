@@ -82,12 +82,16 @@ AutoTest 不是单独的网页文件。标准启动命令会运行三个只允�
 
 | 端口 | 用途 | 是否可随意修改 |
 | --- | --- | --- |
-| `10085` | Web 开发服务 | 不建议，Vite 使用严格端口，Runner CORS 也依赖它 |
+| `10085` | Web 开发服务 | 修改 `config/local-services.json` 的 `webPort` 后重启全部服务，关联地址和 CORS 自动跟随 |
 | `4310` | Playwright Runner | 不建议，Web 和 Supervisor 固定连接这个端口 |
 | `4311` | Supervisor | 不建议，Web 固定连接这个端口 |
 | `4173` | Web 生产构建预览 | 只在执行 preview 命令时使用 |
 
 Runner 代码虽然支持 `AUTOTEST_RUNNER_PORT`，但 Web 与 Supervisor 目前仍固定访问 `4310`。新手不要设置这个环境变量，否则页面会连接不到 Runner。
+
+修改 Web 端口时只改 `config/local-services.json`，不要使用 Vite 的 `--port` 单独覆盖；Vite、Runner CORS 和 Supervisor 共用该配置。端口需在 `1024–65535` 范围内，且不能是 `4310`、`4311` 或预览端口 `4173`。使用 `npm run dev` 时停止后重新启动；macOS 登录自启模式执行 `launchctl kill SIGTERM gui/$(id -u)/tech.lingxi.autotest.supervisor`，系统会重新拉起全部服务。本文的 `10085` 示例地址需相应换成新端口。
+
+环境、流水线、Tab 偏好和已导入的登录态由 Runner 读取项目内的磁盘配置，修改 Web 端口后自动跟随，无需重新填写。平台登录属于临时会话，需在新地址重新登录。
 
 ## 3. npm 依赖及版本
 
@@ -950,16 +954,17 @@ npm run start --workspace @autotest/api
 
 当前版本没有数据库：
 
-- 环境和流水线保存在浏览器 `localStorage`。
-- 登录状态、Token 和运行时变量保存在浏览器 `sessionStorage`。
+- 环境、流水线、运行记录 Tab 偏好和导入的登录态保存在项目 `data/app-settings/settings.json`；上一版备份为 `settings.json.bak`。文件含凭据及 Token，未加密，仅当前系统用户可读写，不提交 Git。
+- 平台登录状态和执行期间提取的 Token、运行时变量保存在浏览器 `sessionStorage`，属于临时会话。
 - 脚本基础配置保存在项目 `config/scripts/`，每个脚本一个 JSON 文件。
 - 运行记录保存在项目 `data/run-records/`，每个运行批次一个 JSON 文件。
 - 脚本生成的截图、临时文件和 Supervisor 日志写在项目根目录 `outputs/`。
 
 因此：
 
-- 清除浏览器网站数据会清除环境、流水线或登录状态，但不会删除脚本配置和运行记录文件。
-- `config/scripts/` 应随 Git 提交，可以随代码迁移；`data/run-records/` 默认被 Git 忽略，需要单独备份才能迁移历史记录。
+- 清除浏览器网站数据或修改 Web 端口会清除临时登录状态，不会删除磁盘上的环境、流水线、Tab 设置、已导入的登录态、脚本配置或运行记录。
+- 升级后首次打开页面会将旧浏览器配置迁移到 Runner；已有磁盘数据优先，旧浏览器数据保留作备份。保存失败会提示错误，磁盘文件损坏时停止写入，请保留损坏文件并从备份恢复。
+- `config/scripts/` 和 `config/local-services.json` 应随 Git 提交；`data/app-settings/`、`data/run-records/` 默认被 Git 忽略，换电脑时需单独备份和迁移。备份前停止服务；登录态还需确认是否过期。
 - `outputs/` 需要保持可写，但它不应作为数据库或长期备份。
 
 ## 11. 关于环境变量

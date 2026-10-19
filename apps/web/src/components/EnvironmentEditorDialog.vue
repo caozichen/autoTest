@@ -263,7 +263,7 @@ async function submit(): Promise<void> {
           </div>
           <template v-else>
             <div class="auth-hint">
-              编辑后的登录凭据保存在当前浏览器本地；测试登录的响应只在本次弹窗中展示，不会写入本地存储。
+              编辑后的登录凭据保存在本机项目配置文件中，更换前端端口后自动跟随；测试登录的响应只在本次弹窗中展示。
             </div>
             <div class="form-grid">
               <el-form-item label="登录方式">

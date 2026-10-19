@@ -2,9 +2,12 @@
 import { createApp, defineComponent, h, nextTick, type App } from 'vue'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({ list: vi.fn() }))
-vi.mock('@/services/container', () => ({ services: { environments: { list: mocks.list } } }))
+vi.mock('@/services/container', () => ({ services: {
+  environments: { list: mocks.list },
+  runHistoryTabs: { read: async () => readRunHistoryTabs(), save: async (ids: string[]) => saveRunHistoryTabs(ids) },
+} }))
 import RunHistorySettingsView from './RunHistorySettingsView.vue'
-import { readRunHistoryTabs } from '@/services/run-records/run-history-tabs'
+import { readRunHistoryTabs, saveRunHistoryTabs } from '@/services/run-records/run-history-tabs'
 
 const apps: App[] = []
 const Button = defineComponent({

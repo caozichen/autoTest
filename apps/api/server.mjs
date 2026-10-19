@@ -20,12 +20,13 @@ import {
 } from './script-config-repository.mjs'
 import { retainScriptRejectionGuard } from './script-rejection-boundary.mjs'
 import { executeRegisteredScript, validateRegisteredRunRequest } from './script-runner.mjs'
+import { WEB_ORIGINS } from '../../shared/local-services.mjs'
+import { AppSettingsStore } from './app-settings-store.mjs'
 
 const DEFAULT_HOST = '127.0.0.1'
 const DEFAULT_PORT = 4310
-const allowedOrigins = new Set([
-  'http://127.0.0.1:10085',
-  'http://localhost:10085',
+const defaultAllowedOrigins = new Set([
+  ...WEB_ORIGINS,
   'http://127.0.0.1:4173',
   'http://localhost:4173',
 ])
@@ -129,7 +130,7 @@ function sendJson(response, statusCode, body, origin = '') {
   response.writeHead(statusCode, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
-    ...(allowedOrigins.has(origin) ? { 'Access-Control-Allow-Origin': origin, Vary: 'Origin' } : {}),
+    ...(origin ? { 'Access-Control-Allow-Origin': origin, Vary: 'Origin' } : {}),
   })
   response.end(JSON.stringify(body))
 }
@@ -274,6 +275,8 @@ function parseCancellationReason(payload) {
 }
 
 export function createRunnerServer({
+  appSettingsStore = new AppSettingsStore(),
+  allowedOrigins = defaultAllowedOrigins,
   executeScript,
   validateRequest,
   revealFile = revealFileInFolder,
@@ -673,6 +676,24 @@ export function createRunnerServer({
   }
 
   const pathname = requestPath(request.url)
+
+  if (pathname === '/app-settings' || pathname === '/app-settings/migrations/local-storage-v1') {
+    try {
+      let snapshot
+      if (pathname === '/app-settings' && request.method === 'GET') snapshot = await appSettingsStore.read()
+      else if (pathname === '/app-settings' && request.method === 'PATCH') {
+        const body = await readJson(request, 4 * 1024 * 1024)
+        snapshot = await appSettingsStore.update(body?.changes, body?.expectedRevision)
+      } else if (pathname.endsWith('/local-storage-v1') && request.method === 'POST') {
+        const body = await readJson(request, 4 * 1024 * 1024)
+        snapshot = await appSettingsStore.migrate(body?.entries)
+      } else { sendJson(response, 405, { error: '配置接口不支持此请求方法' }, origin); return }
+      sendJson(response, 200, snapshot, origin)
+    } catch (error) {
+      sendJson(response, error.statusCode ?? 500, { error: error.statusCode ? error.message : '本地配置保存失败，请检查磁盘空间和文件权限' }, origin)
+    }
+    return
+  }
 
   if (request.method === 'GET' && pathname === '/script-configs') {
     try {

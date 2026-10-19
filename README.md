@@ -2,6 +2,14 @@
 
 AutoTest 是一个本地优先的自动化测试管理平台。v1.1 提供 Vue 3 + Element Plus 管理端、本地 Playwright Runner、环境登录与 Token 注入、脚本管理、跨环境并发流水线和真实运行记录；当前不依赖数据库。单个 Runner 最多同时执行三个流水线批次，每个批次内部按顺序运行。
 
+## 2026-10-19 更新
+
+- **填报数量限制回归**：创建表单时启用上限 2 并保存已满提示；六步流程将手动创建调整到第三步，公开填写完整执行两次，严格验证第二次满额拦截，后续列表与编辑继续使用首次成功记录。
+- **提报／填报文案适配**：保留原有对象定位条件，增加简体“填报”、繁体“填報”及对应英文文案候选。
+- **多语言与分享检查**：使用 `20261015` 分区契约；短链域名要求为 `<非空前缀>.1xi.co`，例如 `mvr.1xi.co`，继续检查 HTTPS、二维码、无认证跳转、表单身份和分享渠道。
+- **响应体采集**：提前读取响应正文，提交页跳转前保留原始 POST 响应；静态目录中的地区 JSON 等文件按资源分类，业务接口与写入请求继续按接口检查。
+- **本地配置保存**：环境、流程、Tab 偏好和导入的登录态迁至 Runner 磁盘配置，支持旧浏览器数据迁移；Web 端口统一由 `config/local-services.json` 配置。
+
 ## v1.1 更新（2026-09）
 
 - **创建表单设置断言（2026-09-16）**：普通与内地创建入口共用基础设置、消息与触达、分享与传播检查，覆盖保存请求、独立回读、发布后配置及通知模板；三个环境最新六步骤批次均全部通过，详见下文验证记录。
@@ -37,7 +45,7 @@ AutoTest 是一个本地优先的自动化测试管理平台。v1.1 提供 Vue 3
 | 本地 Runner | Node.js 22、原生 HTTP Server |
 | 自动化执行 | Playwright + Google Chrome 无头模式 |
 | 测试 | Vitest、Node Test Runner |
-| 本地数据 | JSON 文件、`localStorage`、`sessionStorage` |
+| 本地数据 | JSON 文件、临时会话 `sessionStorage` |
 
 ## 快速开始
 
@@ -83,10 +91,20 @@ npm run install:supervisor
 
 本地管理端账号为 `admin / admin123`，只用于本机界面访问，不是生产认证方案。
 
+### 修改 Web 端口
+
+只需修改 `config/local-services.json` 的 `webPort`（当前为 `10085`），然后重启 Web、Runner 和 Supervisor。Vite 端口、Runner CORS 和 Supervisor 的页面地址会读取同一份配置，无需分别修改。使用 `npm run dev` 时停止后重新启动；macOS 登录自启模式可执行：
+
+```bash
+launchctl kill SIGTERM gui/$(id -u)/tech.lingxi.autotest.supervisor
+```
+
+之后通过 `http://127.0.0.1:<新端口>` 访问。环境、自动化流程、运行记录 Tab 设置和导入的登录态保存在本机项目的 `data/app-settings/settings.json`，更换端口或浏览器后会自动读取。首次升级会自动迁移当前浏览器的旧配置，保留浏览器原数据作为备份。平台登录和运行时变量属于临时会话，换端口后需重新登录。
+
 ## 使用方法
 
 1. 登录管理端，进入“环境管理”。
-2. 预设测试环境已带默认手机号与验证码；如凭据变化，可通过环境列表的“编辑”操作更新并保存到当前浏览器。
+2. 预设测试环境已带默认手机号与验证码；如凭据变化，可通过环境列表的“编辑”操作更新并保存到本机项目。
 3. 点击“测试登录”，确认业务响应成功，并从 `data.token` 提取 `AUTH_TOKEN`。
 4. 在“脚本管理”中选择环境并运行脚本，或进入“自动化配置”创建有序流水线。
 5. 在“运行记录”按环境 Tab 查看批次日志、断言结果和数据分析；进入“系统设置 → 运行记录 Tab 配置”选择显示的环境并调整顺序。
@@ -105,7 +123,7 @@ npm run install:supervisor
 
 再次打开“管理登录态”会回填已保存的失效时间，保留秒和毫秒。仅修改备注或直接保存时保留原始时间戳，避免夏令时重复时段的转换歧义；主动清空可移除手动失效时间，JWT 自带过期时间仍然生效。
 
-Token 单独保存在当前浏览器 localStorage 中（非加密存储），运行日志按敏感变量脱敏。可在“管理登录态”清除；清除不影响已启动的任务。此方式不会自动读取或接管现有 Chrome 标签页，目前适用于已有脚本使用的 Token 认证，不导入 Cookie 会话。
+Token 保存在本机项目 `data/app-settings/settings.json` 中（未加密，仅当前系统用户可读写，不提交 Git），更换前端端口后仍可复用；运行日志按敏感变量脱敏。可在“管理登录态”清除；清除不影响已启动的任务。此方式不会自动读取或接管现有 Chrome 标签页，目前适用于已有脚本使用的 Token 认证，不导入 Cookie 会话。
 
 ### 强制停止
 
@@ -140,9 +158,9 @@ Token 单独保存在当前浏览器 localStorage 中（非加密存储），运
 | `form-copy-delete-archive` | 表单复制-删除归档 | `form-copy-delete-archive.ui.spec.mjs` | 默认使用测试环境已发布表单 `lg2wd5`；验证源表单只有归档而无删除，复制并发布第一份，再复制同名草稿并删除第二份。可用 `FORM_ID` 覆盖源表单；第一次已发布副本会保留。 |
 | `form-save-template-management` | 表单存为模板-系统模板管理 | `form-save-template-management.ui.spec.mjs` | 默认以 `lg2wd5` 存为模板，验证类型、名称、备注、置顶置底及改名，再用修改后的模板创建并发布表单问卷，最后删除本次模板并确认已发布表单保留；输出模板与新表单 ID。 |
 | `form-activity-search-category` | 表单活动搜索项及分类 | `form-activity-search-category.ui.spec.mjs` | 逐项验证八个搜索项及“仅看我的”的请求和列表结果；新增分类、在列表选择、删除本次分类并恢复全部分类。 |
-| `form-lpxavn-submit` | 填写指定表单 | `form-lpxavn-submit.ui.spec.mjs` | 使用动态 `FORM_ID` 与 `FORM_CONTRACT`，填写三页表单、上传附件、完成签名并提交，校验边界、跨页答案和动态载荷；输出 `formId`、`submissionId`、`submissionAssertions`。 |
+| `form-lpxavn-submit` | 填写指定表单 | `form-lpxavn-submit.ui.spec.mjs` | 使用动态 `FORM_ID` 与 `FORM_CONTRACT`，完整填写三页表单并检查边界、分页、上传与载荷；契约含数量限制时再次完整填写并验证满额拦截，输出首次成功记录及 `quotaCheck`。 |
 | `form-submission-list-check` | 检查提报列表 | `form-submission-list-check.ui.spec.mjs` | 使用本次填写输出定位后台提报，检查详情、全部基础及检索字段、模糊搜索、联系人、顶部名称和标签；同时校验业务接口与站内资源。 |
-| `form-all-fields-submit` | 检查并编辑提报信息 | `form-all-fields-submit.ui.spec.mjs` | 当前入口实际复用动态公开表单填写实现，必须提供 `FORM_ID`，建议同时提供 `FORM_CONTRACT`；会新增提交记录。页面名称沿用当前配置，不能将此步骤视作后台编辑已有提报的验证。 |
+| `form-all-fields-submit` | 检查并编辑提报信息 | `form-all-fields-submit.ui.spec.mjs` | 编辑 `FORM_ID`、`SUBMISSION_ID` 指定的已有提报并刷新回读；默认原答案保存，可显式配置普通输入字段的真实修改。 |
 | `form-submission-reply-create` | 手动创建提报信息 | `form-submission-reply-create.ui.spec.mjs` | 在后台加载动态表单，检查创建态、空表必填与格式边界，填写全部题型，验证唯一创建请求、载荷、详情跳转及回显；输出 `submissionId`。 |
 | `form-multilingual-translation-publish` | 设置校验表单多语言翻译 | `form-multilingual-translation-publish.ui.spec.mjs` | 为简体中文原文启用繁体中文与 English，执行 AI 翻译、保存回读、完成发布、分享及公开页三语言校验；标准 AI 等待 10 分钟、总超时 15 分钟。 |
 
@@ -150,7 +168,7 @@ Token 单独保存在当前浏览器 localStorage 中（非加密存储），运
 
 复制与模板脚本的 `FORM_ID` 默认是测试环境已发布表单 `lg2wd5`，切换环境前应将该参数改为对应环境中有权限操作的已发布表单。复制脚本保留第一次发布的副本，只删除第二次新建的草稿；模板脚本删除本次模板，保留从模板发布的新表单。搜索分类脚本只删除本次新建的分类，并在结束时恢复“全部分类”。这些流程会创建真实业务数据，失败时应检查运行记录与残留数据，不要盲目重复运行。
 
-创建脚本现在共用 `scripts/support/form-settings-content.mjs` 中的协议、邮件、反馈和推广文案，追加用户协议（不要求填写前阅读）、提交成功分类标签、管理者及用户邮件通知、自定义富文本反馈、百度推广链接、新建分享渠道和发布前预览。每次运行把最终保存值与参数放入 `formContract.settings`，并保存独立 `form-settings.json` 附件；原 `FORM_ID`、`FORM_CONTRACT` 映射保持兼容。分类和标签各取首项，缺一种时仅配置另一种，两种都没有时记录失败断言并跳过该项；内地入口暂时注释停用这条可选项存在断言，双空只记录跳过，香港及测试环境规则不变。有数据时仍正常配置并验证保存结果。通知保留默认接收人、触发条件和邮件类型；预览只检查加载与接口资源，不填写表单。创建超时为标准 10 分钟，香港继续应用环境倍率。
+创建脚本现在共用 `scripts/support/form-settings-content.mjs` 中的协议、邮件、反馈和推广文案，追加用户协议（不要求填写前阅读）、提交成功分类标签、管理者和用户邮件通知、自定义富文本反馈、百度推广链接、新建分享渠道；内地和普通版均启用管理者通知配置及草稿、发布后回读校验。先发布表单，再进行设置页预览。每次运行把最终保存值与参数放入 `formContract.settings`，并保存独立 `form-settings.json` 附件；原 `FORM_ID`、`FORM_CONTRACT` 映射保持兼容。分类和标签各取首项，缺一种时仅配置另一种，两种都没有时记录失败断言并跳过该项；内地入口暂时注释停用这条可选项存在断言，双空只记录跳过，香港及测试环境规则不变。有数据时仍正常配置并验证保存结果。通知保留默认接收人、触发条件和邮件类型；预览只检查加载与接口资源，不填写表单。创建超时为标准 10 分钟，香港继续应用环境倍率。
 
 新增设置采用实际保存请求与独立详情回读验证，产品接口拒绝时不会静默跳过或伪造成功。后续填写可能触发已开启的通知；当前部署关闭填写前阅读时协议渲染器没有额外复选框，已有填写脚本保持兼容，回归覆盖新增契约、反馈及推广。
 
@@ -160,7 +178,7 @@ Token 单独保存在当前浏览器 localStorage 中（非加密存储），运
 
 创建脚本默认生成本地头图 fixture，也可通过 `HEADER_IMAGE_PATH` 指定图片。创建、填写、手动提报及发布会留下真实业务数据，不自动清理；提交结果不确定时不自动重复提交。公开表单步骤不会向公开域名注入后台 Token。
 
-`form-contact-publish` 和 `form-submission-reply-edit` 已移除注册配置，不再出现在可运行脚本清单。其历史实现和回归测试保留在代码库中；它们不是当前六步骤自动化配置的组成部分。
+`form-contact-publish` 和 `form-submission-reply-edit` 已移除独立注册配置，不再出现在可运行脚本清单。`form-all-fields-submit` 内部复用 `form-submission-reply-edit` 的编辑实现。
 
 内地版按实际页面状态等待姓名、手机号、邮箱生成，不依赖首次“是否收录联系人”弹窗。基础设置加载完成后，若没有全局收录入口，不配置该版本未提供的“忽略，不替换”策略；如果后续部署出现该入口，则仍使用原脚本的设置流程。
 
@@ -178,16 +196,26 @@ Token 单独保存在当前浏览器 localStorage 中（非加密存储），运
 
 AI 翻译等待参数 `AI_TRANSLATION_TIMEOUT_MS` 默认配置为 600000（10 分钟），整个多语言脚本为 900000（15 分钟）；香港环境继续应用环境超时倍率。实际服务曾耗时超过 6 分钟，脚本仍要求 AI 任务明确成功、译文完整并通过质量检查后才保存发布；超时会保留失败记录，不自动重复提交 AI 任务。
 
-`form-all-fields-submit` 的生产入口复用动态契约填写实现，不再保留固定 `qBM33p`、固定标题或固定 field key 的旧执行路径。要填写刚刚发布的表单，请在自动化配置中将 `form-all-fields-publish` 或 `form-all-fields-publish-mainland` 放在前一步，并显式建立以下参数映射：
+`form-lpxavn-submit` 按前序发布结果中的动态契约填写公开表单。请在自动化配置中将 `form-all-fields-publish` 或 `form-all-fields-publish-mainland` 放在前一步，并建立以下参数映射：
 
 | 来源输出路径 | 目标运行变量 | 用途 |
 | --- | --- | --- |
 | `formId` | `FORM_ID` | 解析配置中的 `/form/?id={{FORM_ID}}`，确定本次公开表单地址。 |
 | `formContract` | `FORM_CONTRACT` | 校验前序发布结果，并按动态 field key 填写同一份表单。 |
 
-这两个脚本不会在独立运行时自行配对；串联关系由自动化配置显式定义。对于两个全题型填写入口，Runner 统一将失败截图和上传 fixture 写入 `outputs/artifacts/<executionId>/<stepId>/<attemptId>/`，其中 `stepId` 使用实际注册脚本 ID；fixture 位于该 attempt 目录下的 `fixtures/`。委托共享实现不会改变制品目录或日志中的脚本名称。若 `executionId` 对应已有运行记录，Runner 会在返回最终执行结果前将制品描述合并到对应脚本记录，页面刷新或断开不会丢失已经落盘的制品索引。
+脚本不会在独立运行时自行配对；串联关系由自动化配置显式定义。Runner 将失败截图和上传 fixture 写入 `outputs/artifacts/<executionId>/<stepId>/<attemptId>/`，其中 `stepId` 使用实际注册脚本 ID；fixture 位于该 attempt 目录下的 `fixtures/`。委托共享实现不会改变制品目录或日志中的脚本名称。若 `executionId` 对应已有运行记录，Runner 会在返回最终执行结果前将制品描述合并到对应脚本记录，页面刷新或断开不会丢失已经落盘的制品索引。
 
-“填写指定表单”和动态全题型填写入口完成后都会输出 `formId`、`submissionId` 和 `submissionAssertions`。最后一项包含 `title`、`primaryContactName`、`groupContactName` 以及兼容提报详情断言的 `fields`（`姓名[1]` / `姓名[2]`）；它只用于准确关联本次提交、核对顶部名称和两个联系人，不输出手机号、邮箱、证件号或完整提交载荷。
+“填写指定表单”完成后输出 `formId`、`submissionId` 和 `submissionAssertions`。最后一项包含 `title`、`primaryContactName`、`groupContactName` 以及兼容提报详情断言的 `fields`（`姓名[1]` / `姓名[2]`）；它只用于准确关联本次提交、核对顶部名称和两个联系人，不输出手机号、邮箱、证件号或完整提交载荷。
+
+### 填报数量限制回归
+
+普通和内地创建脚本在“基础设置 → 填报设定”中开启数量限制，上限为 `2`，已满提示为“本表单填报名额已满（上限2人），暂不接受新的填报。”。除控件回显外，还检查保存请求、独立接口回读、刷新回读、草稿及发布配置，并将最终配置记录到 `formContract.settings.submissionQuota` 和 `form-settings.json`。
+
+`form-lpxavn-submit` 读取该契约后执行两次完整公开填写：首次必须成功，第二次必须返回 HTTP 200 及业务码 `40004` 或 `800003`，接口和页面提示须与配置完整一致，且不得生成新提交 ID 或成功结果凭证。两次均保留原有题型、格式边界、分页保持及提交载荷断言，继续检查接口和资源健康。第二次意外成功会判定失败并停止，不增加第三次提交或自动放宽上限。
+
+成功结果中的 `formId`、`submissionId`、`submissionAssertions` 始终对应首次公开成功记录，另输出 `quotaCheck`，并保存 `submission-quota-check.json` 与满额截图。契约未配置数量限制时仍只执行原有的一次公开填写。实际是否拦截以本次环境接口结果为准，后台展示计数不能替代公开提交验证。
+
+`form-all-fields-submit` 接收本次填写步骤的 `FORM_ID`、`SUBMISSION_ID`、`SUBMISSION_ASSERTIONS`，更新同一份提报，并按提报原始 `revision_no` 比较答案。`SUBMISSION_EDIT_MODE` 默认 `unchanged`，忽略旧会话遗留的修改值；需要真实修改时显式设为 `configured`，并提供非空 `SUBMISSION_EDIT_VALUES` JSON，例如 `{"单行输入":"本次修改"}`。同名字段可用 `姓名[1]` 定位。真实修改仅支持普通输入字段；矩阵、上传、签名和系统字段在保存后必须保持原值。API 回读会核对历史题目、选项和复杂答案，未修改保存还会展开矩阵核对详情。
 
 多语言脚本同样支持动态表单 ID。将任一前序发布脚本的输出路径 `formId` 映射到目标运行变量 `FORM_ID` 后，流水线会覆盖脚本配置中的默认值，并解析 `/form-activity/translation?id={{FORM_ID}}`。变量映射只读取同一次批次中的前序输出，不会读取其它历史批次。
 
@@ -204,13 +232,14 @@ AI 翻译等待参数 `AI_TRANSLATION_TIMEOUT_MS` 默认配置为 600000（10 �
 
 同版新增的 `weixin_share` 没有启用开关，始终不应出现在不可翻译清单中。其余分区也按对应功能开关计算；提交按钮缺失启用标记时按启用处理。
 
+2026-10-15 契约新增 `submission_view_qrcode`：`notification_config.submission_view_qrcode` 缺失或未启用时进入不可翻译清单，顺序位于 `promotion_link` 后。翻译原文单独读取 `draft=0` 的最后发布版本；页面加载的 `draft=1` 详情不能作为有新草稿时的翻译基线。
+
 | 运行环境／变量 | 使用的契约 |
 | --- | --- |
-| `TEST` 及其他环境代码 | 默认 `20260914` |
-| `CN_PROD`、`HK_PROD` | 默认 `20260914`，对应 2026-09-16 批次确认的新版生产部署 |
-| `TRANSLATION_SECTION_CONTRACT` | 可在脚本运行变量中显式设置为 `legacy` 或 `20260914`，优先于环境默认值；其他值在启动浏览器前报错。 |
+| 所有环境代码 | 默认 `20261015`，与当前本地业务代码契约一致，部署情况仍需实际回归确认。 |
+| `TRANSLATION_SECTION_CONTRACT` | 可在脚本运行变量中显式设置为 `legacy`、`20260914` 或 `20261015`；其他值在启动浏览器前报错。 |
 
-环境默认值是当前部署约定，不会从待测响应自动识别或降级版本。2026-09-16 已将内地、香港默认基线同步为新版；仅在明确验证旧部署时显式设置 `TRANSLATION_SECTION_CONTRACT=legacy`。启动日志会记录本次使用的 `translationSectionContract`。
+契约不会从待测响应自动识别或降级版本。仅在明确验证旧部署时显式选择旧契约；启动日志会记录本次使用的 `translationSectionContract`。
 
 ### 手动创建提报参数
 
@@ -245,9 +274,9 @@ AI 翻译等待参数 `AI_TRANSLATION_TIMEOUT_MS` 默认配置为 600000（10 �
 
 | 环境 | 创建表单步骤 | 后续共用步骤 |
 | --- | --- | --- |
-| 测试（`TEST`） | `form-all-fields-publish` | 填写指定表单 → 检查提报列表 → 检查并编辑提报信息 → 手动创建提报信息 → 设置校验表单多语言翻译 |
+| 测试（`TEST`） | `form-all-fields-publish` | 设置校验表单多语言翻译（含发布） → 手动创建提报信息 → 填写指定表单（首次成功、第二次满额拦截） → 检查提报列表 → 检查并编辑提报信息 |
 | 内地生产（`CN_PROD`） | `form-all-fields-publish-mainland` | 同上 |
-| 香港生产（`HK_PROD`） | `form-all-fields-publish` | 同上；也可将多语言翻译放在创建之后，再执行填写和提报检查 |
+| 香港生产（`HK_PROD`） | `form-all-fields-publish` | 同上 |
 
 2026-09-11 的实际并发验收使用“测试表单冒烟测试”“内地表单冒烟测试”“香港表单冒烟测试”，三个环境各六步全部通过，共 46,205 条断言，失败 0；三个批次同时运行的时间重叠约 624 秒。验收记录对应当时配置和业务版本，后续运行仍以实际断言、网络和 AI 服务结果为准。
 
@@ -255,14 +284,14 @@ AI 翻译等待参数 `AI_TRANSLATION_TIMEOUT_MS` 默认配置为 600000（10 �
 
 | 目标步骤 | 来源步骤及输出 | 目标变量 |
 | --- | --- | --- |
-| 填写指定表单 | 创建步骤：`formId`、`formContract` | `FORM_ID`、`FORM_CONTRACT` |
-| 检查提报列表 | 填写步骤：`formId`、`submissionId`、`submissionAssertions` | `FORM_ID`、`SUBMISSION_ID`、`SUBMISSION_ASSERTIONS` |
-| 检查并编辑提报信息（当前动态填写入口） | 创建步骤：`formId`、`formContract` | `FORM_ID`、`FORM_CONTRACT` |
-| 手动创建提报信息 | 创建步骤：`formId`、`formContract` | `FORM_ID`、`FORM_CONTRACT` |
 | 设置校验表单多语言翻译 | 创建步骤：`formId` | `FORM_ID` |
+| 手动创建提报信息（第三步） | 创建步骤：`formId`、`formContract` | `FORM_ID`、`FORM_CONTRACT` |
+| 填写指定表单 | 多语言步骤：`formId`；创建步骤：`formContract` | `FORM_ID`、`FORM_CONTRACT` |
+| 检查提报列表 | 填写步骤：`formId`、`submissionId`、`submissionAssertions` | `FORM_ID`、`SUBMISSION_ID`、`SUBMISSION_ASSERTIONS` |
+| 检查并编辑提报信息 | 填写步骤：`formId`、`submissionId`、`submissionAssertions` | `FORM_ID`、`SUBMISSION_ID`、`SUBMISSION_ASSERTIONS` |
 
 每个来源只能选当前步骤之前的脚本，调整顺序后需检查映射。内地配置切换创建脚本时，也需把映射来源改为 `form-all-fields-publish-mainland`。
-运行前检查脚本是否启用、环境是否可用以及登录态是否有效。浏览器中的配置、环境和 Tab 偏好不会随 Git 提交迁移；新电脑需按这些步骤重新配置。
+运行前检查脚本是否启用、环境是否可用以及登录态是否有效。环境、流程和 Tab 偏好保存在 `data/app-settings/`，不会随 Git 提交；换电脑时单独迁移此目录即可恢复配置，导入的 Token 仍需确认是否有效。
 
 ### 同时运行三个环境
 
@@ -349,8 +378,10 @@ autoTest/
 │  │     └─ components/    # 业务组件
 │  └─ api/                 # 本地 Playwright HTTP Runner
 ├─ config/
+│  ├─ local-services.json  # Web 端口及其关联服务的统一配置
 │  └─ scripts/             # 按脚本拆分的持久化 JSON 配置
 ├─ data/
+│  ├─ app-settings/        # 环境、自动化流程、Tab 偏好及导入的登录态
 │  └─ run-records/         # 按批次拆分的本地运行记录
 ├─ scripts/                # 自动化脚本与本地 Supervisor
 ├─ package.json            # npm workspaces 与统一命令
@@ -369,11 +400,12 @@ Runner 不接受运行请求传入任意文件路径。接入脚本需要：
 
 ## 数据与安全
 
-- 环境和自动化配置保存在浏览器 `localStorage`。
+- 环境、自动化配置、运行记录 Tab 偏好和导入的登录态统一保存在 `data/app-settings/settings.json`，与 Web 端口和浏览器无关。保存采用版本校验及原子替换，上一版保留为 `settings.json.bak`；写入失败会提示错误。
+- 旧浏览器配置自动迁移，已有磁盘配置优先；空列表和删除标记会阻止旧端口恢复已删除的数据。浏览器原数据保留作升级备份，后续修改以磁盘文件为准。
 - 脚本配置以一脚本一文件的方式保存在 `config/scripts/`，应随 Git 提交；运行记录保存在 `data/run-records/`，不会因清理浏览器数据而删除。
-- 平台登录会话及运行时变量使用 `sessionStorage`；环境配置和手动导入的复用 Token 存于当前浏览器 `localStorage`。退出平台会清理运行时变量，已导入的登录态需在环境管理中单独清除。
+- 平台登录会话及运行时变量使用 `sessionStorage`，换端口或关闭会话后需重新登录和生成运行时变量。退出平台会清理运行时变量，已导入的登录态需在环境管理中单独清除。
 - Token、Authorization、手机号、验证码、密码及标记为 secret 的变量不会写入运行记录明文。
-- Git clone 会迁移代码和 `config/scripts/` 中已提交的脚本配置，不迁移浏览器本地配置或被 `.gitignore` 排除的运行历史。
+- Git clone 会迁移代码、端口设置和 `config/scripts/` 中已提交的脚本配置；需单独备份 `data/app-settings/` 和 `data/run-records/`，它们均被 Git 忽略。前者含凭据和 Token，请妥善保管。
 - 脚本配置通过 Repository 接口访问；后续可将文件仓储替换为 MySQL 实现，而不改变 Web API 和 Runner 执行协议。
 
 ## 开发校验
@@ -419,11 +451,13 @@ TEST 本次单脚本验证耗时约 2 分 16 秒，繁体中文、英文各完�
 | 设置范围 | 操作与断言 |
 | --- | --- |
 | 基础设置 | 保存用户协议名称和富文本正文，不要求填写前阅读；按提交成功行为配置首个可用分类、标签，核对保存参数和独立回读。 |
-| 管理者通知 | 开启邮件通知，填写本次运行专属标题和正文；保留默认接收人、触发条件及通知类型，核对保存请求、界面回显和持久化结果。 |
+| 管理者通知 | 内地和普通版均开启通知，填写邮件标题及富文本正文，保留默认接收人、触发条件和邮件类型；校验草稿独立回读及发布后的自定义邮件模板。 |
 | 消息与触达 | 配置用户自动化邮件、自定义富文本反馈和底部推广；校验正文、样式、链接、上传图片以及完整保存参数。 |
 | 分享与传播 | 创建本次运行专属分享渠道，检查名称、长短链、服务器标识、启用状态及刷新回显。 |
-| 发布前预览 | 等待表单挂载、接口正文、图片及字体加载完成，检查网络健康，保存截图和网络证据后关闭预览。 |
+| 发布后预览 | 先发布表单并回读列表确认，再进入设置页预览；等待表单挂载、接口正文、图片及字体加载完成，检查网络健康，保存截图和网络证据后关闭预览。 |
 | 发布后核对 | 对照实际保存值检查协议、分类标签、反馈和推广；邮件从自定义通知模板独立回读标题、正文及默认参数。 |
+
+当前三个环境的冒烟流程均先创建并发布表单，再执行多语言 AI 翻译、保存回读及完成发布，随后执行填写和提报检查。创建脚本单独运行只负责原文表单发布及预览，多语言操作由后续脚本执行。
 
 `form-settings.json` 保存设置证据，并将设置输出到 `formContract.settings`；预览另外保存 `form-settings-preview.png` 和 `form-settings-preview-network.json`。邮件模板校验不代表实际投递成功，预览加载检查不代表逐项视觉检查，也不实际提交表单或点击推广链接。内地环境分类和标签均无选项时允许跳过，其他环境仍保留失败断言。
 
@@ -450,6 +484,22 @@ TEST 本次单脚本验证耗时约 2 分 16 秒，繁体中文、英文各完�
 管理端完整列表的页长统一为 10、20、50，默认 20。脚本、环境、自动化配置、运行记录主列表，以及批次选择弹窗、脚本运行日志和运行详情中的接口、资源、脚本、日志、截图、断言分组及子断言均适用。筛选或切换页长后回到第一页，数据减少时修正越界页码；仪表盘“最近运行”和运行概览的执行轨迹仍是固定条数摘要。
 
 本次本地完整验证：`npm test` 中 Web 297 项、API／Chrome 461 项，共 758 项通过，失败 0。测试包含本地页面和模拟接口夹具；新增脚本在真实测试或生产环境的业务执行结果仍应以对应运行记录为准。
+
+### 2026-10-19 数量限制与真实环境回归
+
+以下批次使用数量上限 2 和调整后的六步顺序；短链校验当时仍使用旧的精确域名规则：
+
+| 环境 | 批次 | 实际结果 |
+| --- | --- | --- |
+| 测试 TEST | `RUN-20261019-24BBC4` | 6/6 通过，17,427 条断言；第二次公开提交返回 40004，提示语完整匹配。 |
+| 香港 HK_PROD | `RUN-20261019-C5E805` | 6/6 通过，17,423 条断言；满额拦截、后续列表及编辑通过。 |
+| 内地 CN_PROD | `RUN-20261019-BCECFA` | 2 通过、1 部分通过、1 失败、2 跳过。第二次公开提交仍返回成功；英文用户协议残留 `issue定位`；短链实际返回 `mvr.1xi.co`。 |
+
+内地批次的英文漏译在保存、独立回读及发布后持续存在，同一内容问题触发 8 条质量断言；接口 HTTP 成功不代表译文质量通过。短链跳转、二维码及渠道校验通过，域名断言已按新约定改为带非空前缀的 `1xi.co` 子域名，并用该批次实际短链回放通过；没有据此改写历史批次结果。公开提交配额异常与英文译文质量仍待产品代码处理。
+
+多语言收尾仍仅记录被清理的未完成请求数量（本次香港 24 条、内地 12 条），尚未逐条保存地址与阶段；不能将这些数量等同于接口失败。
+
+本次本地校验：类型检查与构建通过，Web 304 项通过；API 全量首轮 493 项中 492 项通过。唯一失败项是静态资源采集测试夹具中的业务 GET 正文与页面跳转竞态，已调整夹具等待时机、保留全部断言，定向复测 1/1 通过；修复后未再次执行 API 全量。
 
 ## 当前限制
 

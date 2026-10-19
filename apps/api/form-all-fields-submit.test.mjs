@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { executeRegisteredScript } from './script-runner.mjs'
-import { SCRIPT_ID, run } from '../../scripts/form-all-fields-submit.ui.spec.mjs'
+import { SCRIPT_ID, run, resolveEditValues } from '../../scripts/form-all-fields-submit.ui.spec.mjs'
 import { resolvePipelinePath } from './pipeline-values.mjs'
 
 test('registered editor requires an existing submission and rejects public or creation paths', async () => {
@@ -23,14 +23,27 @@ test('registered editor requires an existing submission and rejects public or cr
   }), /SUBMISSION_ID.*不一致/)
 })
 
-test('registered fifth step waits for original answers, updates once, and reloads the same submission', async (t) => {
+test('keeps unchanged saves as baseline and permits explicitly configured real edits', () => {
+  assert.equal(resolveEditValues({ SUBMISSION_EDIT_VALUES: '{"单行输入":"旧会话值"}' }), '{}')
+  assert.equal(resolveEditValues({ SUBMISSION_EDIT_MODE: 'configured', SUBMISSION_EDIT_VALUES: '{"单行输入":"本次修改"}' }), '{"单行输入":"本次修改"}')
+  assert.throws(() => resolveEditValues({ SUBMISSION_EDIT_MODE: 'unknown' }), /仅支持/)
+  assert.throws(() => resolveEditValues({ SUBMISSION_EDIT_MODE: 'configured' }), /非空/)
+})
+
+for (const editMode of ['unchanged', 'configured']) {
+test(`registered editor waits for original answers and persists ${editMode} values on the same submission`, async (t) => {
   const formId = 'linked-form'
   const submissionId = 'existing-submission'
   const original = { username: '原提报姓名', groupUsername: '原题组姓名' }
+  const expectedSaved = editMode === 'configured' ? { ...original, username: '本次修改后的姓名' } : original
   let saved = { ...original }
   const requests = []
   const mutations = []
   let answersLoaded = false
+  const answerDetail = () => ({ code: 0, data: {
+    submission: { id: submissionId, form_id: formId, revision_no: 1 },
+    items: Object.entries(saved).map(([item_key, answer], index) => ({ item_key, revision_no: 1, sort: index + 1, type_code: 'username', label: '姓名', value: [{ answer_item_key: item_key, answer }] })),
+  } })
   const artifactRootDirectory = await mkdtemp(join(tmpdir(), 'autotest-existing-reply-'))
   const detailPath = `/form-activity/submission/preview/reply/${submissionId}?fid=${formId}`
   const apiPath = `/api/be/form/${formId}/submission/${submissionId}`
@@ -50,7 +63,7 @@ test('registered fifth step waits for original answers, updates once, and reload
           answersLoaded = true
           response.end(JSON.stringify({ code: 0, data: saved }))
         }, 900)
-      } else json({ code: 0, data: saved })
+      } else json(answerDetail())
       return
     }
     if (request.method === 'PUT' && url.pathname === apiPath) {
@@ -73,7 +86,7 @@ test('registered fifth step waits for original answers, updates once, and reload
         const shell = body => { main.innerHTML = '<h2>联动表单</h2><span><span aria-hidden="true"></span> 已提交 </span><h3>提报信息</h3>' + body }
         async function detail() {
           const result = await fetch(apiPath, { headers }).then(r => r.json())
-          shell(labels.map(key => '<div class="reply-kv__row"><span class="reply-kv__label">姓名</span><span class="reply-kv__value">' + escape(result.data[key]) + '</span></div>').join('') + '<button id="edit">编辑</button>')
+          shell(labels.map(key => '<div class="reply-kv__row"><span class="reply-kv__label">姓名</span><span class="reply-kv__value">' + escape(result.data.items.find(item => item.item_key === key).value[0].answer) + '</span></div>').join('') + '<button id="edit">编辑</button>')
           document.querySelector('#edit').onclick = edit
         }
         async function edit() {
@@ -108,6 +121,7 @@ test('registered fifth step waits for original answers, updates once, and reload
   const variables = {
     FORM_ID: formId, SUBMISSION_ID: submissionId, SUBMISSION_ASSERTIONS: JSON.stringify(submissionAssertions),
     SUBMISSION_EDIT_VALUES: JSON.stringify({ '姓名[1]': '不应应用的会话旧值' }),
+    ...(editMode === 'configured' ? { SUBMISSION_EDIT_MODE: 'configured', SUBMISSION_EDIT_VALUES: JSON.stringify({ '姓名[1]': expectedSaved.username }) } : {}),
   }
   const result = await executeRegisteredScript({
     runId: 'edit-attempt-001', executionId: 'edit-execution-001', scriptId: SCRIPT_ID,
@@ -118,8 +132,8 @@ test('registered fifth step waits for original answers, updates once, and reload
     },
   }, { artifactRootDirectory })
   assert.equal(result.ok, true, [result.error, ...result.assertions.filter(a => a.status === 'failed').map(a => `${a.name}: ${a.error}`)].filter(Boolean).join('\n'))
-  assert.deepEqual(saved, original)
-  assert.deepEqual(mutations, [{ body: { answers: original }, answersLoaded: true, authorization: 'Bearer registered-edit-token' }])
+  assert.deepEqual(saved, expectedSaved)
+  assert.deepEqual(mutations, [{ body: { answers: expectedSaved }, answersLoaded: true, authorization: 'Bearer registered-edit-token' }])
   assert.equal(requests.filter(r => r.method === 'POST').length, 0)
   assert.ok(requests.filter(r => r.method === 'GET' && r.path === apiPath).length >= 4)
   assert.equal(result.result.scriptId, SCRIPT_ID)
@@ -128,9 +142,10 @@ test('registered fifth step waits for original answers, updates once, and reload
   assert.equal(result.result.updateRequestCount, 1)
   assert.equal(result.result.createRequestCount, 0)
   assert.equal(result.result.reloaded, true)
-  assert.deepEqual(result.result.appliedEditFields, [])
+  assert.deepEqual(result.result.appliedEditFields, editMode === 'configured' ? ['姓名[1]'] : [])
   assert.deepEqual(result.result.submissionAssertions, submissionAssertions)
   assert.equal(result.artifacts.length, 2)
   assert.ok(result.artifacts.every(artifact => artifact.stepId === SCRIPT_ID && artifact.type === 'screenshot'))
   assert.doesNotMatch(JSON.stringify(result), /registered-edit-token/)
 })
+}

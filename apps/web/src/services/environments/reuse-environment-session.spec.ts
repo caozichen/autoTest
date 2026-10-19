@@ -82,6 +82,7 @@ describe('reusable environment authentication', () => {
     let cancelled = false
     const pending = authenticateEnvironment(environment, { environmentSessions: sessions,
       environmentLogin: { login }, runtimeVariables }, () => cancelled)
+    await vi.waitFor(() => expect(login).toHaveBeenCalledOnce())
     expect(runtimeVariables.list()).toEqual([])
     cancelled = true
     resolve({ businessSuccess: true })

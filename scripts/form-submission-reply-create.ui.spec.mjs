@@ -255,12 +255,12 @@ async function assertInitialCreateStructure(page, {
   await expect(page.getByText('编辑中', { exact: true }).first(), '创建态应显示“编辑中”状态')
     .toBeVisible()
   await expect(
-    page.getByRole('heading', { level: 3, name: /^(?:提報資訊|填报信息|提报信息)$/ }),
+    page.getByRole('heading', { level: 3, name: /^(?:提報資訊|填报信息|提报信息|填報資訊|Submission Information)$/i }),
     '创建态应显示“提报信息”分区',
   ).toBeVisible()
 
   const cancelButton = page.getByRole('button', { name: /^取消创建$/ })
-  const createButton = page.getByRole('button', { name: /^创建提报$/ })
+  const createButton = page.getByRole('button', { name: /^(?:创建提报|创建填报|建立提報|建立填報|Create submission)$/i })
   await expect(cancelButton, '创建态应唯一显示“取消创建”按钮').toHaveCount(1)
   await expect(cancelButton, '创建态“取消创建”按钮应可见且可用').toBeVisible()
   await expect(cancelButton, '创建态“取消创建”按钮应可见且可用').toBeEnabled()
@@ -581,7 +581,7 @@ async function assertDetailState(page, { formId, submissionId, title, data, fixt
     await expect(summaryStatuses.first(), '创建成功后的“已提交”状态应可见').toBeVisible()
   }
   await expect(page.getByRole('button', { name: /^(?:编辑|編輯)$/ }), '详情态应唯一显示“编辑”按钮').toHaveCount(1)
-  await expect(page.getByRole('button', { name: /^(?:创建提报|取消创建)$/ }), '详情态不应残留创建操作').toHaveCount(0)
+  await expect(page.getByRole('button', { name: /^(?:创建提报|取消创建|创建填报|建立提報|建立填報|Create submission)$/i }), '详情态不应残留创建操作').toHaveCount(0)
   expect(new URL(page.url()).searchParams.get('fid'), '详情态 URL 应保留目标 fid').toBe(formId)
 
   let assertedValueCount = 0

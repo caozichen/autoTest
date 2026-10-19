@@ -1060,7 +1060,6 @@ async function checkCompleteForm({ mainland, execute }) {
     }] } },
     feedback: { savedParameters: { enabled: 1, content: '<h2>自动化测试完成</h2><ul><li>富文本反馈</li></ul>' } },
     promotion: { savedParameters: { enabled: 1, title: '自动化测试·访问百度', type: 'href', url: 'https://www.baidu.com/' } },
-    preview: { loaded: true, closed: true },
   }
   const uploadIntents = new Map()
   const screenshotCaptures = []
@@ -1310,6 +1309,13 @@ async function checkCompleteForm({ mainland, execute }) {
           workflowEvents.push('additional-settings-complete')
           return structuredClone(additionalSettings)
         },
+        inspectPublishedPreview: async ({ page, phase }) => {
+          assert.equal(published, true, '预览必须在表单发布之后执行')
+          assert.equal(phase, '发布后预览')
+          assert.match(page.url(), /\/form-activity\/settings\?id=202&step=share/)
+          workflowEvents.push('published-preview')
+          return { loaded: true, closed: true }
+        },
       })
     }
     const result = await runScenario()
@@ -1324,10 +1330,11 @@ async function checkCompleteForm({ mainland, execute }) {
     assert.equal(additionalSettingsCalls, 1, '追加设置只执行一次，不能重复保存或创建分享渠道')
     assert.deepEqual(workflowEvents, [
       'contact-settings-complete', 'additional-settings-start', 'additional-settings-complete',
-      'publish', 'read-published-notification-templates',
-    ], '必须等待全部追加设置完成后发布，再独立读取发布后通知模板')
+      'publish', 'published-preview', 'read-published-notification-templates',
+    ], '必须先保存设置并发布表单，发布后预览，再独立读取发布后通知模板')
     const expectedSettings = {
       ...additionalSettings,
+      preview: { loaded: true, closed: true },
       publishedNotifications: {
         managerNotification: {
           scenarioCode: 'submitted_success', channel: 'email',

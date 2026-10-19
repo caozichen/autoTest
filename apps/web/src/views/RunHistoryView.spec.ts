@@ -24,6 +24,7 @@ const serviceMocks = vi.hoisted(() => ({
 vi.mock('@/services/container', () => ({
   services: {
     environments: { list: serviceMocks.environments },
+    runHistoryTabs: { read: async () => readRunHistoryTabs() },
     runRecords: {
       list: serviceMocks.list,
       get: serviceMocks.get,
@@ -40,6 +41,7 @@ vi.mock('@/components/RunRecordDetailDrawer.vue', () => ({
 
 import type { RunRecord, RunRecordCounts, RunRecordStatus } from '@/domain/run-record'
 import RunHistoryView from './RunHistoryView.vue'
+import { readRunHistoryTabs } from '@/services/run-records/run-history-tabs'
 
 const mountedApps: App[] = []
 const tableDataKey = Symbol('run-history-table-data')

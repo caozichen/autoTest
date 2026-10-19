@@ -20,9 +20,9 @@ export interface EnvironmentSessionDraft {
 }
 
 export interface EnvironmentSessionService {
-  get(environment: TestEnvironment): EnvironmentSession | null
-  save(environment: TestEnvironment, draft: EnvironmentSessionDraft): EnvironmentSession
-  clear(environmentId: string): void
+  get(environment: TestEnvironment): EnvironmentSession | null | Promise<EnvironmentSession | null>
+  save(environment: TestEnvironment, draft: EnvironmentSessionDraft): EnvironmentSession | Promise<EnvironmentSession>
+  clear(environmentId: string): void | Promise<void>
 }
 
 function normalizedUrl(value: string): string {

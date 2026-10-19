@@ -53,7 +53,7 @@ export class HttpAutomationPipelineExecutionService implements AutomationPipelin
   private async submit(pipeline: AutomationPipeline, environmentId: string | undefined, executionId: string): Promise<RunRecord> {
     const environment = (await this.dependencies.environments.list()).find(item => item.id === environmentId)
     if (!environment || !environment.enabled) throw new Error('请选择可用的运行环境')
-    const session = environment.auth.strategy === 'reuse-session' ? this.dependencies.environmentSessions?.get(environment) : undefined
+    const session = environment.auth.strategy === 'reuse-session' ? await this.dependencies.environmentSessions?.get(environment) : undefined
     if (environment.auth.strategy === 'reuse-session' && !session) throw new Error('当前环境没有匹配的登录态，请到环境管理导入')
     const execution: PipelineExecutionSnapshot = { id: executionId, pipelineId: pipeline.id, pipelineName: pipeline.name,
       environment: { id: environment.id, name: environment.name, code: environment.code, apiBaseUrl: environment.apiBaseUrl },

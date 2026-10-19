@@ -1,10 +1,14 @@
 import { scaleTimeout } from './environment-timeouts.mjs'
+import { readResponseText } from './navigation-response-body.mjs'
 const MAX_BODY_CHARACTERS = 100_000
 const DEFAULT_RESPONSE_DRAIN_TIMEOUT_MS = 2_000
 const HONG_KONG_RESPONSE_DRAIN_TIMEOUT_MS = 15_000
 const DEFAULT_NETWORK_PHASE = '未标记'
 const DIAGNOSTIC_CORRELATION_WINDOW_MS = 100
 const API_RESOURCE_TYPES = new Set(['eventsource', 'fetch', 'xhr'])
+const STATIC_ASSET_PATH = /^\/(?:assets|static|form-building)\//
+const STATIC_ASSET_EXTENSION = /\.(?:json|[cm]?js|css|wasm|svg|png|jpe?g|gif|webp|ico|woff2?|ttf|otf)$/i
+const BUSINESS_API_PATH = /\/(?:api|be|base|f)(?:\/|$)/
 const HTTP_PROTOCOLS = new Set(['http:', 'https:'])
 const CACHE_STATUS_HEADERS = [
   'cf-cache-status',
@@ -73,6 +77,18 @@ function parseHttpUrl(request) {
   } catch {
     return null
   }
+}
+
+function requestCategory(url, method, resourceType) {
+  // Bundled data such as area-tree.*.json is a resource even when fetched by JS.
+  // Keep business routes and writes as APIs, including endpoints ending in .json.
+  const staticAsset = ['GET', 'HEAD'].includes(method)
+    && ['fetch', 'xhr'].includes(resourceType)
+    && STATIC_ASSET_PATH.test(url.pathname)
+    && STATIC_ASSET_EXTENSION.test(url.pathname)
+    && !BUSINESS_API_PATH.test(url.pathname)
+  if (staticAsset) return 'resource'
+  return API_RESOURCE_TYPES.has(resourceType) || method === 'OPTIONS' ? 'api' : 'resource'
 }
 
 function requestLocation(request, resourceType, url) {
@@ -692,8 +708,8 @@ export function attachNetworkObserver(target, {
       return Promise.resolve({ body: undefined })
     }
     if (!state.bodyPromise) {
-      state.bodyPromise = Promise.resolve()
-        .then(() => response.text())
+      // Start in the response event, before another listener can navigate away.
+      state.bodyPromise = readResponseText(response)
         .then((value) => ({
           body: parseBodyText(value, safely(() => response.headers()['content-type'], '') ?? ''),
         }))
@@ -760,7 +776,7 @@ export function attachNetworkObserver(target, {
         frameGenerations.set(frame, (frameGenerations.get(frame) ?? 0) + 1)
       }
       const navigationGeneration = frame ? (frameGenerations.get(frame) ?? 0) : undefined
-      const category = API_RESOURCE_TYPES.has(resourceType) || method === 'OPTIONS' ? 'api' : 'resource'
+      const category = requestCategory(url, method, resourceType)
       if ((category === 'api' && !includeApi) || (category === 'resource' && !includeResources)) return
       let accepted = false
       try {

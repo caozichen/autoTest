@@ -4,9 +4,7 @@ import { ArrowDown, ArrowUp, Delete, Plus } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { services } from '@/services/container'
 import {
-  readRunHistoryTabs,
   resolveRunHistoryTabs,
-  saveRunHistoryTabs,
   type RunHistoryEnvironment,
 } from '@/services/run-records/run-history-tabs'
 
@@ -15,6 +13,7 @@ const selectedIds = ref<string[]>([])
 const savedIds = ref<string[]>([])
 const addId = ref('')
 const loading = ref(true)
+const saving = ref(false)
 const loadFailed = ref(false)
 const selected = computed(() => resolveRunHistoryTabs(environments.value, selectedIds.value))
 const available = computed(() => environments.value.filter((environment) => !selectedIds.value.includes(environment.id)))
@@ -25,7 +24,7 @@ async function load(): Promise<void> {
   loadFailed.value = false
   try {
     environments.value = await services.environments.list()
-    selectedIds.value = resolveRunHistoryTabs(environments.value, readRunHistoryTabs()).map(({ id }) => id)
+    selectedIds.value = resolveRunHistoryTabs(environments.value, await services.runHistoryTabs.read()).map(({ id }) => id)
     savedIds.value = [...selectedIds.value]
   } catch {
     loadFailed.value = true
@@ -50,14 +49,17 @@ function move(index: number, offset: number): void {
   selectedIds.value = next
 }
 
-function save(): void {
+async function save(): Promise<void> {
+  if (saving.value) return
+  saving.value = true
+  const ids = [...selectedIds.value]
   try {
-    saveRunHistoryTabs(selectedIds.value)
-    savedIds.value = [...selectedIds.value]
+    await services.runHistoryTabs.save(ids)
+    savedIds.value = ids
     ElMessage.success('运行记录 Tab 配置已保存')
-  } catch {
-    ElMessage.error('保存失败，请检查浏览器存储权限后重试')
-  }
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '保存失败，请检查本地 Runner 后重试')
+  } finally { saving.value = false }
 }
 
 onMounted(() => void load())
@@ -97,9 +99,9 @@ onMounted(() => void load())
         <p v-if="selected.length === 0" class="hint">当前仅显示“全部环境”，可以在上方添加环境 Tab。</p>
         <div class="preview"><h2>Tab 预览</h2><div><span class="preview-all">全部环境</span><span v-for="environment in selected" :key="environment.id">{{ environment.name }}</span></div></div>
         <footer>
-          <span class="hint">{{ dirty ? '有未保存的更改' : '配置已保存于当前浏览器' }}</span>
+          <span class="hint">{{ dirty ? '有未保存的更改' : '配置与本机项目同步' }}</span>
           <el-button :disabled="!dirty" @click="selectedIds = [...savedIds]; addId = ''">撤销更改</el-button>
-          <el-button type="primary" @click="save">保存配置</el-button>
+          <el-button type="primary" :loading="saving" @click="save">保存配置</el-button>
         </footer>
       </template>
     </section>

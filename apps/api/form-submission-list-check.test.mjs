@@ -134,6 +134,8 @@ async function createFixtureRun(t, {
   const artifactRoot = await mkdtemp(join(tmpdir(), `autotest-submission-list-${scenario}-`))
   const observedRequests = []
   let listDocumentCount = 0
+  let contactDateSearchSeen = false
+  let lateContactResetCompleted = false
 
   const server = createServer((request, response) => {
     const url = new URL(request.url || '/', 'http://fixture.local')
@@ -153,14 +155,28 @@ async function createFixtureRun(t, {
           request.socket.destroy()
           return
         }
-        sendHtml(response, createSubmissionListHtml({
+        let html = createSubmissionListHtml({
           fixture,
           locale,
           resourcePath: scenario === 'resource-failure'
             ? '/fixture-assets/missing-submission-list.css'
             : '/fixture-assets/submission-list.css',
           injectWriteRequest: scenario === 'write-request' && listDocumentCount === 1,
-        }))
+        })
+        if (scenario === 'slow-checkbox-navigation') {
+          html = html.replace('</body>', `<script>
+            document.addEventListener('change', (event) => {
+              if (!event.target.matches('.basic-setting-list input')) return
+              if (event.target.value.startsWith('dyn_landlinePhone_')) {
+                void fetch('/api/be/checkbox-ready', { headers: { Authorization: localStorage.getItem('token') || '' } })
+                return
+              }
+              if (!event.target.value.startsWith('dyn_address_')) return
+              window.location.href = '/fixture-assets/checkbox-navigation?checked=' + event.target.checked
+            })
+          </script></body>`)
+        }
+        sendHtml(response, html)
         return
       }
       if (
@@ -197,6 +213,16 @@ async function createFixtureRun(t, {
       }
       if (request.method === 'GET' && url.pathname === `/api/be/form/${fixture.formId}/contact`) {
         const contacts = filterContactRecords(url, fixture.contacts)
+        if (filterKeys(url).includes('filter[created_at_between]')) contactDateSearchSeen = true
+        if (scenario === 'slow-final-contact' && contactDateSearchSeen && filterKeys(url).length === 0) {
+          response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' })
+          response.flushHeaders()
+          setTimeout(() => {
+            lateContactResetCompleted = true
+            response.end(JSON.stringify(responseWithRecords(fixture.contactResponse, contacts)))
+          }, 2600)
+          return
+        }
         sendJson(response, responseWithRecords(fixture.contactResponse, contacts))
         return
       }
@@ -212,6 +238,15 @@ async function createFixtureRun(t, {
         && url.pathname === `/api/be/form/${fixture.formId}/submission/${fixture.submissionId}`
       ) {
         sendJson(response, { code: 0, message: 'fixture write should be rejected by the checker' })
+        return
+      }
+      if (request.method === 'GET' && url.pathname === '/api/be/checkbox-ready') {
+        setTimeout(() => sendJson(response, { code: 0, data: {} }), 2000)
+        return
+      }
+      if (request.method === 'GET' && url.pathname === '/fixture-assets/checkbox-navigation') {
+        // HTTP 204 ends the attempted navigation while retaining the current document.
+        setTimeout(() => { response.writeHead(204); response.end() }, 3500)
         return
       }
       if (request.method === 'GET' && url.pathname === '/fixture-assets/detail-image.png') {
@@ -300,8 +335,31 @@ async function createFixtureRun(t, {
     artifactRoot,
     observedRequests,
     listDocumentCount,
+    lateContactResetCompleted,
   }
 }
+
+test('waits for the final contact reset response body before sealing network evidence', async t => {
+  const { result, lateContactResetCompleted } = await createFixtureRun(t, { scenario: 'slow-final-contact' })
+  assert.equal(lateContactResetCompleted, true)
+  assert.equal(result.status, 'passed')
+  assert.deepEqual(failureAssertions(result), [])
+  assert.ok(result.apiResponses.every(entry => !entry.incomplete))
+})
+
+test('keeps checkbox selections and linked search fields while an unrelated navigation stalls', async t => {
+  const { result, observedRequests } = await createFixtureRun(t, { scenario: 'slow-checkbox-navigation' })
+  assert.equal(result.status, 'passed', [result.error, JSON.stringify(failureAssertions(result))].filter(Boolean).join('\n'))
+  assert.deepEqual(failureAssertions(result), [])
+  assert.equal(result.result.basicFieldCount, BASIC_SUBMISSION_FIELDS.length)
+  assert.equal(result.result.submissionSearchCount, SUBMISSION_SEARCH_FIELDS.length)
+  assert.ok(result.assertions.some(entry => entry.name === '基础字段“地址”应保持勾选' && entry.status === 'passed'))
+  assert.ok(result.assertions.some(entry => entry.name === '勾选基础字段“地址”后对应检索字段应自动勾选' && entry.status === 'passed'))
+  const addressChanges = observedRequests.map(requestUrl)
+    .filter(url => url.pathname === '/fixture-assets/checkbox-navigation')
+  assert.equal(addressChanges.length, 1, '地址只应被勾选一次，不能通过重试点击将它取消')
+  assert.equal(addressChanges[0].searchParams.get('checked'), 'true')
+})
 
 test('resolves only the exact same-origin submission-list route and matching run identifiers', () => {
   assert.equal(DEFAULT_REQUEST_PATH, '/form-activity/submission/preview?id=4J02PQ')

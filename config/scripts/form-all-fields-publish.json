@@ -3,7 +3,7 @@
   "revision": 1,
   "id": "form-all-fields-publish",
   "name": "创建完整表单",
-  "description": "Chrome 无头模式创建三页全题型表单，设置必填、用户协议、分类标签、管理者和用户邮件通知、富文本反馈、推广链接及分享渠道，检查预览后发布并输出联动参数。",
+  "description": "Chrome 无头模式创建三页全题型表单，配置必填、用户协议、分类标签、管理者和用户邮件通知、富文本反馈、推广链接及分享渠道；先发布表单，再检查预览并输出联动参数，供后续多语言翻译和发布使用。",
   "directory": "scripts",
   "entryFile": "form-all-fields-publish.ui.spec.mjs",
   "timeoutMs": 600000,
