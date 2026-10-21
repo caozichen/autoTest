@@ -1,20 +1,61 @@
 {
   "schemaVersion": 1,
-  "revision": 1,
+  "revision": 2,
   "id": "form-email-five-submit",
   "name": "邮件测试表单：五邮箱填写",
-  "description": "创建仅含姓名、手机号、邮箱的必填联系人表单，在消息及触达配置提交成功邮件和邮件测试说明，发布后分别使用 QQ、163、Gmail、Outlook、灵析五个指定邮箱提交并校验页面、接口、资源与提交结果。",
+  "description": "创建仅含姓名、手机号、邮箱的必填联系人表单，在消息及触达配置提交成功邮件和邮件测试说明，发布后分别使用 QQ、163、Gmail、Outlook、灵析五个指定邮箱提交并校验页面、接口、资源与提交结果。 设置北京时间填报开始和结束时间，默认昨天开始、七天后结束，保证本轮处于填报中，供后续列表搜索复用。",
   "directory": "scripts",
   "entryFile": "form-email-five-submit.ui.spec.mjs",
   "timeoutMs": 600000,
   "enabled": true,
-  "inputParameters": [],
-  "responseVariableBindings": [
-    { "id": "email-form-id", "variableName": "FORM_ID", "responsePath": "formId", "secret": false },
-    { "id": "email-form-contract", "variableName": "FORM_CONTRACT", "responsePath": "formContract", "secret": false },
-    { "id": "email-submissions", "variableName": "EMAIL_SUBMISSIONS", "responsePath": "submissions", "secret": false }
+  "inputParameters": [
+    {
+      "id": "form-email-five-submit-admin-locale",
+      "key": "ADMIN_LOCALE",
+      "value": "zh-CN",
+      "description": "后台界面语言：zh-CN 简体中文或 zh-HK 香港繁体；与测试环境独立。"
+    },
+    {
+      "id": "form-email-five-submit-period-start",
+      "key": "SUBMISSION_START_TIME",
+      "value": "",
+      "description": "填报开始时间，北京时间 YYYY-MM-DD HH:mm:ss；留空自动生成。开始和结束时间须包含当前时间，供五次填写及填报中搜索。"
+    },
+    {
+      "id": "form-email-five-submit-period-end",
+      "key": "SUBMISSION_END_TIME",
+      "value": "",
+      "description": "填报结束时间，北京时间 YYYY-MM-DD HH:mm:ss；留空自动生成。开始和结束时间须包含当前时间，供五次填写及填报中搜索。"
+    }
   ],
-  "tags": ["Playwright", "UI", "Headless Chrome", "表单活动", "邮件测试", "P0"],
+  "responseVariableBindings": [
+    {
+      "id": "email-form-id",
+      "variableName": "FORM_ID",
+      "responsePath": "formId",
+      "secret": false
+    },
+    {
+      "id": "email-form-contract",
+      "variableName": "FORM_CONTRACT",
+      "responsePath": "formContract",
+      "secret": false
+    },
+    {
+      "id": "email-submissions",
+      "variableName": "EMAIL_SUBMISSIONS",
+      "responsePath": "submissions",
+      "secret": false
+    }
+  ],
+  "tags": [
+    "Playwright",
+    "UI",
+    "Headless Chrome",
+    "表单活动",
+    "邮件测试",
+    "P0"
+  ],
   "createdAt": "2026-09-23T00:00:00.000Z",
-  "updatedAt": "2026-09-23T00:00:00.000Z"
+  "updatedAt": "2026-10-21T02:48:51.705Z"
 }

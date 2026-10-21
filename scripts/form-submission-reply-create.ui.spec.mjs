@@ -1,3 +1,4 @@
+import { resolveAdminLocale } from './support/admin-locale.mjs'
 import { clickWhenReady, observeUiReadiness } from './support/ui-readiness.mjs'
 import { scaleTimeout } from './support/environment-timeouts.mjs'
 import { expect as flowExpect } from './support/environment-timeouts.mjs'
@@ -250,16 +251,16 @@ async function assertInitialCreateStructure(page, {
     page.getByRole('heading', { level: 2, name: title, exact: true }),
     '页面应显示目标表单标题',
   )
-  await expect(page.getByText('创建后记录提交时间', { exact: true }), '创建态应说明提交时间在创建后记录')
+  await expect(page.getByText(/^(?:创建后记录提交时间|建立後記錄提交時間)$/), '创建态应说明提交时间在创建后记录')
     .toBeVisible()
-  await expect(page.getByText('编辑中', { exact: true }).first(), '创建态应显示“编辑中”状态')
+  await expect(page.getByText(/编辑中|編輯中/).first(), '创建态应显示“编辑中”状态')
     .toBeVisible()
   await expect(
     page.getByRole('heading', { level: 3, name: /^(?:提報資訊|填报信息|提报信息|填報資訊|Submission Information)$/i }),
     '创建态应显示“提报信息”分区',
   ).toBeVisible()
 
-  const cancelButton = page.getByRole('button', { name: /^取消创建$/ })
+  const cancelButton = page.getByRole('button', { name: /^(?:取消创建|取消建立)$/ })
   const createButton = page.getByRole('button', { name: /^(?:创建提报|创建填报|建立提報|建立填報|Create submission)$/i })
   await expect(cancelButton, '创建态应唯一显示“取消创建”按钮').toHaveCount(1)
   await expect(cancelButton, '创建态“取消创建”按钮应可见且可用').toBeVisible()
@@ -316,10 +317,16 @@ async function assertInitialCreateStructure(page, {
       `题组子题“${FIELD_LABELS[name.replace('group', '').replace(/^./, (value) => value.toLowerCase())]}”标题应正确`,
     ).toHaveText(FIELD_LABELS[name.replace('group', '').replace(/^./, (value) => value.toLowerCase())])
   }
-  await expect(page.getByRole('button', { name: /^(?:上一页|下一页)$/ }), '后台创建态不应显示公开端分页按钮')
+  await expect(page.getByRole('button', { name: /^(?:上一页|下一页|上一頁|下一頁)$/ }), '后台创建态不应显示公开端分页按钮')
     .toHaveCount(0)
-  for (const text of ['基本信息', '变更详情', '核准记录', '备注', '特殊编号']) {
-    await expect(page.getByText(text, { exact: true }).first(), `右侧信息区应显示“${text}”`).toBeVisible()
+  for (const [label, pattern] of [
+    ['基本信息', /^(?:基本信息|基本資訊)$/],
+    ['变更详情', /^(?:变更详情|變更詳情)$/],
+    ['核准记录', /^(?:核准记录|核準記錄)$/],
+    ['备注', /^(?:备注|備註)$/],
+    ['特殊编号', /^(?:特殊编号|特殊編號)$/],
+  ]) {
+    await expect(page.getByText(pattern, { exact: true }).first(), `右侧信息区应显示“${label}”`).toBeVisible()
   }
 
   await clickWhenReady(createButton)
@@ -581,7 +588,7 @@ async function assertDetailState(page, { formId, submissionId, title, data, fixt
     await expect(summaryStatuses.first(), '创建成功后的“已提交”状态应可见').toBeVisible()
   }
   await expect(page.getByRole('button', { name: /^(?:编辑|編輯)$/ }), '详情态应唯一显示“编辑”按钮').toHaveCount(1)
-  await expect(page.getByRole('button', { name: /^(?:创建提报|取消创建|创建填报|建立提報|建立填報|Create submission)$/i }), '详情态不应残留创建操作').toHaveCount(0)
+  await expect(page.getByRole('button', { name: /^(?:创建提报|取消创建|取消建立|创建填报|建立提報|建立填報|Create submission)$/i }), '详情态不应残留创建操作').toHaveCount(0)
   expect(new URL(page.url()).searchParams.get('fid'), '详情态 URL 应保留目标 fid').toBe(formId)
 
   let assertedValueCount = 0
@@ -802,12 +809,12 @@ export async function run({
     context = await browser.newContext({
       ignoreHTTPSErrors,
       viewport: { width: 1440, height: 1000 },
-      locale: 'zh-CN',
+      locale: resolveAdminLocale(variables),
     })
-    await context.addInitScript(({ token }) => {
+    await context.addInitScript(({ token, adminLocale }) => {
       localStorage.setItem('token', token)
-      localStorage.setItem('arco-locale', 'zh-CN')
-    }, { token: authorization })
+      localStorage.setItem('arco-locale', adminLocale)
+    }, { token: authorization, adminLocale: resolveAdminLocale(variables) })
     networkObserver = attachNetworkObserver(context, {
       initialPhase: '浏览器初始化',
       onApiResponse: recordApiResponse,

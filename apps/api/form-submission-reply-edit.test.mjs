@@ -28,6 +28,7 @@ test('reads actual matrix cells for the current Chinese, Hong Kong and English d
         <div class="reply-kv__value"><button class="reply-kv__matrix-view">${label}</button></div></div>
         <div class="reply-kv__row"><span class="reply-kv__label">附件</span>
         <div class="reply-kv__value"><a href="https://files.test/report.pdf?signature=rotating">report.pdf</a></div></div>
+        <aside class="reply-detail-page__aside"><div class="reply-kv__row"><span class="reply-kv__label">更新时间</span><span class="reply-kv__value">旧时间</span></div></aside>
         <div class="arco-modal" style="display:none"><button class="arco-modal-close-btn">关闭</button>
         <table><tr><th>项目</th><th>答案</th></tr><tr><td>A</td><td>保留的矩阵答案</td></tr></table></div>
         <script>(() => {
@@ -36,9 +37,12 @@ test('reads actual matrix cells for the current Chinese, Hong Kong and English d
           document.querySelector('.arco-modal-close-btn').onclick = () => { modal.style.display = 'none' }
         })()</script>`)
       const snapshot = await detailAnswersSnapshot(page)
+      assert.equal(snapshot.length, 2, '侧栏系统信息不应混入题目答案快照')
       assert.deepEqual(snapshot[0].matrix, [['项目', '答案'], ['A', '保留的矩阵答案']])
       assert.deepEqual(snapshot[1].files, [{ name: 'report.pdf', href: 'https://files.test/report.pdf' }])
       assert.equal(await page.locator('.arco-modal:visible').count(), 0)
+      await page.locator('.reply-detail-page__aside').evaluate(element => element.replaceChildren())
+      assert.deepEqual(await detailAnswersSnapshot(page), snapshot, '切换侧栏标签不应伪造答案变化')
     }
   } finally { await browser.close() }
 })

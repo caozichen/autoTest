@@ -1,8 +1,11 @@
+import { observeFormEditTokens } from './support/form-edit-token-observer.mjs'
+import { resolveAdminLocale } from './support/admin-locale.mjs'
 import { publicOriginForSite } from '../shared/form-environment.mjs'
 import { attachNetworkObserver } from './support/api-response-recorder.mjs'
 import { expect as flowExpect, scaleTimeout } from './support/environment-timeouts.mjs'
 import { createFormLinkContract, firstFormCode, isSystemItem } from './support/form-link-contract.mjs'
 import { createFormSettingsContent } from './support/form-settings-content.mjs'
+import { assertSubmissionPeriod, configureSubmissionPeriod, resolveSubmissionPeriod } from './support/form-submission-period.mjs'
 import {
   assertPublishedNotification,
   configureAutomationNotification,
@@ -53,8 +56,10 @@ function pageUrl(base, path) {
 }
 
 function waitForResponse(page, method, path) {
-  return page.waitForResponse(response => response.request().method() === method
+  const pending = page.waitForResponse(response => response.request().method() === method
     && new URL(response.url()).pathname.endsWith(path), { timeout: scaleTimeout(ACTION_TIMEOUT_MS) })
+  pending.catch(() => undefined)
+  return pending
 }
 
 function requestBody(request, label) {
@@ -239,7 +244,7 @@ async function submitOneEmail({ browser, siteBaseUrl, formId, title, revisionNo,
 }
 
 export async function run(options, { mainland = false } = {}) {
-  const { siteBaseUrl, apiBaseUrl, ignoreHTTPSErrors = false, extraHTTPHeaders,
+  const { siteBaseUrl, apiBaseUrl, ignoreHTTPSErrors = false, extraHTTPHeaders, variables = {},
     artifactWriter, signal, logger, recordApiResponse, recordResourceResponse } = options
   if (!siteBaseUrl || !apiBaseUrl) throw new Error('运行环境必须提供 Web 和 API 基址')
   const authorization = extraHTTPHeaders?.Authorization
@@ -247,7 +252,9 @@ export async function run(options, { mainland = false } = {}) {
   if (new URL(siteBaseUrl).origin !== new URL(apiBaseUrl).origin) {
     throw new Error('Web 基址与 API 基址必须同源')
   }
+  const submissionPeriod = resolveSubmissionPeriod(variables)
   const title = `自动化邮件测试表单-${Date.now()}`
+  let editTokens
   let browser
   let context
   let page
@@ -258,7 +265,7 @@ export async function run(options, { mainland = false } = {}) {
     browser = await launchGoogleChrome()
     stopAbortClose = closePlaywrightOnAbort(signal, () => ({ browser, context }), { logger })
     context = await browser.newContext({
-      ignoreHTTPSErrors, viewport: { width: 1600, height: 1000 }, locale: 'zh-CN',
+      ignoreHTTPSErrors, viewport: { width: 1600, height: 1000 }, locale: resolveAdminLocale(variables),
       timezoneId: 'Asia/Shanghai',
     })
     observer = attachNetworkObserver(context, {
@@ -267,6 +274,7 @@ export async function run(options, { mainland = false } = {}) {
       onResourceResponse: recordResourceResponse,
     })
     await observer.ready
+    editTokens = observeFormEditTokens(context, apiBaseUrl)
     page = await context.newPage()
     observeUiReadiness(page)
     page.setDefaultTimeout(scaleTimeout(ACTION_TIMEOUT_MS))
@@ -281,17 +289,17 @@ export async function run(options, { mainland = false } = {}) {
         tokenViolations.push(`${request.method()} ${url.pathname}`)
       }
     })
-    await context.addInitScript(({ token }) => {
+    await context.addInitScript(({ token, adminLocale }) => {
       localStorage.setItem('token', token)
-      localStorage.setItem('arco-locale', 'zh-CN')
-    }, { token: authorization })
+      localStorage.setItem('arco-locale', adminLocale)
+    }, { token: authorization, adminLocale: resolveAdminLocale(variables) })
 
     observer.setPhase('创建空白表单')
     const createPath = mainland ? '/form-activity/index?type=form' : '/form-activity/index'
     await page.goto(pageUrl(siteBaseUrl, createPath), { waitUntil: 'domcontentloaded' })
     await expect(page, '后台 Token 生效后不应跳转登录页').not.toHaveURL(/\/login(?:[/?#]|$)/)
     const createPromise = waitForResponse(page, 'POST', '/be/form')
-    await clickWhenReady(page.getByText(/从空白表单开始|從空白表單開始/, { exact: true }))
+    await clickWhenReady(page.getByText(/从空白表单开始|從空白表[單格]開始/, { exact: true }))
     const create = await inspectBusinessResponse(await createPromise, '创建空白表单')
     await page.waitForURL(/\/form-activity\/designer\?[^#]*id=/, { timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) })
     const formId = new URL(page.url()).searchParams.get('id') || String(create.body?.data?.id ?? '')
@@ -321,10 +329,17 @@ export async function run(options, { mainland = false } = {}) {
     observer.setPhase('保存草稿')
     const itemsPromise = waitForResponse(page, 'PUT', `/be/form/${formId}/items`)
     const configPromise = waitForResponse(page, 'PUT', `/be/form/${formId}/config`)
+    configPromise.catch(() => undefined)
     await clickWhenReady(page.getByRole('button', { name: /^(保存草稿|儲存草稿|保存|儲存)$/ }))
-    const [itemsResponse, configResponse] = await Promise.all([itemsPromise, configPromise])
-    await inspectBusinessResponse(itemsResponse, '保存联系人题')
-    await inspectBusinessResponse(configResponse, '保存表单配置')
+    const itemsResponse = await itemsPromise
+    const saved = await inspectBusinessResponse(itemsResponse, '保存联系人题')
+    if (!saved.succeeded) {
+      await editTokens.assert()
+      throw new Error(`保存联系人题失败：${saved.body?.message ?? '响应无法确认业务成功'}`)
+    }
+    const configResponse = await configPromise
+    const configured = await inspectBusinessResponse(configResponse, '保存表单配置')
+    flowExpect(configured.succeeded, '保存表单配置必须成功，才能继续邮件测试').toBe(true)
     const savedItems = requestBody(itemsResponse.request(), '保存联系人题')
     const savedConfig = requestBody(configResponse.request(), '保存表单配置')
     const revisionNo = Number(savedItems.revision_no)
@@ -338,6 +353,10 @@ export async function run(options, { mainland = false } = {}) {
     observer.setPhase('联系人设置')
     if (mainland) await configureMainlandContactSettings(page, logger)
     else await ensureIgnoreStrategyInSettings(page, logger)
+    observer.setPhase('设置填报开始和结束时间')
+    await configureSubmissionPeriod({ page, formId, period: submissionPeriod, logger, inspectBusinessResponse,
+      readForm: async () => (await fetchFormDetail(page, apiBaseUrl, formId, authorization))?.data?.form,
+    })
     observer.setPhase('消息及触达邮件配置')
     const messageStep = page.locator('.form-activity-step-nav .form-activity-step')
       .filter({ hasText: /消息及触达|訊息及觸達/ })
@@ -352,7 +371,7 @@ export async function run(options, { mainland = false } = {}) {
     })
 
     observer.setPhase('发布表单')
-    const publishButton = page.getByRole('button', { name: /^(发布|發佈)$/ })
+    const publishButton = page.getByRole('button', { name: /^(发布|發[佈布])$/ })
     if (!await publishButton.isVisible().catch(() => false)
       && await page.getByRole('button', { name: /提交审核|提交審核/ }).isVisible().catch(() => false)) {
       throw new Error('当前机构要求发布审批，无法直接发布本次邮件测试表单')
@@ -370,7 +389,7 @@ export async function run(options, { mainland = false } = {}) {
     await dismissFormOnboarding(page)
     const auditTabs = page.locator('.form-activity-audit-tabs')
     if (await auditTabs.isVisible().catch(() => false)) {
-      await clickWhenReady(auditTabs.getByText(/已发布|已發佈/, { exact: true }))
+      await clickWhenReady(auditTabs.getByText(/已发布|已發[佈布]/, { exact: true }))
     }
     await page.getByPlaceholder(/请输入标题|請輸入標題/).fill(title)
     const listPromise = page.waitForResponse(response => response.request().method() === 'GET'
@@ -384,6 +403,9 @@ export async function run(options, { mainland = false } = {}) {
     expect(publishedRecord?.title, '已发布列表标题应匹配').toBe(title)
     expect(publishedRecord?.status, '已发布列表状态应为 published').toBe('published')
     expect(Number(publishedRecord?.current_revision_no), '已发布列表版本应匹配').toBe(revisionNo)
+    flowExpect(publishedRecord?.time_range, '本次邮件表单发布后必须处于填报中').toBe('in_progress')
+    flowExpect(publishedRecord?.start_time, '列表应返回本次填报开始时间').toBe(submissionPeriod.startTime)
+    flowExpect(publishedRecord?.end_time, '列表应返回本次填报截止时间').toBe(submissionPeriod.endTime)
     await expect(page.locator('.form-activity-list__title-link', { hasText: title }),
       '已发布列表中应唯一存在本次表单').toHaveCount(1)
 
@@ -394,12 +416,13 @@ export async function run(options, { mainland = false } = {}) {
     assertContactItems(items, '发布后详情')
     expect(form.title, '发布后详情标题应匹配').toBe(title)
     expect(form.status, '发布后详情状态应为 published').toBe('published')
+    assertSubmissionPeriod(form, submissionPeriod, '发布后回读')
     const templates = await fetchFormDetail(page, apiBaseUrl, formId, authorization, 'notification/template')
     const publishedNotification = assertPublishedNotification(form.notification_config?.user_notification,
       notification.savedParameters, templates.data, { variant: 'automation' })
     const formCode = firstFormCode(published.body, publishedRecord, detail)
     const formContract = createFormLinkContract({ formId, formCode, title, revisionNo, items })
-    formContract.settings = { automationNotification: notification, publishedNotification }
+    formContract.settings = { automationNotification: notification, publishedNotification, submissionPeriod }
     if (artifactWriter?.writeFile) {
       await artifactWriter.writeFile('form-settings.json', JSON.stringify({
         schemaVersion: 1,
@@ -408,6 +431,7 @@ export async function run(options, { mainland = false } = {}) {
         subtitle: FORM_SUBTITLE,
         automationNotification: notification,
         publishedNotification,
+        submissionPeriod,
         testEmails: TEST_EMAILS,
       }, null, 2), { encoding: 'utf8', type: 'attachment', mimeType: 'application/json' })
     }
@@ -432,9 +456,10 @@ export async function run(options, { mainland = false } = {}) {
       '五次提交都应取得提报 ID').toBe(TEST_EMAILS.length)
     expect(new Set(submissions.map(item => item.submissionId)).size,
       '五次提交应生成不同提报 ID').toBe(TEST_EMAILS.length)
+    await editTokens.assert()
     logger('success', '五个邮箱已分别完成一次表单提交，邮件配置及发布契约验证完成', { formId })
     return {
-      formId, formCode, formContract, title, revisionNo, status: 'submitted',
+      formId, formCode, formContract, title, revisionNo, status: 'submitted', submissionPeriod,
       browser: 'chrome', headless: true, contactFields: CONTACT_PRESET_TYPES,
       emails: TEST_EMAILS, submissions, submissionCount: submissions.length,
       notification: publishedNotification,
@@ -453,6 +478,7 @@ export async function run(options, { mainland = false } = {}) {
     }
     throw error
   } finally {
+    editTokens?.stop()
     observer.setPhase('结束清理')
     await observer.stop({ signal })
     const abortCloseStarted = await stopAbortClose()

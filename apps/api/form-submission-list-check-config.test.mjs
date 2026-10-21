@@ -29,6 +29,7 @@ test('registers the submission list checker with bounded admin-list inputs', asy
       ['FORM_ID', '4J02PQ'],
       ['SUBMISSION_ID', 'vyY5Z5'],
       ['SUBMISSION_ASSERTIONS', '{}'],
+      ['ADMIN_LOCALE', 'zh-CN'],
     ],
   )
 })

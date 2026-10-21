@@ -282,11 +282,18 @@ function mockApplicationHtml({ mainland = false } = {}) {
 
     const token = () => localStorage.getItem('token') || ''
     async function api(path, options = {}) {
+      if (options.body && path.startsWith('/be/form/202/')) {
+        options.body = JSON.stringify({ ...JSON.parse(options.body), expected_edit_token: localStorage.getItem('edit_token') })
+      }
       const response = await fetch('/api' + path, {
         ...options,
         headers: { 'Content-Type': 'application/json', Authorization: token(), ...(options.headers || {}) },
       })
       const body = await response.json()
+      const editToken = body?.data?.edit_token || body?.data?.form?.edit_token
+      if (editToken && (options.method && options.method !== 'GET' || !localStorage.getItem('edit_token'))) {
+        localStorage.setItem('edit_token', editToken)
+      }
       const allowInjectedFailure = response.headers.get('x-autotest-allow-failure') === 'true'
       if (!allowInjectedFailure && (!response.ok || !body || body.code !== 0)) {
         throw new Error(body && body.message ? body.message : 'API business request failed')
@@ -807,7 +814,7 @@ function mockApplicationHtml({ mainland = false } = {}) {
       }
     }
 
-    function render() {
+    async function render() {
       if (location.pathname === '/form-activity/index') {
         app.innerHTML = '<button id="blank" type="button">从空白表单开始</button>'
         document.querySelector('#blank').onclick = async () => {
@@ -818,6 +825,7 @@ function mockApplicationHtml({ mainland = false } = {}) {
       }
 
       if (location.pathname === '/form-activity/designer') {
+        await api('/be/form/202?draft=1')
         app.innerHTML = [
           '<aside class="palette">' + paletteTypes.map((type) => button(type, 'draggable="true" data-component-type="' + type + '"')).join('') + '</aside>',
           button('预览', 'aria-label="预览" id="preview"'),
@@ -951,6 +959,7 @@ function mockApplicationHtml({ mainland = false } = {}) {
       }
 
       if (location.pathname === '/form-activity/settings') {
+        await api('/be/form/202?draft=1')
         app.innerHTML = [
           button('发布', 'aria-label="发布" id="publish"'),
           ${mainland}
@@ -1015,6 +1024,8 @@ async function checkCompleteForm({ mainland, execute }) {
   const completeRequests = []
   let savedItemsPayload = null
   let savedConfigPayload = null
+  let editVersion = 1
+  const editToken = () => String(editVersion).padStart(64, '0')
   let savedTitle = ''
   let published = false
   let strategy = ''
@@ -1170,7 +1181,9 @@ async function checkCompleteForm({ mainland, execute }) {
       return
     }
     if (request.method === 'PUT' && url.pathname === '/api/be/form/202/activity/update-props') {
-      sendJson(response, { code: 0, message: 'success', data: {} })
+      assert.equal(body.expected_edit_token, editToken())
+      editVersion += 1
+      sendJson(response, { code: 0, message: 'success', data: { edit_token: editToken() } })
       return
     }
     if (request.method === 'GET' && url.pathname === '/api/be/form/202') {
@@ -1178,6 +1191,7 @@ async function checkCompleteForm({ mainland, execute }) {
         code: 0,
         message: 'success',
         data: { form: {
+          edit_token: editToken(), status: published ? 'published' : 'draft',
           id: 202, form_id: 202, form_code: '951000000000000202',
           ...(storedAdditionalSettings ? {
             common_config: { privacy_policy: storedAdditionalSettings.agreement.savedParameters },
@@ -1203,9 +1217,11 @@ async function checkCompleteForm({ mainland, execute }) {
       return
     }
     if (request.method === 'PUT' && url.pathname === '/api/be/form/202/items') {
+      assert.equal(body.expected_edit_token, editToken())
+      editVersion += 1
       savedItemsPayload = body
       savedTitle = body.title
-      sendJson(response, { code: 0, message: 'success', data: { revision_no: 1 } })
+      sendJson(response, { code: 0, message: 'success', data: { revision_no: 1, edit_token: editToken() } })
       return
     }
     if (request.method === 'PUT' && url.pathname === '/api/be/form/202/config') {
@@ -1214,8 +1230,10 @@ async function checkCompleteForm({ mainland, execute }) {
         return
       }
       if (body.revision_no) savedConfigPayload = body
+      assert.equal(body.expected_edit_token, editToken())
+      editVersion += 1
       strategy = body.selected || strategy
-      sendJson(response, { code: 0, message: 'success', data: { revision_no: 1 } })
+      sendJson(response, { code: 0, message: 'success', data: { revision_no: 1, edit_token: editToken() } })
       return
     }
     if (request.method === 'POST' && url.pathname === '/api/be/form/202/publish') {
@@ -1388,7 +1406,10 @@ async function checkCompleteForm({ mainland, execute }) {
       response.method === 'PUT' && response.name.endsWith('/be/form/202/items')
     ))
     assert.deepEqual(itemsApiResponse?.requestBody, savedItemsPayload)
-    assert.deepEqual(itemsApiResponse?.responseBody, {
+    assert.match(itemsApiResponse?.responseBody?.data?.edit_token, /^[a-f0-9]{64}$/)
+    const { edit_token: itemsEditToken, ...itemsResponseData } = itemsApiResponse?.responseBody?.data ?? {}
+    assert.notEqual(itemsEditToken, itemsApiResponse?.requestBody?.expected_edit_token)
+    assert.deepEqual({ ...itemsApiResponse?.responseBody, data: itemsResponseData }, {
       code: 0,
       message: 'success',
       data: { revision_no: 1 },
@@ -1490,21 +1511,17 @@ async function checkCompleteForm({ mainland, execute }) {
 
     forcedBusinessFailure = 'save-config'
     const saveConfigAssertions = []
-    const saveConfigResult = await runWithAssertionRecorder(
+    await assert.rejects(runWithAssertionRecorder(
       'form-all-fields-publish',
       (assertion) => saveConfigAssertions.push(assertion),
       runScenario,
-    )
-    assert.equal(saveConfigResult.status, 'published')
-    assert.equal(screenshotCaptures.length, 0)
+    ), /保存表单配置必须成功/)
     const saveConfigFailureIndex = saveConfigAssertions.findIndex(({ status, name }) => (
       status === 'failed' && name.includes('保存表单配置业务码应为 0')
     ))
-    const saveConfigLaterAssertionIndex = saveConfigAssertions.findIndex(({ status, name }) => (
-      status === 'passed' && name.includes('已发布列表中应找到本次创建的全题型表单')
-    ))
     assert.ok(saveConfigFailureIndex >= 0)
-    assert.ok(saveConfigLaterAssertionIndex > saveConfigFailureIndex)
+    assert.equal(workflowEvents.filter(event => event === 'publish').length, 0,
+      '配置保存失败必须停止发布，不能继续使用旧配置')
 
     forcedBusinessFailure = 'publish'
     const publishAssertions = []
@@ -1514,7 +1531,7 @@ async function checkCompleteForm({ mainland, execute }) {
       runScenario,
     )
     assert.equal(publishResult.status, 'published')
-    assert.equal(screenshotCaptures.length, 0)
+    assert.equal(screenshotCaptures.length, 1, '仅配置保存阻断流程应留下失败截图')
     const publishFailureIndex = publishAssertions.findIndex(({ status, name }) => (
       status === 'failed' && name.includes('发布表单业务码应为 0')
     ))

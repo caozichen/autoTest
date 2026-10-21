@@ -14,13 +14,38 @@
       "key": "FORM_ID",
       "value": "lg2wd5",
       "description": "源表单 ID，默认使用用户指定的测试环境表单 lg2wd5"
+    },
+    {
+      "id": "form-copy-delete-archive-admin-locale",
+      "key": "ADMIN_LOCALE",
+      "value": "zh-CN",
+      "description": "后台界面语言：zh-CN 简体中文或 zh-HK 香港繁体；与测试环境独立。"
     }
   ],
   "responseVariableBindings": [
-    { "id": "first-copy-form-id", "variableName": "FIRST_COPY_FORM_ID", "responsePath": "firstCopyId", "secret": false },
-    { "id": "deleted-copy-form-id", "variableName": "DELETED_COPY_FORM_ID", "responsePath": "deletedCopyId", "secret": false }
+    {
+      "id": "first-copy-form-id",
+      "variableName": "FIRST_COPY_FORM_ID",
+      "responsePath": "firstCopyId",
+      "secret": false
+    },
+    {
+      "id": "deleted-copy-form-id",
+      "variableName": "DELETED_COPY_FORM_ID",
+      "responsePath": "deletedCopyId",
+      "secret": false
+    }
   ],
-  "tags": ["Playwright", "UI", "Headless Chrome", "表单活动", "复制", "归档", "删除", "P0"],
+  "tags": [
+    "Playwright",
+    "UI",
+    "Headless Chrome",
+    "表单活动",
+    "复制",
+    "归档",
+    "删除",
+    "P0"
+  ],
   "createdAt": "2026-09-24T00:00:00.000Z",
   "updatedAt": "2026-09-24T00:00:00.000Z"
 }

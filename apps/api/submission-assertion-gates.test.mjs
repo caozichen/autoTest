@@ -25,7 +25,7 @@ test('three tabs select contacts by label instead of the payment tab position', 
 
 test('display failures remain recorded while later checks continue', async t => {
   const page = await withPage(t)
-  await page.setContent('<h1 class="info-card__title">错误标题</h1><span class="arco-tag"><i class="info-card__ability-icon"></i><i class="info-card__ability-icon"></i>错误标签</span>')
+  await page.setContent('<h1 class="info-card__title">错误标题</h1><dl class="info-card__property--contact"><dd>错误关联状态</dd></dl><dl class="info-card__property--contact"><dd>错误关联状态</dd></dl>')
   const events = []
   let continued = false
   await record(events, async () => {
@@ -33,7 +33,7 @@ test('display failures remain recorded while later checks continue', async t => 
     continued = true
   })
   assert.equal(continued, true)
-  assert.ok(events.some(event => event.status === 'failed' && event.name.includes('图标')))
+  assert.ok(events.some(event => event.status === 'failed' && event.name.includes('关联状态')))
   assert.ok(events.some(event => event.status === 'failed' && event.name.includes('完全一致')))
 })
 

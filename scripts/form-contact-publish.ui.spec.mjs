@@ -169,7 +169,7 @@ async function screenshotFailure(page, title, artifactWriter) {
 }
 
 async function chooseContactCollectionInDesigner(page, logger) {
-  const prompt = page.getByRole('dialog').filter({ hasText: /此表单目前设置为不收录联系人|此表單目前設定為不收錄聯絡人/ })
+  const prompt = page.getByRole('dialog').filter({ hasText: /此表单目前设置为不收录联系人|此表[單格]目前設定為不收錄聯絡人/ })
   if (await prompt.isVisible().catch(() => false)) {
     logger('info', '联系人题触发全局收录提示，选择开启收录联系人')
     await clickFirstVisible([
@@ -338,7 +338,7 @@ export async function run({
     const createResponse = await waitForApiResponse(
       page,
       '/be/form',
-      () => page.getByText(/从空白表单开始|從空白表單開始/, { exact: true }).click(),
+      () => page.getByText(/从空白表单开始|從空白表[單格]開始/, { exact: true }).click(),
       '通过页面创建空白表单',
     )
     await page.waitForURL(/\/form-activity\/designer\?[^#]*id=/, { timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) })
@@ -404,7 +404,7 @@ export async function run({
       const url = new URL(response.url())
       return response.request().method() === 'POST' && url.pathname.endsWith(`/be/form/${formId}/publish`)
     }, { timeout: scaleTimeout(ACTION_TIMEOUT_MS) })
-    await page.getByRole('button', { name: /发布|發佈/, exact: true }).click()
+    await page.getByRole('button', { name: /发布|發[佈布]/, exact: true }).click()
     const publishResponse = await publishPromise
     const publishOutcome = await inspectBusinessResponse(publishResponse, '发布表单')
     const publishBody = publishOutcome.body
@@ -414,7 +414,7 @@ export async function run({
     networkObserver.setPhase('已发布列表验证')
     const auditTabs = page.locator('.form-activity-audit-tabs')
     if (await auditTabs.isVisible().catch(() => false)) {
-      await auditTabs.getByText(/已发布|已發佈/, { exact: true }).click()
+      await auditTabs.getByText(/已发布|已發[佈布]/, { exact: true }).click()
     }
     const titleInput = page.getByPlaceholder(/请输入标题|請輸入標題/)
     await expect(titleInput, '列表标题筛选框应可见').toBeVisible()

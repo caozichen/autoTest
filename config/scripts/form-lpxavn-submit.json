@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "revision": 2,
+  "revision": 3,
   "id": "form-lpxavn-submit",
   "name": "填写指定表单",
-  "description": "根据所选环境公开域名与可配置 URL 路径拼接请求地址，校验全题型三页表单的发布契约、必填与格式边界、跨页答案保持及结构化提交载荷。",
+  "description": "根据所选环境与发布契约真实填写全题型表单；有联动渠道时使用其真实分享链接，验证提交渠道，并在填写及满额检查后通过后台详情准备唯一备注、刷新独立回读，供后续检索和编辑保留校验。",
   "directory": "scripts",
   "entryFile": "form-lpxavn-submit.ui.spec.mjs",
   "timeoutMs": 300000,

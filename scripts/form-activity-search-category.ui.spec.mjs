@@ -1,3 +1,4 @@
+import { resolveAdminLocale } from './support/admin-locale.mjs'
 import { attachNetworkObserver } from './support/api-response-recorder.mjs'
 import { expect as flowExpect, scaleTimeout } from './support/environment-timeouts.mjs'
 import { launchGoogleChrome } from './support/google-chrome.mjs'
@@ -22,10 +23,10 @@ const CATEGORY_DESCRIPTION = '自动化搜索分类验证，运行完成后删�
 const CATEGORY_SORT = 100
 const CATEGORY_ID_PATTERN = /^[a-zA-Z0-9]+$/
 const TIME_RANGE_OPTION = {
-  unlimited: /未限制填[报報]时间|未限制填報時間/,
-  not_started: /未开始填报|未開始填報/,
-  in_progress: /开放填报中|開放填報中/,
-  finished: /已停止填报|已停止填報/,
+  unlimited: /^\s*(?:不限时|不限時|未限制填报时间|未限制填報時間)\s*$/,
+  not_started: /^\s*(?:未开始(?:填报)?|未開始(?:填報)?)\s*$/,
+  in_progress: /^\s*(?:填报中|填報中)\s*$/,
+  finished: /^\s*(?:已结束|已結束|已停止填报|已停止填報)\s*$/,
 }
 
 function pageUrl(base, path) {
@@ -104,10 +105,27 @@ async function sampleRecords(page, apiBaseUrl, authorization) {
     const batch = listRecords(body, '样本列表')
     records.push(...batch)
     if (batch.length === 0 || (records.some(record => dayOf(record.end_time))
-      && records.some(record => record.time_range === 'not_started'))) break
+      && records.some(record => record.time_range === 'in_progress'))) break
   }
   flowExpect(records.length, '列表必须有可供正向搜索的表单样本').toBeGreaterThan(0)
   return records
+}
+
+export function selectSearchSamples(samples, targetFormId = '') {
+  const target = targetFormId ? samples.find(record => recordId(record) === targetFormId) : null
+  if (targetFormId && !target) throw new Error(`搜索样本中未找到本次表单 ${targetFormId}`)
+  const ordinary = target ?? samples.find(record => record.title && record.creator_name && record.created_at
+    && record.updated_at && [2, '2', 0, false, '0'].includes(record.is_activity))
+  const endTime = target ?? samples.find(record => dayOf(record.end_time))
+  const timeRange = target ?? samples.find(record => record.time_range === 'in_progress')
+  flowExpect(Boolean(ordinary?.title && ordinary?.creator_name && dayOf(ordinary?.created_at)
+    && dayOf(ordinary?.updated_at) && [2, '2', 0, false, '0'].includes(ordinary?.is_activity)),
+  '正向搜索样本必须包含标题、创建人、创建及更新时间，且为普通表单').toBe(true)
+  flowExpect(Boolean(dayOf(endTime?.end_time)), '截止时间搜索必须使用有结束时间的表单').toBe(true)
+  flowExpect(timeRange?.time_range, '填报状态正向搜索必须使用填报中的表单').toBe('in_progress')
+  flowExpect((target ?? samples.find(record => record.status === 'published'))?.status,
+    '发布状态搜索必须使用已发布表单').toBe('published')
+  return { ordinary, endTime, timeRange, published: target ?? samples.find(record => record.status === 'published') }
 }
 
 async function assertPageRows(page, records, label) {
@@ -235,10 +253,14 @@ async function chooseOption(page, field, desiredText) {
   await clickWhenReady(target)
 }
 
-async function runSearchCase(page, fields, key, sample, label, { reset = true } = {}) {
+async function runSearchCase(page, fields, key, sample, label, { reset = true, targetFormId = '' } = {}) {
   if (reset) await resetSearch(page)
   const index = SEARCH_KEYS.indexOf(key)
   const field = fields.nth(index)
+  const submissionEndDate = targetFormId && key === 'filter[time_range]' ? dayOf(sample.end_time) : ''
+  if (submissionEndDate) {
+    await fillDateRange(fields.nth(SEARCH_KEYS.indexOf('filter[end_time_between]')), submissionEndDate)
+  }
   const sampleValue = key === 'filter[title]' ? String(sample.title ?? '').trim()
     : key === 'filter[creator_name]' ? String(sample.creator_name ?? '').trim()
       : DATE_KEYS.has(key) ? dayOf(sample[key.slice(7, -9)]) : ''
@@ -264,7 +286,7 @@ async function runSearchCase(page, fields, key, sample, label, { reset = true } 
     }
   } else {
     const optionText = key === 'filter[time_range]' ? TIME_RANGE_OPTION[sample.time_range]
-      : key === 'filter[status]' ? /已发布|已發佈/ : /表单|表單/
+      : key === 'filter[status]' ? /已发布|已發[佈布]/ : /表单|表單|表格/
     await chooseOption(page, field, optionText)
   }
   const promise = listResponse(page, url => queryValues(url, key).length > 0)
@@ -275,9 +297,15 @@ async function runSearchCase(page, fields, key, sample, label, { reset = true } 
   const body = await businessResponse(response, `${label}列表查询`)
   const url = new URL(response.url())
   const expectedKeys = key === 'filter[creator_name]'
-    ? ['filter[creator_name]', 'filter[creator]'] : [key]
-  expect(activeFilterKeys(url), `${label}请求只能有当前搜索项`).toEqual(expectedKeys)
-  flowExpect(activeFilterKeys(url), `${label}请求必须只含当前搜索项`).toEqual(expectedKeys)
+    ? ['filter[creator_name]', 'filter[creator]']
+    : submissionEndDate ? [key, 'filter[end_time_between]'] : [key]
+  expect(activeFilterKeys(url).sort(), `${label}请求应携带预期搜索条件`).toEqual([...expectedKeys].sort())
+  flowExpect(activeFilterKeys(url).sort(), `${label}请求必须仅包含预期搜索条件`).toEqual([...expectedKeys].sort())
+  if (submissionEndDate) {
+    const dates = queryValues(url, 'filter[end_time_between]').flatMap(value => value.split(','))
+    expect(dates, '填报中查询应使用本次表单的截止日期').toEqual([submissionEndDate, submissionEndDate])
+    flowExpect(dates, '填报中查询必须使用本次表单的截止日期').toEqual([submissionEndDate, submissionEndDate])
+  }
   expect(url.searchParams.get('page'), `${label}应从第一页查询`).toBe('1')
   const values = queryValues(url, key)
   const actualValue = DATE_KEYS.has(key) ? sampleValue : values[0]
@@ -292,13 +320,24 @@ async function runSearchCase(page, fields, key, sample, label, { reset = true } 
       flowExpect(queryValues(url, 'filter[creator]'), '创建人 ID 必须与选中的样本一致')
         .toContain(String(sample.creator))
     }
+  } else if (key === 'filter[time_range]') {
+    flowExpect(values, '填报中筛选必须发送 in_progress 请求值').toEqual(['in_progress'])
   }
   const records = listRecords(body, label)
   expect(records.length, `${label}应至少正向命中一条记录`).toBeGreaterThan(0)
   flowExpect(records.length, `${label}必须至少正向命中一条记录`).toBeGreaterThan(0)
+  if (targetFormId) {
+    flowExpect(records.some(record => recordId(record) === targetFormId),
+      `${label}必须命中第一步生成的表单 ${targetFormId}`).toBe(true)
+  }
   assertFilteredRecords(records, key, actualValue, label)
+  if (submissionEndDate) {
+    assertFilteredRecords(records, 'filter[end_time_between]', submissionEndDate, `${label}（本次截止日期）`)
+  }
   await assertPageRows(page, records, label)
-  return { key, value: values, count: records.length }
+  return { key, value: values, count: records.length, sampleFormId: recordId(sample),
+    ...(submissionEndDate ? { submissionEndDate } : {}),
+    ...(targetFormId ? { targetFormId, targetMatched: records.some(record => recordId(record) === targetFormId) } : {}) }
 }
 
 async function fetchCategories(page, apiBaseUrl, authorization, label) {
@@ -309,12 +348,14 @@ async function fetchCategories(page, apiBaseUrl, authorization, label) {
 }
 
 export async function run({
-  siteBaseUrl, apiBaseUrl, extraHTTPHeaders, ignoreHTTPSErrors = false,
+  siteBaseUrl, apiBaseUrl, extraHTTPHeaders, ignoreHTTPSErrors = false, variables = {},
   artifactWriter, signal, logger = () => undefined, recordApiResponse, recordResourceResponse,
 }) {
   if (!siteBaseUrl || !apiBaseUrl) throw new Error('运行环境必须提供 Web 与 API 基址')
   const authorization = extraHTTPHeaders?.Authorization
   if (!authorization) throw new Error('搜索分类脚本必须使用环境登录后的 Token')
+  const targetFormId = String(variables.FORM_ID ?? '').trim()
+  if (targetFormId && !/^[a-zA-Z0-9_-]+$/.test(targetFormId)) throw new Error('FORM_ID 必须是有效表单 ID')
   if (new URL(siteBaseUrl).origin !== new URL(apiBaseUrl).origin) {
     throw new Error('Web 与 API 基址必须同源')
   }
@@ -335,7 +376,7 @@ export async function run({
     stopAbortClose = closePlaywrightOnAbort(signal, () => ({ browser, context }), { logger })
     context = await browser.newContext({
       ignoreHTTPSErrors, viewport: { width: 1600, height: 1000 },
-      locale: 'zh-CN', timezoneId: 'Asia/Shanghai',
+      locale: resolveAdminLocale(variables), timezoneId: 'Asia/Shanghai',
     })
     observer = attachNetworkObserver(context, {
       initialPhase: '打开表单列表',
@@ -359,28 +400,30 @@ export async function run({
         mutations.set(key, (mutations.get(key) ?? 0) + 1)
       }
     })
-    await context.addInitScript(({ token }) => {
+    await context.addInitScript(({ token, adminLocale }) => {
       localStorage.setItem('token', token)
-      localStorage.setItem('arco-locale', 'zh-CN')
-    }, { token: authorization })
+      localStorage.setItem('arco-locale', adminLocale)
+    }, { token: authorization, adminLocale: resolveAdminLocale(variables) })
 
     await page.goto(pageUrl(siteBaseUrl, '/form-activity/list'), { waitUntil: 'domcontentloaded' })
     await expect(page, '登录后不应跳转登录页').not.toHaveURL(/\/login(?:[/?#]|$)/)
     await dismissFormOnboarding(page)
     const fields = await openAllSearchFields(page)
-    const samples = await sampleRecords(page, apiBaseUrl, authorization)
-    const ordinary = samples.find(record => record.title && record.creator_name && record.created_at
-      && record.updated_at && (record.is_activity === 2 || record.is_activity === '2'
-        || record.is_activity === 0 || record.is_activity === false || record.is_activity === '0'))
-    const endTime = samples.find(record => dayOf(record.end_time))
-    const timeRange = samples.find(record => record.time_range === 'not_started')
-    flowExpect(ordinary, '正向搜索样本必须包含标题、创建人、时间及表格类型').toBeTruthy()
-    flowExpect(endTime, '结束时间筛选必须找到非空样本').toBeTruthy()
-    flowExpect(timeRange, '提交时间状态筛选必须找到非空样本').toBeTruthy()
+    let samples
+    if (targetFormId) {
+      const detail = await fetchJson(page, apiBaseUrl, authorization, `/be/form/${encodeURIComponent(targetFormId)}`, '本次目标表单详情')
+      const form = detail?.data?.form
+      flowExpect(recordId(form), '搜索目标必须是传入的 FORM_ID').toBe(targetFormId)
+      flowExpect(Boolean(form?.title), '本次目标表单标题必须非空').toBe(true)
+      const body = await fetchJson(page, apiBaseUrl, authorization,
+        `/be/form/list?page=1&per_page=100&filter%5Btitle%5D=${encodeURIComponent(form.title)}`, '本次目标表单列表信息')
+      samples = listRecords(body, '本次目标表单列表信息')
+    } else samples = await sampleRecords(page, apiBaseUrl, authorization)
+    const { ordinary, endTime, timeRange, published } = selectSearchSamples(samples, targetFormId)
     const cases = [
       [SEARCH_KEYS[1], ordinary, '标题'], [SEARCH_KEYS[2], ordinary, '类型'],
-      [SEARCH_KEYS[3], ordinary, '创建人'], [SEARCH_KEYS[4], timeRange, '提交时间状态'],
-      [SEARCH_KEYS[6], samples.find(record => record.status === 'published'), '发布状态'],
+      [SEARCH_KEYS[3], ordinary, '创建人'], [SEARCH_KEYS[4], timeRange, '填报状态（填报中）'],
+      [SEARCH_KEYS[6], published, '发布状态'],
       [SEARCH_KEYS[0], ordinary, '创建时间'], [SEARCH_KEYS[5], endTime, '提交截止时间'],
       [SEARCH_KEYS[7], ordinary, '更新时间'],
     ]
@@ -389,7 +432,7 @@ export async function run({
       flowExpect(sample, `${label}必须有正向样本`).toBeTruthy()
       observer.setPhase(`搜索项：${label}`)
       searchResults.push(await runSearchCase(page, fields, key, sample, label,
-        { reset: index !== 0 }))
+        { reset: index !== 0, targetFormId }))
       logger('success', `${label}搜索接口与页面一致`, { key, count: searchResults.at(-1).count })
     }
 
@@ -412,6 +455,8 @@ export async function run({
     expect(creatorName, '仅看我的必须提交非空账号名称').not.toBe('')
     const mineRecords = listRecords(mineBody, '仅看我的')
     expect(mineRecords.length, '仅看我的应命中账号自己的表单').toBeGreaterThan(0)
+    if (targetFormId) flowExpect(mineRecords.some(record => recordId(record) === targetFormId),
+      '仅看我的必须命中第一步生成的表单').toBe(true)
     for (const record of mineRecords) {
       expect(record.creator_name, `仅看我的表单 ${recordId(record)} 创建人应匹配账号`)
         .toBe(creatorName)
@@ -426,7 +471,7 @@ export async function run({
 
     observer.setPhase('新增分类并在列表中选择')
     const before = await fetchCategories(page, apiBaseUrl, authorization, '新增前分类列表')
-    await clickWhenReady(page.getByRole('button', { name: /基础设置/ }))
+    await clickWhenReady(page.getByRole('button', { name: /基础设置|基礎設定|基本設定/ }))
     const settings = page.locator('.form-activity-base-settings-modal:visible')
     await flowExpect(settings, '基础设置弹窗必须唯一').toHaveCount(1)
     await flowExpect(settings.locator('.manage-category'), '分类管理必须显示').toBeVisible()
@@ -434,13 +479,13 @@ export async function run({
     const addModal = page.locator('.arco-modal:visible').last()
     await flowExpect(addModal, '新增分类弹窗必须显示').toBeVisible()
     await page.waitForTimeout(600)
-    await addModal.locator('.arco-form-item').filter({ hasText: '标题' }).locator('input').fill(categoryName)
+    await addModal.locator('.arco-form-item').filter({ hasText: /标题|標題/ }).locator('input').fill(categoryName)
     await addModal.locator('.arco-form-item').filter({ hasText: '排序' }).locator('input')
       .fill(String(CATEGORY_SORT))
     await addModal.locator('.arco-form-item').filter({ hasText: /描述/ }).locator('textarea')
       .fill(CATEGORY_DESCRIPTION)
     const createPromise = exactResponse(page, 'POST', '/be/form/category')
-    await clickWhenReady(addModal.getByRole('button', { name: /^(提交|确认|确定)$/ }))
+    await clickWhenReady(addModal.getByRole('button', { name: /^(提交|确认|确定|確認|確定)$/ }))
     const createResponse = await createPromise
     const createBody = await businessResponse(createResponse, '新增分类')
     if (CATEGORY_ID_PATTERN.test(String(createBody?.data?.id ?? ''))) {
@@ -491,7 +536,7 @@ export async function run({
     }
 
     observer.setPhase('删除本次新增分类并恢复全部分类')
-    await clickWhenReady(page.getByRole('button', { name: /基础设置/ }))
+    await clickWhenReady(page.getByRole('button', { name: /基础设置|基礎設定|基本設定/ }))
     await flowExpect(settings, '基础设置弹窗应再次打开').toHaveCount(1)
     const createdTag = settings.locator('.manage-category__tag').filter({ hasText: categoryName })
     await flowExpect(createdTag, '只能定位本次新增的分类').toHaveCount(1)
@@ -499,7 +544,7 @@ export async function run({
     const deleteDialog = page.locator('.arco-modal:visible').last()
     await flowExpect(deleteDialog, '分类删除确认弹窗必须显示').toBeVisible()
     const deletePromise = exactResponse(page, 'DELETE', `/be/form/category/${createdCategoryId}`)
-    await clickWhenReady(deleteDialog.getByRole('button', { name: /^(确认|确定)$/ }))
+    await clickWhenReady(deleteDialog.getByRole('button', { name: /^(确认|确定|確認|確定)$/ }))
     await businessResponse(await deletePromise, '删除本次新增分类')
     categoryDeleted = true
     const finalCategories = await fetchCategories(page, apiBaseUrl, authorization, '删除后分类列表')
@@ -509,7 +554,7 @@ export async function run({
     await expect(createdTag, '分类管理中不应再显示已删除分类').toHaveCount(0)
     await clickWhenReady(settings.locator('.arco-modal-close-btn'))
     const allTab = tabs.locator('.arco-tabs-tab').filter({ has: page.locator('.form-activity-category-tab-name')
-      .filter({ hasText: /^(全部|全部分类)$/ }) })
+      .filter({ hasText: /^(全部|全部分类|全部分類)$/ }) })
     await flowExpect(allTab, '全部分类页签必须唯一').toHaveCount(1)
     const allPromise = listResponse(page, url => !queryValues(url, 'filter[category_id]').length)
     await clickWhenReady(allTab)
@@ -537,7 +582,7 @@ export async function run({
       searchCount: searchResults.length, createdCategoryId,
     })
     return {
-      searchCount: searchResults.length, searchResults, createdCategoryId,
+      formId: targetFormId || recordId(ordinary), searchCount: searchResults.length, searchResults, createdCategoryId,
       deletedCategoryId: createdCategoryId, onlyMineCreatorId: creatorId,
       browser: 'chrome', headless: true,
       apiResponseCount: network.api.length, resourceResponseCount: network.resources.length,

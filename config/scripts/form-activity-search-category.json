@@ -1,19 +1,53 @@
 {
   "schemaVersion": 1,
-  "revision": 1,
+  "revision": 3,
   "id": "form-activity-search-category",
   "name": "表单活动搜索项及分类",
-  "description": "逐项验证表单活动列表八个搜索项、仅看我的及接口和页面结果；新增分类、在列表中选择、删除本次分类并恢复全部分类。",
+  "description": "验证表单活动列表八个搜索项、仅看我的及接口和页面结果；传入 FORM_ID 时均使用该表单并核对命中，填报中查询同时限定为该表单的截止日期。新增、选择、删除测试分类并恢复全部分类。",
   "directory": "scripts",
   "entryFile": "form-activity-search-category.ui.spec.mjs",
   "timeoutMs": 600000,
   "enabled": true,
-  "inputParameters": [],
-  "responseVariableBindings": [
-    { "id": "created-category-id", "variableName": "CREATED_CATEGORY_ID", "responsePath": "createdCategoryId", "secret": false },
-    { "id": "deleted-category-id", "variableName": "DELETED_CATEGORY_ID", "responsePath": "deletedCategoryId", "secret": false }
+  "inputParameters": [
+    {
+      "id": "form-activity-search-category-admin-locale",
+      "key": "ADMIN_LOCALE",
+      "value": "zh-CN",
+      "description": "后台界面语言：zh-CN 简体中文或 zh-HK 香港繁体；与测试环境独立。"
+    },
+    {
+      "id": "search-target-form-id",
+      "key": "FORM_ID",
+      "value": "",
+      "description": "流水线映射第一步输出的 formId；目标须为已发布、填报中且有截止时间的普通表单。填报中查询同时使用该表单的截止日期；留空时从环境列表寻找样本并单独检查填报状态。"
+    }
   ],
-  "tags": ["Playwright", "UI", "Headless Chrome", "表单活动", "搜索", "分类", "仅看我的", "接口", "资源", "P0"],
+  "responseVariableBindings": [
+    {
+      "id": "created-category-id",
+      "variableName": "CREATED_CATEGORY_ID",
+      "responsePath": "createdCategoryId",
+      "secret": false
+    },
+    {
+      "id": "deleted-category-id",
+      "variableName": "DELETED_CATEGORY_ID",
+      "responsePath": "deletedCategoryId",
+      "secret": false
+    }
+  ],
+  "tags": [
+    "Playwright",
+    "UI",
+    "Headless Chrome",
+    "表单活动",
+    "搜索",
+    "分类",
+    "仅看我的",
+    "接口",
+    "资源",
+    "P0"
+  ],
   "createdAt": "2026-09-24T00:00:00.000Z",
-  "updatedAt": "2026-09-24T00:00:00.000Z"
+  "updatedAt": "2026-10-21T03:03:31.858Z"
 }

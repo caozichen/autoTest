@@ -1,3 +1,5 @@
+// 本次新增提交一致性检查保持注释：
+// import { readCommittedSubmissionIds, assertSubmissionOutcomeConsistency } from './support/submission-outcome-consistency.mjs'
 import { clickWhenReady, observeUiReadiness } from './support/ui-readiness.mjs'
 import { publicOriginForSite } from '../shared/form-environment.mjs'
 import { scaleTimeout } from './support/environment-timeouts.mjs'
@@ -9,6 +11,7 @@ import { launchGoogleChrome } from './support/google-chrome.mjs'
 import { readResponseText, preserveMutationResponseBeforeNavigation } from './support/navigation-response-body.mjs'
 import { createFormEmailData } from './support/form-test-email.mjs'
 import { assertSubmissionQuotaPersistence } from './support/form-post-collection-settings.mjs'
+import { resolveChannelFormUrl, assertSubmittedChannel, prepareSubmissionSearchSamples } from './support/submission-search-samples.mjs'
 import {
   FIELD_TYPE_CODES,
   pageFieldKeysFor,
@@ -249,8 +252,10 @@ function assertPublishedFormContract(payload, expectedFormId = FORM_ID, linkedCo
   expect(Number(safePayload?.data?.revision_no), '公开表单 revision_no 应至少为 1').toBeGreaterThanOrEqual(1)
   expect(publishedFormId, '公开配置应属于目标表单 ID').toBe(expectedFormId)
   expect(form?.status, '目标表单应保持已发布状态').toBe('published')
-  expect(String(form?.title ?? ''), '公开配置标题应为全题型发布脚本生成的标题')
-    .toMatch(/^自动化测试全题型表单-\d+$/)
+  if (!linkedContract) {
+    expect(String(form?.title ?? ''), '公开配置标题应为全题型发布脚本生成的标题')
+      .toMatch(/^自动化测试全题型表单-\d+$/)
+  }
   if (linkedContract) {
     expect(publishedFormId, '公开表单 ID 应与前序发布脚本输出一致').toBe(linkedContract.formId)
     expect(form?.title, '公开表单标题应与前序发布脚本输出一致').toBe(linkedContract.title)
@@ -1448,6 +1453,7 @@ export async function run({
   scriptName = scriptId,
   artifactWriter,
   siteBaseUrl,
+  apiBaseUrl,
   requestPath = FORM_PATH,
   variables = {},
   extraHTTPHeaders,
@@ -1466,11 +1472,12 @@ export async function run({
   const authorization = extraHTTPHeaders?.Authorization
   if (!authorization) throw new Error('平台运行上下文必须包含环境登录 Token')
   const formPath = normalizeFormPath(requestPath)
-  const formUrl = buildFormUrl(siteBaseUrl, formPath)
+  const linkedFormContract = parseFormLinkContract(variables.FORM_CONTRACT)
+  const channel = linkedFormContract?.settings?.channel
+  const formUrl = resolveChannelFormUrl(buildFormUrl(siteBaseUrl, formPath), channel)
   const publicOrigin = new URL(formUrl).origin
   const configuredFormId = new URL(formUrl).searchParams.get('id')?.trim()
   if (!configuredFormId) throw new Error('公开表单路径必须包含非空 form ID')
-  const linkedFormContract = parseFormLinkContract(variables.FORM_CONTRACT)
   const initialData = createTestData()
   let activeRunId = initialData.runId
   const submissionQuota = linkedFormContract?.settings?.submissionQuota
@@ -1487,6 +1494,14 @@ export async function run({
   let networkObserver = {
     setPhase: () => undefined,
     stop: async () => undefined,
+  }
+  const prepareSearchSamples = async submission => {
+    if (!channel) return submission
+    const searchSamples = await prepareSubmissionSearchSamples({ browser, siteBaseUrl, apiBaseUrl,
+      authorization, formId: configuredFormId, submissionId: submission.submissionId, channel,
+      runMarker: linkedFormContract.settings.runMarker, variables, ignoreHTTPSErrors, signal,
+      logger, recordApiResponse, recordResourceResponse })
+    return { ...submission, submissionAssertions: { ...submission.submissionAssertions, searchSamples } }
   }
 
   try {
@@ -1906,6 +1921,10 @@ export async function run({
       const resultReadPromise = isQuotaAttempt ? null
         : waitForSubmissionResultRead(page, publicOrigin, configuredFormId)
           .then(response => ({ response }), error => ({ error }))
+      // 本次新增，保持注释；仅在无并发填写的隔离表单启用，后台 Token 仅用于后台回读。
+      // const consistencyContext = { request: context.request, apiBaseUrl,
+      //   formId: configuredFormId, authorization }
+      // const beforeSubmissionIds = await readCommittedSubmissionIds(consistencyContext)
       const submission = await waitForPublicMutation(
         page,
         publicOrigin,
@@ -1914,7 +1933,12 @@ export async function run({
         '提交表单',
         { expectBusinessSuccess: false },
       )
+      // 本次新增，保持注释；必须先核对失败响应的数据库事实，再执行既有成功态检查。
+      // const afterSubmissionIds = await readCommittedSubmissionIds(consistencyContext)
+      // assertSubmissionOutcomeConsistency({ beforeIds: beforeSubmissionIds,
+      //   afterIds: afterSubmissionIds, submission })
       const requestPayload = parseSubmissionRequestPayload(submission.response.request())
+      assertSubmittedChannel(requestPayload, channel)
       const payloadAssertion = assertSubmissionPayload(requestPayload, data, publishedContract)
       const responseSubmissionId = String(
         submission.body?.data?.submission_id
@@ -1941,7 +1965,7 @@ export async function run({
         await artifactWriter.writeFile('submission-quota-check.json', JSON.stringify(quotaCheck, null, 2),
           { encoding: 'utf8', type: 'attachment', mimeType: 'application/json' })
         logger('success', '第二次公开填写已被数量上限拦截，接口、提示语及资源检查完成', quotaCheck)
-        return { ...completedSubmission, quotaCheck, publicRequestCount, pageValidationRequestCount, submissionRequestCount }
+        return await prepareSearchSamples({ ...completedSubmission, quotaCheck, publicRequestCount, pageValidationRequestCount, submissionRequestCount })
       }
       flowExpect(Number(submission.body?.code), '最终提交业务码必须成功，才能检查结果页').toBe(0)
       flowExpect(responseSubmissionId, '最终提交必须返回本次提报 ID').toMatch(/\S+/)
@@ -2015,7 +2039,7 @@ export async function run({
       await stopPreservingSubmission()
       stopPreservingSubmission = async () => undefined
     }
-    return completedSubmission
+    return await prepareSearchSamples(completedSubmission)
   } catch (error) {
     if (signal?.aborted) {
       logger('info', '已响应强制停止，正在清理 Chrome 无头浏览器')

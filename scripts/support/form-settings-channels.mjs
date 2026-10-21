@@ -95,7 +95,7 @@ export async function configureFormClassificationTags({
   const availabilityAsserted = assertOptionsAvailable(selectedCategory, selectedTag)
   if (!selectedCategory && !selectedTag) {
     if (availabilityAsserted) logger('warning', '分类和标签均无可选项，跳过本项；本次运行保留失败断言')
-    else logger('info', '内地分类和标签均无可选项，跳过本项；可选项存在断言已注释停用')
+    else logger('info', '分类和标签均无可选项，跳过本项')
     return { enabled: await checked(control), trigger: 'submitted_success', categories: [], tags: [], skipped: true, reason: 'no-category-or-tag' }
   }
   if (!selectedCategory) logger('info', '当前环境没有分类，仅设置第一个标签')
@@ -164,7 +164,7 @@ export async function configureFormClassificationTags({
   return { enabled: true, trigger: rule?.action, categories: selectedCategory ? [selectedCategory] : [], tags: selectedTag ? [selectedTag] : [], savedParameters: persisted, skipped: false }
 }
 
-/** Create and verify a channel without adding channel data to the downstream form contract. */
+/** Return the independently persisted channel for the public filling workflow. */
 export async function createFormShareChannel({ page, formId, channelName, logger = () => {} }) {
   flowExpect(String(channelName ?? '').trim(), '新建分享渠道需要本次运行的渠道名称').not.toBe('')
   await page.goto(settingsUrl(page, formId, { step: 'share' }), { waitUntil: 'domcontentloaded' })
@@ -196,4 +196,5 @@ export async function createFormShareChannel({ page, formId, channelName, logger
   await expect(cards, '刷新后新建分享渠道应保留').toHaveCount(previousCount + 1)
   await expect(cards.last().locator('.share-link-title-display'), '刷新后应回显本次分享渠道名称').toContainText(channelName)
   logger('success', '新建分享渠道已保存，并通过配置与页面刷新回读')
+  return structuredClone(storedChannel)
 }

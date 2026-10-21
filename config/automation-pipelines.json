@@ -1,0 +1,383 @@
+{
+  "schemaVersion": 1,
+  "pipelines": [
+    {
+      "id": "2e662bbe-1250-41c2-b7f4-dcb912d2561a",
+      "name": "测试表单冒烟测试",
+      "description": "验证七个脚本在测试环境与生产环境共用实现，包含共享草稿编辑并发检查。",
+      "steps": [
+        {
+          "scriptId": "form-all-fields-publish",
+          "parameterMappings": []
+        },
+        {
+          "scriptId": "form-multilingual-translation-publish",
+          "parameterMappings": [
+            {
+              "sourceScriptId": "form-all-fields-publish",
+              "sourcePath": "formId",
+              "targetKey": "FORM_ID"
+            }
+          ]
+        },
+        {
+          "scriptId": "form-submission-reply-create",
+          "parameterMappings": [
+            {
+              "sourceScriptId": "form-multilingual-translation-publish",
+              "sourcePath": "formId",
+              "targetKey": "FORM_ID"
+            }
+          ]
+        },
+        {
+          "scriptId": "form-lpxavn-submit",
+          "parameterMappings": [
+            {
+              "sourceScriptId": "form-multilingual-translation-publish",
+              "sourcePath": "formId",
+              "targetKey": "FORM_ID"
+            }
+          ]
+        },
+        {
+          "scriptId": "form-submission-list-check",
+          "parameterMappings": [
+            {
+              "sourceScriptId": "form-lpxavn-submit",
+              "sourcePath": "formId",
+              "targetKey": "FORM_ID"
+            },
+            {
+              "sourceScriptId": "form-lpxavn-submit",
+              "sourcePath": "submissionId",
+              "targetKey": "SUBMISSION_ID"
+            },
+            {
+              "sourceScriptId": "form-lpxavn-submit",
+              "sourcePath": "submissionAssertions",
+              "targetKey": "SUBMISSION_ASSERTIONS"
+            }
+          ]
+        },
+        {
+          "scriptId": "form-all-fields-submit",
+          "parameterMappings": [
+            {
+              "sourceScriptId": "form-submission-list-check",
+              "sourcePath": "formId",
+              "targetKey": "FORM_ID"
+            }
+          ]
+        },
+        {
+          "scriptId": "form-edit-concurrency",
+          "parameterMappings": [
+            {
+              "sourceScriptId": "form-all-fields-publish",
+              "sourcePath": "formId",
+              "targetKey": "FORM_ID"
+            }
+          ]
+        }
+      ],
+      "createdAt": "2026-09-10T10:14:00.209Z",
+      "updatedAt": "2026-10-21T03:44:44.887Z"
+    },
+    {
+      "id": "a75410a9-5ca4-46da-bed5-003fcf1a5680",
+      "name": "内地表单冒烟测试",
+      "description": "创建全题型表单，检查公开填写、提报列表、后台手动创建及多语言翻译。",
+      "steps": [
+        {
+          "scriptId": "form-all-fields-publish-mainland",
+          "parameterMappings": []
+        },
+        {
+          "scriptId": "form-multilingual-translation-publish",
+          "parameterMappings": [
+            {
+              "sourceScriptId": "form-all-fields-publish-mainland",
+              "sourcePath": "formId",
+              "targetKey": "FORM_ID"
+            }
+          ]
+        },
+        {
+          "scriptId": "form-submission-reply-create",
+          "parameterMappings": [
+            {
+              "sourceScriptId": "form-multilingual-translation-publish",
+              "sourcePath": "formId",
+              "targetKey": "FORM_ID"
+            }
+          ]
+        },
+        {
+          "scriptId": "form-lpxavn-submit",
+          "parameterMappings": [
+            {
+              "sourceScriptId": "form-multilingual-translation-publish",
+              "sourcePath": "formId",
+              "targetKey": "FORM_ID"
+            }
+          ]
+        },
+        {
+          "scriptId": "form-submission-list-check",
+          "parameterMappings": [
+            {
+              "sourceScriptId": "form-lpxavn-submit",
+              "sourcePath": "formId",
+              "targetKey": "FORM_ID"
+            },
+            {
+              "sourceScriptId": "form-lpxavn-submit",
+              "sourcePath": "submissionId",
+              "targetKey": "SUBMISSION_ID"
+            },
+            {
+              "sourceScriptId": "form-lpxavn-submit",
+              "sourcePath": "submissionAssertions",
+              "targetKey": "SUBMISSION_ASSERTIONS"
+            }
+          ]
+        },
+        {
+          "scriptId": "form-all-fields-submit",
+          "parameterMappings": [
+            {
+              "sourceScriptId": "form-submission-list-check",
+              "sourcePath": "formId",
+              "targetKey": "FORM_ID"
+            }
+          ]
+        },
+        {
+          "scriptId": "form-edit-concurrency",
+          "parameterMappings": [
+            {
+              "sourceScriptId": "form-all-fields-publish-mainland",
+              "sourcePath": "formId",
+              "targetKey": "FORM_ID"
+            }
+          ]
+        }
+      ],
+      "createdAt": "2026-09-10T09:52:57.069Z",
+      "updatedAt": "2026-10-21T03:44:44.887Z"
+    },
+    {
+      "id": "af05c1fd-1eab-452f-873d-13e2ebc13583",
+      "name": "香港表单冒烟测试",
+      "description": "創建填寫表單",
+      "steps": [
+        {
+          "scriptId": "form-all-fields-publish",
+          "parameterMappings": []
+        },
+        {
+          "scriptId": "form-multilingual-translation-publish",
+          "parameterMappings": [
+            {
+              "sourceScriptId": "form-all-fields-publish",
+              "sourcePath": "formId",
+              "targetKey": "FORM_ID"
+            }
+          ]
+        },
+        {
+          "scriptId": "form-submission-reply-create",
+          "parameterMappings": [
+            {
+              "sourceScriptId": "form-multilingual-translation-publish",
+              "sourcePath": "formId",
+              "targetKey": "FORM_ID"
+            }
+          ]
+        },
+        {
+          "scriptId": "form-lpxavn-submit",
+          "parameterMappings": [
+            {
+              "sourceScriptId": "form-multilingual-translation-publish",
+              "sourcePath": "formId",
+              "targetKey": "FORM_ID"
+            }
+          ]
+        },
+        {
+          "scriptId": "form-submission-list-check",
+          "parameterMappings": [
+            {
+              "sourceScriptId": "form-lpxavn-submit",
+              "sourcePath": "formId",
+              "targetKey": "FORM_ID"
+            },
+            {
+              "sourceScriptId": "form-lpxavn-submit",
+              "sourcePath": "submissionId",
+              "targetKey": "SUBMISSION_ID"
+            },
+            {
+              "sourceScriptId": "form-lpxavn-submit",
+              "sourcePath": "submissionAssertions",
+              "targetKey": "SUBMISSION_ASSERTIONS"
+            }
+          ]
+        },
+        {
+          "scriptId": "form-all-fields-submit",
+          "parameterMappings": [
+            {
+              "sourceScriptId": "form-submission-list-check",
+              "sourcePath": "formId",
+              "targetKey": "FORM_ID"
+            }
+          ]
+        },
+        {
+          "scriptId": "form-edit-concurrency",
+          "parameterMappings": [
+            {
+              "sourceScriptId": "form-all-fields-publish",
+              "sourcePath": "formId",
+              "targetKey": "FORM_ID"
+            }
+          ]
+        }
+      ],
+      "createdAt": "2026-08-24T03:26:14.843Z",
+      "updatedAt": "2026-10-21T03:44:44.887Z"
+    },
+    {
+      "id": "84f0585f-5ac2-4c21-84fc-e4eaecbe5167",
+      "name": "测试邮件表单管理回归",
+      "description": "测试环境：五邮箱填写 → 存为模板及系统模板管理 → 复制删除归档菜单检查 → 搜索及分类。后三步统一使用第一步本轮新建的已发布、填报中且有截止时间的表单。运行时选择测试环境。",
+      "steps": [
+        {
+          "scriptId": "form-email-five-submit",
+          "parameterMappings": []
+        },
+        {
+          "scriptId": "form-save-template-management",
+          "parameterMappings": [
+            {
+              "sourceScriptId": "form-email-five-submit",
+              "sourcePath": "formId",
+              "targetKey": "FORM_ID"
+            }
+          ]
+        },
+        {
+          "scriptId": "form-copy-delete-archive",
+          "parameterMappings": [
+            {
+              "sourceScriptId": "form-email-five-submit",
+              "sourcePath": "formId",
+              "targetKey": "FORM_ID"
+            }
+          ]
+        },
+        {
+          "scriptId": "form-activity-search-category",
+          "parameterMappings": [
+            {
+              "sourceScriptId": "form-email-five-submit",
+              "sourcePath": "formId",
+              "targetKey": "FORM_ID"
+            }
+          ]
+        }
+      ],
+      "createdAt": "2026-10-21T02:48:09.379Z",
+      "updatedAt": "2026-10-21T02:48:09.379Z"
+    },
+    {
+      "id": "b161d9e1-751c-4c2b-88bd-2efa3479d6fc",
+      "name": "香港生产邮件表单管理回归",
+      "description": "香港生产环境：五邮箱填写 → 存为模板及系统模板管理 → 复制删除归档菜单检查 → 搜索及分类。后三步统一使用第一步本轮新建的已发布、填报中且有截止时间的表单。运行时选择香港生产环境。",
+      "steps": [
+        {
+          "scriptId": "form-email-five-submit",
+          "parameterMappings": []
+        },
+        {
+          "scriptId": "form-save-template-management",
+          "parameterMappings": [
+            {
+              "sourceScriptId": "form-email-five-submit",
+              "sourcePath": "formId",
+              "targetKey": "FORM_ID"
+            }
+          ]
+        },
+        {
+          "scriptId": "form-copy-delete-archive",
+          "parameterMappings": [
+            {
+              "sourceScriptId": "form-email-five-submit",
+              "sourcePath": "formId",
+              "targetKey": "FORM_ID"
+            }
+          ]
+        },
+        {
+          "scriptId": "form-activity-search-category",
+          "parameterMappings": [
+            {
+              "sourceScriptId": "form-email-five-submit",
+              "sourcePath": "formId",
+              "targetKey": "FORM_ID"
+            }
+          ]
+        }
+      ],
+      "createdAt": "2026-10-21T02:48:09.407Z",
+      "updatedAt": "2026-10-21T02:48:09.407Z"
+    },
+    {
+      "id": "1e612d0a-4f2c-4ee4-a38a-63e016fd5814",
+      "name": "内地生产邮件表单管理回归",
+      "description": "内地生产环境：五邮箱填写 → 存为模板及系统模板管理 → 复制删除归档菜单检查 → 搜索及分类。后三步统一使用第一步本轮新建的已发布、填报中且有截止时间的表单。运行时选择内地生产环境。",
+      "steps": [
+        {
+          "scriptId": "form-email-five-submit-mainland",
+          "parameterMappings": []
+        },
+        {
+          "scriptId": "form-save-template-management",
+          "parameterMappings": [
+            {
+              "sourceScriptId": "form-email-five-submit-mainland",
+              "sourcePath": "formId",
+              "targetKey": "FORM_ID"
+            }
+          ]
+        },
+        {
+          "scriptId": "form-copy-delete-archive",
+          "parameterMappings": [
+            {
+              "sourceScriptId": "form-email-five-submit-mainland",
+              "sourcePath": "formId",
+              "targetKey": "FORM_ID"
+            }
+          ]
+        },
+        {
+          "scriptId": "form-activity-search-category",
+          "parameterMappings": [
+            {
+              "sourceScriptId": "form-email-five-submit-mainland",
+              "sourcePath": "formId",
+              "targetKey": "FORM_ID"
+            }
+          ]
+        }
+      ],
+      "createdAt": "2026-10-21T02:48:09.430Z",
+      "updatedAt": "2026-10-21T02:48:09.430Z"
+    }
+  ]
+}

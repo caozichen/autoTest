@@ -22,9 +22,9 @@ export const ONE_PIXEL_PNG = Buffer.from(
 )
 
 const FIXED_BASIC_FIELDS = Object.freeze([
+  { key: 'created_at', label: '提交时间', filterKey: 'filter[created_at_between]' },
   { key: 'special_code', label: '特殊编号' },
   { key: 'source_text', label: '来源', filterKey: 'filter[source]' },
-  { key: 'created_at', label: '提交时间', filterKey: 'filter[created_at_between]' },
   { key: 'updated_at', label: '更新时间' },
   { key: 'revision_no', label: '版本号', filterKey: 'filter[revision_no]' },
 ])
@@ -108,8 +108,8 @@ const UI_TEXT = Object.freeze({
   'zh-CN': Object.freeze({
     back: '返回',
     published: '已发布',
-    contactTag: '联系人',
-    submissionTab: '提报详情',
+    contactTag: '已关联联系人',
+    submissionTab: '填报详情',
     contactTab: '联系人信息',
     search: '查询',
     reset: '重设',
@@ -122,7 +122,7 @@ const UI_TEXT = Object.freeze({
     confirm: '确认',
     cancel: '取消',
     source: '来源',
-    submittedAt: '提交时间',
+    submittedAt: '填报时间',
     updatedAt: '更新时间',
     revision: '版本号',
     specialCode: '特殊编号',
@@ -137,21 +137,21 @@ const UI_TEXT = Object.freeze({
   'zh-TW': Object.freeze({
     back: '返回',
     published: '已發佈',
-    contactTag: '聯絡人',
-    submissionTab: '提報詳情',
+    contactTag: '已關聯聯絡人',
+    submissionTab: '填報詳情',
     contactTab: '聯絡人資訊',
     search: '查詢',
     reset: '重設',
     expand: '展開',
     operation: '操作',
     view: '檢視',
-    settingsTitle: '自訂列表欄位',
+    settingsTitle: '自訂清單欄位',
     basicGroup: '基礎欄位',
     searchGroup: '檢索欄位',
     confirm: '確認',
     cancel: '取消',
     source: '來源',
-    submittedAt: '提交時間',
+    submittedAt: '填報時間',
     updatedAt: '更新時間',
     revision: '版本號',
     specialCode: '特殊編號',
@@ -166,7 +166,7 @@ const UI_TEXT = Object.freeze({
   en: Object.freeze({
     back: 'Back',
     published: 'Published',
-    contactTag: 'Contact',
+    contactTag: 'Contact linked',
     submissionTab: 'Submission details',
     contactTab: 'Contact information',
     search: 'Search',
@@ -317,7 +317,7 @@ export function createSubmissionListFixture({
       message: 'success',
       data: {
         list: [record],
-        meta: { current_page: 1, per_page: 10, total: 1 },
+        meta: { current_page: 1, per_page: 20, total: 1 },
       },
     },
     contactResponse: {
@@ -325,7 +325,7 @@ export function createSubmissionListFixture({
       message: 'success',
       data: {
         list: contacts,
-        meta: { current_page: 1, per_page: 10, total: 2 },
+        meta: { current_page: 1, per_page: 20, total: 2 },
       },
     },
     detailResponse: {
@@ -431,9 +431,8 @@ export function createSubmissionListHtml({
 } = {}) {
   if (!fixture) throw new Error('提报列表 HTML fixture 缺少业务数据')
   const ui = UI_TEXT[locale] ?? UI_TEXT['zh-CN']
-  const initiallyCheckedBasics = ['source_text', 'created_at', SEARCHABLE_SUBMISSION_FIELDS[0].basicKey]
+  const initiallyCheckedBasics = ['created_at', SEARCHABLE_SUBMISSION_FIELDS[0].basicKey]
   const initiallyCheckedSearches = [
-    'filter[source]',
     'filter[created_at_between]',
     SEARCHABLE_SUBMISSION_FIELDS[0].filterKey,
   ]
@@ -467,7 +466,7 @@ export function createSubmissionListHtml({
   }
   const tag = omitContactTag
     ? ''
-    : `<span class="arco-tag"><svg class="info-card__ability-icon" aria-hidden="true"></svg><span>${escapeHtml(ui.contactTag)}</span></span>`
+    : `<dl><div class="info-card__property info-card__property--contact"><dt>联系人关联</dt><dd>${escapeHtml(ui.contactTag)}</dd></div></dl>`
 
   return `<!doctype html>
 <html lang="${escapeHtml(locale)}">
@@ -498,6 +497,7 @@ export function createSubmissionListHtml({
       <button type="button" data-action="reset">${escapeHtml(ui.reset)}</button>
       <button type="button" data-action="expand">${escapeHtml(ui.expand)}</button>
     </section>
+    <div class="form-activity-preview-table-toolbar"><button type="button" data-action="field-settings" aria-label="${escapeHtml(ui.settingsTitle)}"><svg class="arco-icon-list" aria-hidden="true"></svg>${escapeHtml(ui.settingsTitle)}</button></div>
     <section class="list-card">
       <table class="header-table"><thead><tr id="list-header"></tr></thead></table>
       <table class="data-table"><tbody id="list-body"></tbody></table>
@@ -715,8 +715,7 @@ export function createSubmissionListHtml({
     const renderSubmissionTable = () => {
       const columns = selectedColumnFields()
       byId('list-header').innerHTML = columns.map((field) => '<th>' + escapeText(labelForBasic(field)) + '</th>').join('')
-        + '<th>' + escapeText(model.ui.operation) + '<button type="button" data-action="field-settings">'
-        + '<svg class="arco-icon-settings" aria-hidden="true"></svg></button></th>'
+        + '<th>' + escapeText(model.ui.operation) + '</th>'
       byId('list-body').innerHTML = state.submissions.map((record) => {
         const answerFor = (basicKey) => {
           if (!basicKey.startsWith('dyn_')) return record[basicKey] ?? '-'
@@ -757,7 +756,7 @@ export function createSubmissionListHtml({
       if (start || end) params.set('filter[created_at_between]', [start, end].join(','))
     }
     const executeSearch = async () => {
-      const params = new URLSearchParams({ page: '1', per_page: '10' })
+      const params = new URLSearchParams({ page: '1', per_page: '20' })
       for (const [key, value] of Object.entries(state.filterValues)) if (value) params.set(key, value)
       document.querySelectorAll('[data-filter-input]').forEach((input) => {
         const value = input.value.trim()
@@ -787,11 +786,11 @@ export function createSubmissionListHtml({
         resetFilters()
         renderFilters()
         if (state.activeTab === 'contact') {
-          const body = await getJson('/api/be/form/' + encodeURIComponent(model.formId) + '/contact?page=1&per_page=10')
+          const body = await getJson('/api/be/form/' + encodeURIComponent(model.formId) + '/contact?page=1&per_page=20')
           state.contacts = recordsOf(body)
           renderContactTable()
         } else {
-          const body = await getJson('/api/be/form/' + encodeURIComponent(model.formId) + '/submission?page=1&per_page=10')
+          const body = await getJson('/api/be/form/' + encodeURIComponent(model.formId) + '/submission?page=1&per_page=20')
           state.submissions = recordsOf(body)
           renderSubmissionTable()
         }
@@ -825,7 +824,7 @@ export function createSubmissionListHtml({
     Promise.all([
       getJson('/api/be/form/' + encodeURIComponent(model.formId)),
       getJson('/api/be/form/' + encodeURIComponent(model.formId) + '/tab-counts'),
-      getJson('/api/be/form/' + encodeURIComponent(model.formId) + '/submission?page=1&per_page=10'),
+      getJson('/api/be/form/' + encodeURIComponent(model.formId) + '/submission?page=1&per_page=20'),
     ]).then(([, counts, submissions]) => {
       state.submissions = recordsOf(submissions)
       const countData = counts && counts.data || {}

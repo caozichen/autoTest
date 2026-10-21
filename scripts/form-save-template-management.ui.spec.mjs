@@ -1,3 +1,5 @@
+import { observeFormEditTokens } from './support/form-edit-token-observer.mjs'
+import { resolveAdminLocale } from './support/admin-locale.mjs'
 import { attachNetworkObserver } from './support/api-response-recorder.mjs'
 import { expect as flowExpect, scaleTimeout } from './support/environment-timeouts.mjs'
 import { launchGoogleChrome } from './support/google-chrome.mjs'
@@ -69,10 +71,12 @@ function movableTemplates(records) {
 }
 
 function waitForExactResponse(page, method, path) {
-  return page.waitForResponse(response => response.request().method() === method
+  const pending = page.waitForResponse(response => response.request().method() === method
     && new URL(response.url()).pathname.endsWith(path), {
     timeout: scaleTimeout(ACTION_TIMEOUT_MS),
   })
+  pending.catch(() => undefined)
+  return pending
 }
 
 async function businessResponse(response, label) {
@@ -138,10 +142,10 @@ async function assertTemplateRow(page, records, template, name, remark, label) {
 }
 
 async function openTemplateTab(page, apiBaseUrl, authorization) {
-  await clickWhenReady(page.getByRole('button', { name: /基础设置/ }))
+  await clickWhenReady(page.getByRole('button', { name: /基础设置|基礎設定|基本設定/ }))
   const modal = page.locator('.form-activity-base-settings-modal:visible')
   await flowExpect(modal, '基础设置弹窗必须打开').toHaveCount(1)
-  const templateTab = modal.locator('.arco-tabs-tab').filter({ hasText: /系统模板管理/ })
+  const templateTab = modal.locator('.arco-tabs-tab').filter({ hasText: /系统模板管理|系統範本管理/ })
   await flowExpect(templateTab, '系统模板管理页签必须唯一').toHaveCount(1)
   await clickWhenReady(templateTab)
   await flowExpect(modal.locator('.system-template__table'), '系统模板表格必须出现').toBeVisible()
@@ -172,6 +176,7 @@ export async function run({
   const network = { api: [], resources: [] }
   const mutations = new Map()
   const tokenViolations = []
+  let editTokens
   let browser
   let context
   let page
@@ -184,7 +189,7 @@ export async function run({
     context = await browser.newContext({
       ignoreHTTPSErrors,
       viewport: { width: 1600, height: 1000 },
-      locale: 'zh-CN',
+      locale: resolveAdminLocale(variables),
       timezoneId: 'Asia/Shanghai',
     })
     observer = attachNetworkObserver(context, {
@@ -193,6 +198,7 @@ export async function run({
       onResourceResponse: entry => { network.resources.push(entry); recordResourceResponse?.(entry) },
     })
     await observer.ready
+    editTokens = observeFormEditTokens(context, apiBaseUrl)
     page = await context.newPage()
     observeUiReadiness(page)
     page.setDefaultTimeout(scaleTimeout(ACTION_TIMEOUT_MS))
@@ -208,10 +214,10 @@ export async function run({
         mutations.set(key, (mutations.get(key) ?? 0) + 1)
       }
     })
-    await context.addInitScript(({ token }) => {
+    await context.addInitScript(({ token, adminLocale }) => {
       localStorage.setItem('token', token)
-      localStorage.setItem('arco-locale', 'zh-CN')
-    }, { token: authorization })
+      localStorage.setItem('arco-locale', adminLocale)
+    }, { token: authorization, adminLocale: resolveAdminLocale(variables) })
 
     await page.goto(pageUrl(siteBaseUrl, '/form-activity/list'), { waitUntil: 'domcontentloaded' })
     await expect(page, 'Token 生效后不应跳转登录页').not.toHaveURL(/\/login(?:[/?#]|$)/)
@@ -252,8 +258,8 @@ export async function run({
     await clickWhenReady(sourceRow.getByRole('button', { name: /^(更多|更多操作|More)$/ }))
     const menu = page.locator('.form-activity-operation-dropdown:visible')
     await flowExpect(menu, '更多操作菜单必须展开').toHaveCount(1)
-    await expect(menu, '更多菜单应有存为模板').toContainText('存为模板')
-    await clickWhenReady(menu.getByText('存为模板').last())
+    await expect(menu, '更多菜单应有存为模板').toContainText(/存为模板|存為範本|儲存為範本/)
+    await clickWhenReady(menu.getByText(/存为模板|存為範本|儲存為範本/).last())
     const saveModal = page.locator('.form-save-as-template-modal:visible')
     await flowExpect(saveModal, '存为模板弹窗必须打开').toHaveCount(1)
     const nameInput = saveModal.locator('#form-save-as-template-name')
@@ -285,13 +291,13 @@ export async function run({
 
     observer.setPhase('修改模板备注')
     await clickWhenReady(row.locator('.system-template__remark-readonly')
-      .getByRole('button', { name: /编辑/ }))
+      .getByRole('button', { name: /编辑|編輯/ }))
     const remarkInput = row.locator('input[name="template_remark"]')
     await flowExpect(remarkInput, '备注输入框必须打开').toBeVisible()
     await remarkInput.fill(TEMPLATE_REMARK)
     const remarkPromise = waitForExactResponse(page, 'PUT', `/be/form/template/${id}/remark`)
     await clickWhenReady(row.locator('.system-template__remark-input')
-      .getByRole('button', { name: /保存/ }))
+      .getByRole('button', { name: /保存|儲存/ }))
     const remarkResponse = await remarkPromise
     const remarkBody = await businessResponse(remarkResponse, '保存模板备注')
     expect(requestJson(remarkResponse, '保存备注'), '备注请求应仅提交指定文案')
@@ -317,8 +323,9 @@ export async function run({
       ['top', 'first'],
     ]) {
       const label = operation === 'top' ? '置顶' : '置底'
+      const labelPattern = operation === 'top' ? /置顶|置頂/ : /置底/
       await clickForBusinessResponse(page,
-        row.locator('.system-template__actions').getByRole('button', { name: label }),
+        row.locator('.system-template__actions').getByRole('button', { name: labelPattern }),
         'PUT', `/be/form/template/${id}/${operation}`, `模板${label}`)
       records = await fetchTemplates(page, apiBaseUrl, authorization, `${label}后`)
       const movable = movableTemplates(records)
@@ -330,7 +337,7 @@ export async function run({
     }
 
     observer.setPhase('编辑模板名称并保存')
-    await clickWhenReady(row.locator('.system-template__actions').getByRole('link', { name: /编辑/ }))
+    await clickWhenReady(row.locator('.system-template__actions').getByRole('link', { name: /编辑|編輯/ }))
     await page.waitForURL(url => url.pathname === '/form-activity/designer'
       && url.searchParams.get('id') === designerId, {
       timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS),
@@ -380,7 +387,7 @@ export async function run({
     await clickWhenReady(page.locator('.form-activity-create-trigger'))
     const createMenu = page.locator('.form-activity-create-dropdown:visible')
     await flowExpect(createMenu, '创建菜单必须展开').toHaveCount(1)
-    await clickWhenReady(createMenu.getByText('表单问卷'))
+    await clickWhenReady(createMenu.getByText(/表单问卷|表格問卷|表單問卷/))
     await page.waitForURL(url => url.pathname === '/form-activity/index'
       && url.searchParams.get('type') === 'form', {
       timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS),
@@ -446,17 +453,17 @@ export async function run({
     expect(createdDetail.status, '模板新建表单应先处于草稿状态').toBe('draft')
 
     observer.setPhase('发布模板生成的表单')
-    const publishButton = page.getByRole('button', { name: /^(发布|發佈)$/ })
+    const publishButton = page.getByRole('button', { name: /^(发布|發[佈布])$/ })
     await flowExpect(publishButton, '模板新建表单必须允许直接发布').toBeVisible()
     const publishPromise = waitForExactResponse(page, 'POST', `/be/form/${createdFormId}/publish`)
     await clickWhenReady(publishButton)
     const unsavedDialog = page.locator('.arco-modal:visible')
-      .filter({ hasText: /表单未保存|表單未儲存|保存后发布|儲存後發佈/ })
+      .filter({ hasText: /表单未保存|表[單格]未儲存|保存后发布|儲存後發[佈布]/ })
     if (await unsavedDialog.isVisible().catch(() => false)) {
       await expect(unsavedDialog, '未保存时应提示先保存再发布').toBeVisible()
       const itemsPromise = waitForExactResponse(page, 'PUT', `/be/form/${createdFormId}/items`)
       const configPromise = waitForExactResponse(page, 'PUT', `/be/form/${createdFormId}/config`)
-      await clickWhenReady(unsavedDialog.getByRole('button', { name: /保存后发布|儲存後發佈/ }))
+      await clickWhenReady(unsavedDialog.getByRole('button', { name: /保存后发布|儲存後發[佈布]/ }))
       const itemsResponse = await itemsPromise
       await businessResponse(itemsResponse, '发布前保存模板表单题目')
       await businessResponse(await configPromise, '发布前保存模板表单配置')
@@ -498,7 +505,7 @@ export async function run({
     await flowExpect(publishedRow, '模板生成的已发布表单操作行必须唯一').toHaveCount(1)
     await expect(publishedRow.locator('.form-activity-list__title-link'),
       '页面列表应显示模板生成的表单').toHaveText(modifiedName)
-    await expect(publishedRow, '页面列表应显示已发布状态').toContainText(/已发布|已發佈/)
+    await expect(publishedRow, '页面列表应显示已发布状态').toContainText(/已发布|已發[佈布]/)
 
     observer.setPhase('删除本次创建的模板')
     const beforeDelete = await openTemplateTab(page, apiBaseUrl, authorization)
@@ -516,7 +523,7 @@ export async function run({
     await flowExpect(deleteAction, '本次创建的模板必须可删除').toBeEnabled()
     await clickWhenReady(deleteAction)
     const deleteDialog = page.locator('.arco-modal:visible')
-      .filter({ hasText: /确定移除模板|確定移除模板/ })
+      .filter({ hasText: /确定移除模板|確定移除(?:模板|範本)/ })
     await flowExpect(deleteDialog, '模板删除确认弹窗必须唯一').toHaveCount(1)
     await expect(deleteDialog, '删除确认应明确指向本次模板名称').toContainText(modifiedName)
     const [deleteResponse] = await Promise.all([
@@ -529,7 +536,7 @@ export async function run({
     expect(records.some(record => recordId(record) === id), '删除后列表不应再有本次模板 ID')
       .toBe(false)
     await expect(page.locator('.form-activity-base-settings-modal:visible .system-template__total'),
-      '系统模板管理总数应减少一条').toContainText(`共 ${records.length} 个模板`)
+      '系统模板管理总数应减少一条').toContainText(new RegExp(`共 ${records.length} (?:个模板|個範本)`))
     const formAfterTemplateDeletion = formData(await fetchFormDetail(page, apiBaseUrl,
       createdFormId, authorization))
     expect(formAfterTemplateDeletion.title, '删除模板后已发布表单名称应保留').toBe(modifiedName)
@@ -554,6 +561,7 @@ export async function run({
     await observer.waitForIdle({ timeoutMs: scaleTimeout(5_000), signal })
     expect(network.api.length, '应采集到后台接口证据').toBeGreaterThan(0)
     expect(network.resources.length, '应采集到静态资源证据').toBeGreaterThan(0)
+    await editTokens.assert()
     logger('success', '模板创建、备注、排序、改名、新表单发布及模板删除校验完成', {
       sourceId, templateId: id, designerId, modifiedName, createdFormId,
     })
@@ -587,6 +595,7 @@ export async function run({
     }
     throw error
   } finally {
+    editTokens?.stop()
     observer.setPhase('结束清理')
     await observer.stop({ signal })
     const abortCloseStarted = await stopAbortClose()

@@ -1,3 +1,5 @@
+import { resolveAdminLocale } from './support/admin-locale.mjs'
+import { parseSearchSamples } from './support/submission-search-samples.mjs'
 import { clickWhenReady, observeUiReadiness } from './support/ui-readiness.mjs'
 import { scaleTimeout } from './support/environment-timeouts.mjs'
 import { expect as flowExpect } from './support/environment-timeouts.mjs'
@@ -20,7 +22,7 @@ const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
 
 const DETAILS_TAB_PATTERN = /(?:提报详情|提報詳情|Submission Details?|填报详情|填報詳情|填报记录|填報記錄|Responses)/i
 const CONTACT_TAB_PATTERN = /(?:联系人信息|聯絡人資訊|聯繫人資訊|Contact Information)/i
-const CONTACT_TAG_PATTERN = /^(?:联系人|聯絡人|聯繫人|Contacts?)$/i
+const CONTACT_TAG_PATTERN = /^(?:已关联联系人|已關聯聯絡人|已關聯聯繫人|Contact linked)$/i
 const VIEW_PATTERN = /^(?:查看|檢視|View)$/i
 const QUERY_PATTERN = /^(?:查询|查詢|搜索|搜尋|Search|Query)$/i
 const RESET_PATTERN = /^(?:重置|重设|重設|Reset)$/i
@@ -134,7 +136,7 @@ function assertConsistentName(explicitName, fieldName, label) {
 function parseSubmissionAssertions(value) {
   const parsed = parseJsonObject(value, 'SUBMISSION_ASSERTIONS')
   const unknownKeys = Object.keys(parsed).filter((key) => (
-    !['title', 'primaryContactName', 'groupContactName', 'fields'].includes(key)
+    !['title', 'primaryContactName', 'groupContactName', 'fields', 'searchSamples'].includes(key)
   ))
   if (unknownKeys.length > 0) {
     throw new Error(`SUBMISSION_ASSERTIONS 包含不支持的配置项：${unknownKeys.join(', ')}`)
@@ -165,6 +167,7 @@ function parseSubmissionAssertions(value) {
     primaryContactName,
     groupContactName,
     fields,
+    ...(parsed.searchSamples === undefined ? {} : { searchSamples: parseSearchSamples(parsed.searchSamples) }),
     configuredAssertionCount: Number(Boolean(title))
       + Number(Boolean(primaryContactName))
       + Number(Boolean(groupContactName))
@@ -453,14 +456,11 @@ async function assertTopInformation(page, assertions) {
       .toBe(assertions.title)
   }
 
-  const abilityIcon = page.locator('.info-card__ability-icon')
-  await expect(abilityIcon, '页面顶部应唯一显示表单能力标签图标').toHaveCount(1)
-  const abilityTag = abilityIcon.locator(
-    'xpath=ancestor::*[contains(concat(" ", normalize-space(@class), " "), " arco-tag ")][1]',
-  )
-  await expect(abilityTag.first(), '页面顶部联系人标签应可见').toBeVisible()
-  const actualTag = normalizeWhitespace((await abilityTag.allTextContents()).join(' '))
-  expect(actualTag, '页面顶部能力标签应为联系人（兼容简体、繁体和英文）')
+  const contactState = page.locator('.info-card__property--contact')
+  await expect(contactState, '页面顶部应唯一显示联系人关联状态').toHaveCount(1)
+  await expect(contactState.first(), '页面顶部联系人关联状态应可见').toBeVisible()
+  const actualTag = normalizeWhitespace((await contactState.locator('dd').allTextContents()).join(' '))
+  expect(actualTag, '本次收录联系人表单应显示已关联联系人状态')
     .toMatch(CONTACT_TAG_PATTERN)
   return { actualTitle, actualTag }
 }
@@ -601,7 +601,9 @@ function linkedSearchValue(basicValue) {
 }
 
 async function fieldSettings(page) {
-  const settingsButton = page.locator('button:has(svg.arco-icon-settings)')
+  const settingsButton = page.locator('.form-activity-preview-table-toolbar').getByRole('button', {
+    name: /^(?:自定义列表字段|自訂(?:列表|清單)欄位|Custom(?:ize)? (?:List )?Fields)$/i,
+  })
   await recordAndRequireCount(settingsButton, 1, '提报表格操作栏应唯一显示字段设置图标')
   await recordAndRequireVisible(settingsButton, '字段设置图标应可见')
   await recordAndRequireEnabled(settingsButton, '字段设置图标应可用')
@@ -613,9 +615,9 @@ async function fieldSettings(page) {
   await expect(modal, '字段设置弹窗标题应兼容简体、繁体和英文')
     .toContainText(/自定义列表字段|自訂(?:列表|清單)欄位|Custom(?:ize)? (?:List )?Fields/i)
   const groupTitles = modal.locator('.field-group-title')
-  await expect(groupTitles.nth(0), '基础字段分区标题应兼容简体、繁体和英文')
+  await expect(groupTitles.filter({ hasText: /^(?:基础字段|基礎欄位|Basic fields)$/i }), '基础字段分区标题应兼容简体、繁体和英文')
     .toHaveText(/^(?:基础字段|基礎欄位|Basic fields)$/i)
-  await expect(groupTitles.nth(1), '检索字段分区标题应兼容简体、繁体和英文')
+  await expect(groupTitles.filter({ hasText: /^(?:检索字段|檢索欄位|Search fields)$/i }), '检索字段分区标题应兼容简体、繁体和英文')
     .toHaveText(/^(?:检索字段|檢索欄位|Search fields)$/i)
 
   const basicCheckboxes = modal.locator('.basic-setting-list input[type="checkbox"]')
@@ -626,6 +628,16 @@ async function fieldSettings(page) {
   const searchFieldCount = await searchCheckboxes.count()
   expect(basicFieldCount, '字段设置应包含基础字段').toBeGreaterThan(0)
   expect(searchFieldCount, '字段设置应包含检索字段').toBeGreaterThan(0)
+
+  const defaultBasicValues = await basicCheckboxes.evaluateAll(inputs => inputs.filter(input => input.checked).map(input => input.value))
+  const defaultSearchValues = await searchCheckboxes.evaluateAll(inputs => inputs.filter(input => input.checked).map(input => input.value))
+  expect(defaultBasicValues[0], '默认系统列应优先显示填报时间').toBe('created_at')
+  for (const key of ['special_code', 'source_text', 'updated_at', 'revision_no']) {
+    expect(defaultBasicValues.includes(key), `默认系统列应隐藏 ${key}`).toBe(false)
+  }
+  for (const key of ['filter[source]', 'filter[revision_no]']) {
+    expect(defaultSearchValues.includes(key), `默认检索项应隐藏 ${key}`).toBe(false)
+  }
 
   const searchDefinitions = []
   const searchValues = new Set()
@@ -806,7 +818,7 @@ async function chooseSource(page, field, expectedSource) {
 
 async function fillDateRange(field, date) {
   const inputs = field.locator('input')
-  await recordAndRequireCount(inputs, 2, '提交时间筛选应显示开始和结束日期两个输入框')
+  await recordAndRequireCount(inputs, 2, '填报时间筛选应显示开始和结束日期两个输入框')
   await inputs.nth(0).fill(date)
   const page = field.page()
   const panels = page.locator('.arco-panel-date-inner:visible')
@@ -839,6 +851,9 @@ async function runSubmissionSearchCase(page, {
   submissionId,
   primaryContactName,
   logger,
+  queryOverride,
+  expectMatch = true,
+  sampleValue,
 }) {
   const field = filterCard.locator('.filter-card-field').filter({
     has: page.locator('.filter-card-label').filter({
@@ -850,7 +865,7 @@ async function runSubmissionSearchCase(page, {
   if (fieldCount !== 1) return false
 
   await resetFilterCard(filterCard)
-  const value = rowValues.get(labelKey(definition.label)) ?? ''
+  const value = sampleValue ?? rowValues.get(labelKey(definition.label)) ?? ''
   let expectedQueryValue = ''
   let mode = 'text'
   let emptySample = false
@@ -862,7 +877,7 @@ async function runSubmissionSearchCase(page, {
   } else if (definition.value === 'filter[created_at_between]') {
     mode = 'date'
     expectedQueryValue = value.match(/\d{4}-\d{2}-\d{2}/)?.[0] ?? ''
-    expect(expectedQueryValue, '目标提报行提交时间应包含 YYYY-MM-DD 日期').not.toBe('')
+    expect(expectedQueryValue, '目标提报行填报时间应包含 YYYY-MM-DD 日期').not.toBe('')
     if (!expectedQueryValue) return false
     await fillDateRange(field, expectedQueryValue)
   } else {
@@ -871,6 +886,7 @@ async function runSubmissionSearchCase(page, {
     const isChoice = await choiceControl.count() > 0
     const selectedLabel = isChoice ? value.split(/[,，]/)[0].trim() : value
     expectedQueryValue = emptySample ? `autotest_absent_${submissionId}` : createFuzzyProbe(selectedLabel)
+    if (queryOverride !== undefined) expectedQueryValue = queryOverride
     if (emptySample) {
       logger('warning', '目标记录该字段为空：验证非空条件应排除目标记录，无法验证正向模糊命中', {
         field: definition.label,
@@ -928,12 +944,12 @@ async function runSubmissionSearchCase(page, {
   if (mode === 'text') {
     expect(actualValues, `检索字段“${definition.label}”请求值应为输入的中间片段`).toContain(expectedQueryValue)
   }
-  if (emptySample) {
-    const inspection = await readJsonResponse(response, `提报空值字段“${definition.label}”筛选接口`)
+  if (emptySample || !expectMatch) {
+    const inspection = await readJsonResponse(response, `提报字段“${definition.label}”反向筛选接口`)
     const located = locateSubmissionRecord(inspection.body, submissionId)
-    expect(located.targetIndex, `非空搜索“${definition.label}”应排除该字段为空的目标提报`).toBe(-1)
+    expect(located.targetIndex, `不匹配的非空搜索“${definition.label}”应排除目标提报`).toBe(-1)
     await expect(dataRows(page).filter({ hasText: primaryContactName }),
-      `空值字段“${definition.label}”筛选后不应残留目标姓名`).toHaveCount(0)
+      `字段“${definition.label}”反向筛选后不应残留目标姓名`).toHaveCount(0)
     return inspection.httpSucceeded && inspection.businessSucceeded && located.targetIndex === -1
   }
   const inspection = await inspectListResponse(response, {
@@ -958,6 +974,7 @@ async function runAllSubmissionSearches(page, {
   primaryContactName,
   logger,
   signal,
+  searchSamples,
 }) {
   const filterCard = filterCardLocator(page)
   await recordAndRequireCount(filterCard, 1, '提报详情 Tab 应唯一显示筛选区域')
@@ -972,10 +989,22 @@ async function runAllSubmissionSearches(page, {
   await recordAndRequireEnabled(queryButton, '提报筛选查询按钮应可用')
 
   let succeededCount = 0
+  for (const [key, expected] of [['filter[channel]', searchSamples?.channel?.code], ['filter[remark]', searchSamples?.remark]]) {
+    if (expected === undefined) continue
+    const definition = enabledDefinitions.find(item => item.value === key)
+    flowExpect(definition, `本次已准备样本 ${key} 必须包含在检索字段中`).toBeTruthy()
+    if (key === 'filter[channel]') {
+      // 已确认产品缺陷：渠道已保存且可检索，但列表响应缺少渠道值、显示为“-”。
+      // 按用户要求暂时注释，后续版本修复后恢复；渠道保存、检索及编辑后回读检查继续执行。
+      // expect(rowValues.get(labelKey(definition.label)), `本次已准备样本 ${definition.label} 必须完整显示，不能退化为空值反查`).toBe(expected)
+    } else {
+      expect(rowValues.get(labelKey(definition.label)), `本次已准备样本 ${definition.label} 必须完整显示，不能退化为空值反查`).toBe(expected)
+    }
+  }
   for (const definition of enabledDefinitions) {
     throwIfRunAborted(signal)
     try {
-      const succeeded = await runSubmissionSearchCase(page, {
+      const args = {
         apiContext,
         definition,
         filterCard,
@@ -983,7 +1012,29 @@ async function runAllSubmissionSearches(page, {
         submissionId,
         primaryContactName,
         logger,
-      })
+      }
+      const sample = definition.value === 'filter[channel]' ? searchSamples?.channel?.code
+        : definition.value === 'filter[remark]' ? searchSamples?.remark : undefined
+      let succeeded
+      if (sample === undefined) succeeded = await runSubmissionSearchCase(page, args)
+      else {
+        const outcomes = []
+        for (const [scenario, queryOverride, expectMatch] of [
+          ['完整值命中', sample, true], ['中间片段命中', createFuzzyProbe(sample), true],
+          ['无关值排除', `autotest_absent_${submissionId}`, false],
+        ]) {
+          logger('info', `验证${definition.label}：${scenario}`, { field: definition.value })
+          outcomes.push(await runSubmissionSearchCase(page, { ...args, sampleValue: sample, queryOverride, expectMatch }))
+        }
+        await resetFilterCard(filterCard)
+        const restored = suppressUnhandledRejection(page.waitForResponse(response => isSubmissionListResponse(response, apiContext)
+          && ![...new URL(response.url()).searchParams.keys()].some(key => key.startsWith('filter[')),
+        { timeout: scaleTimeout(SEARCH_RESPONSE_TIMEOUT_MS) }))
+        await clickWhenReady(queryButton)
+        const inspection = await inspectListResponse(await restored, { submissionId, expectedNames: [primaryContactName], label: `${definition.label}清空筛选恢复列表` })
+        await expect(dataRows(page).filter({ hasText: primaryContactName }), `${definition.label}清空筛选后应恢复目标行`).not.toHaveCount(0)
+        succeeded = outcomes.every(Boolean) && inspection.succeeded
+      }
       if (succeeded) succeededCount += 1
     } catch (error) {
       expect(false, `检索字段“${definition.label}”执行期间不应发生交互异常`).toBe(true)
@@ -1065,7 +1116,7 @@ async function runContactDateSearch(page, {
   await resetFilterCard(filterCard)
   const dateField = filterCard.locator('.filter-card-field').filter({
     has: page.locator('.filter-card-label').filter({
-      hasText: /^\s*(?:提交时间|提交時間|Submission Time|Submitted at)\s*$/i,
+      hasText: /^\s*(?:填报时间|填報時間|提交时间|提交時間|Submission Time|Submitted at)\s*$/i,
     }),
   })
   await fillDateRange(dateField, date)
@@ -1080,17 +1131,17 @@ async function runContactDateSearch(page, {
   try {
     const response = await responsePromise
     assertIsolatedSearch(response, 'filter[created_at_between]', '联系人日期筛选')
-    const inspected = await inspectContactResponse(response, names, '联系人提交时间筛选接口')
+    const inspected = await inspectContactResponse(response, names, '联系人填报时间筛选接口')
     for (const name of names) {
       await expect(
         dataRows(page).filter({ hasText: name }),
-        `联系人提交时间筛选结果应包含“${name}”`,
+        `联系人填报时间筛选结果应包含“${name}”`,
       ).not.toHaveCount(0)
     }
     return inspected.succeeded
   } catch (error) {
-    expect(false, '联系人提交时间筛选应返回携带日期范围的联系人列表接口').toBe(true)
-    logger('warning', '联系人提交时间筛选失败，已完成其余联系人检查', {
+    expect(false, '联系人填报时间筛选应返回携带日期范围的联系人列表接口').toBe(true)
+    logger('warning', '联系人填报时间筛选失败，已完成其余联系人检查', {
       date,
       reason: error instanceof Error ? error.message : String(error),
     })
@@ -1121,7 +1172,7 @@ async function runContactChecks(page, {
   await recordAndRequireCount(
     filterCard.locator('.filter-card-field'),
     2,
-    '联系人信息 Tab 应显示姓名和提交时间两个筛选项',
+    '联系人信息 Tab 应显示姓名和填报时间两个筛选项',
   )
   for (const name of names) {
     await expect(
@@ -1133,7 +1184,7 @@ async function runContactChecks(page, {
   const initialTargetContactRow = dataRows(page).filter({ hasText: names[0] }).first()
   const initialTargetContactText = await initialTargetContactRow.innerText().catch(() => '')
   const contactDate = initialTargetContactText.match(/\d{4}-\d{2}-\d{2}/)?.[0] ?? ''
-  expect(contactDate, '联系人初始列表目标行应包含 YYYY-MM-DD 日期，供提交时间筛选使用')
+  expect(contactDate, '联系人初始列表目标行应包含 YYYY-MM-DD 日期，供填报时间筛选使用')
     .not.toBe('')
 
   let attemptedCount = 0
@@ -1307,12 +1358,12 @@ export async function run({
     context = await browser.newContext({
       ignoreHTTPSErrors,
       viewport: { width: 1600, height: 1000 },
-      locale: 'zh-CN',
+      locale: resolveAdminLocale(variables),
     })
-    await context.addInitScript(({ token }) => {
+    await context.addInitScript(({ token, adminLocale }) => {
       localStorage.setItem('token', token)
-      localStorage.setItem('arco-locale', 'zh-CN')
-    }, { token: authorization })
+      localStorage.setItem('arco-locale', adminLocale)
+    }, { token: authorization, adminLocale: resolveAdminLocale(variables) })
     networkObserver = attachNetworkObserver(context, {
       initialPhase: '浏览器初始化',
       onApiResponse: recordApiResponse,
@@ -1379,6 +1430,7 @@ export async function run({
       initialListPromise,
       initialCountsPromise,
     ])
+    expect(new URL(initialListResponse.url()).searchParams.get('per_page'), '填报列表默认应每页显示 20 条').toBe('20')
     const initialInspection = await inspectListResponse(initialListResponse, {
       submissionId,
       expectedNames: [assertions.primaryContactName],
@@ -1455,11 +1507,7 @@ export async function run({
     const rowValues = await rowValuesByHeader(page, targetRowAfterSettings)
 
     networkObserver.setPhase('逐项验证提报检索')
-    // 按当前测试要求暂时停用 channel、备注信息的检索断言及空值警告。
-    // 字段展示与勾选检查仍保留；恢复时移除此过滤即可。
-    const enabledSearchDefinitions = settings.searchDefinitions.filter((definition) => (
-      !['filter[channel]', 'filter[remark]'].includes(definition.value)
-    ))
+    const enabledSearchDefinitions = settings.searchDefinitions
     const submissionSearches = await runAllSubmissionSearches(page, {
       apiContext,
       definitions: settings.searchDefinitions,
@@ -1469,6 +1517,7 @@ export async function run({
       primaryContactName,
       logger,
       signal,
+      searchSamples: assertions.searchSamples,
     })
     expect(
       submissionSearches.attemptedCount,

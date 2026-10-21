@@ -9,7 +9,14 @@
   "timeoutMs": 300000,
   "enabled": true,
   "requestPath": "/form-activity/submission/preview/reply/{{SUBMISSION_ID}}?fid={{FORM_ID}}",
-  "inputParameters": [],
+  "inputParameters": [
+    {
+      "id": "form-all-fields-submit-admin-locale",
+      "key": "ADMIN_LOCALE",
+      "value": "zh-CN",
+      "description": "后台界面语言：zh-CN 简体中文或 zh-HK 香港繁体。"
+    }
+  ],
   "responseVariableBindings": [
     {
       "id": "submitted-form-id",

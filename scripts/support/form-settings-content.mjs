@@ -33,8 +33,7 @@ export function createFormSettingsContent({ title, formId, siteBaseUrl }) {
         '<h2 style="text-align: center;">自动化测试提交成功</h2>',
         `<p>${escapedContext}</p>`,
         '<p><strong>加粗确认：</strong><em>斜体说明</em>、<u>下划线重点</u>、<s>删除线示例</s>。</p>',
-        // 暂时停用蓝色提示和背景高亮段落，对应样式断言也在 configureFeedback 中注释保留。
-        // '<p><span style="color: #2563eb;">蓝色提示</span>与<mark data-color="#fef08a" style="background-color: #fef08a; color: inherit;">背景高亮</mark>用于验证富文本样式。</p>',
+        '<p><span style="color: #2563eb;">蓝色提示</span>与<mark data-color="#fef08a" style="background-color: #fef08a; color: inherit;">背景高亮</mark>用于验证富文本样式。</p>',
         '<ul><li>已验证表单基础设置。</li><li>已保存通知、分类和标签配置。</li></ul>',
         '<ol><li>核对本次运行标识。</li><li>查看后续自动化验证记录。</li></ol>',
         '<p style="text-align: right;">测试完成后请按运行记录追踪结果。</p>',

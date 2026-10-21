@@ -73,9 +73,7 @@ export async function configureMainlandContactSettings(page, logger) {
 }
 
 export function assertMainlandClassificationTagOptionsAvailable(selectedCategory, selectedTag) {
-  // 内地暂不要求分类或标签存在；保留原断言调用，取消下面注释即可恢复。
-  // return assertClassificationTagOptionsAvailable(selectedCategory, selectedTag)
-  return false
+  return assertClassificationTagOptionsAvailable(selectedCategory, selectedTag)
 }
 
 export async function configureMainlandAdditionalSettings(options) {
@@ -85,7 +83,7 @@ export async function configureMainlandAdditionalSettings(options) {
 }
 
 // Share field, upload, save, publish and contract checks. Mainland customizes
-// contact initialization and temporarily disables the category/tag availability assertion.
+// contact initialization while retaining the category/tag availability assertion.
 export async function run(options, workflowOverrides = {}) {
   return runCompleteForm(options, {
     createPath: '/form-activity/index?type=form',

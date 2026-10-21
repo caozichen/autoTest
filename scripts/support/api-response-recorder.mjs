@@ -24,10 +24,10 @@ function truncateText(value) {
   return `${value.slice(0, MAX_BODY_CHARACTERS)}\n[内容已截断，原始长度 ${value.length} 字符]`
 }
 
-function parseBodyText(value, contentType = '') {
+function parseBodyText(value, contentType = '', { truncate = true } = {}) {
   if (!value) return null
-  const text = truncateText(value)
-  if (value.length > MAX_BODY_CHARACTERS) return text
+  const text = truncate ? truncateText(value) : value
+  if (truncate && value.length > MAX_BODY_CHARACTERS) return text
   if (/json/i.test(contentType) || /^[\s\n]*[\[{]/.test(value)) {
     try {
       return JSON.parse(value)
@@ -314,6 +314,7 @@ export function attachNetworkObserver(target, {
   initialPhase = DEFAULT_NETWORK_PHASE,
   includeApi = true,
   includeResources = true,
+  fullResponseBodies = false,
 } = {}) {
   if (!target || typeof target.on !== 'function' || typeof target.off !== 'function') {
     throw new TypeError('网络观察器必须挂载到 Playwright BrowserContext 或 Page')
@@ -711,7 +712,7 @@ export function attachNetworkObserver(target, {
       // Start in the response event, before another listener can navigate away.
       state.bodyPromise = readResponseText(response)
         .then((value) => ({
-          body: parseBodyText(value, safely(() => response.headers()['content-type'], '') ?? ''),
+          body: parseBodyText(value, safely(() => response.headers()['content-type'], '') ?? '', { truncate: !fullResponseBodies }),
         }))
         .catch((error) => ({ body: null, error: error instanceof Error ? error.message : String(error) }))
     }
@@ -1002,6 +1003,7 @@ export function attachNetworkObserver(target, {
         resourceType: state.resourceType,
         response: state.response,
         responseHeaders: safely(() => state.response?.headers(), {}) ?? {},
+        superseded: Boolean(state.frame && state.navigationGeneration !== frameGenerations.get(state.frame)),
       }) !== false)
       : isIdle
     try {
@@ -1035,14 +1037,14 @@ export function attachNetworkObserver(target, {
     })
   }
 
-  const stop = async ({ discardPending = false, signal } = {}) => {
+  const stop = async ({ discardPending = false, signal, shouldWaitFor } = {}) => {
     if (stopPromise) return stopPromise
     stopPromise = (async () => {
       stopping = true
       const timeoutMs = Math.max(0, Number(responseDrainTimeoutMs) || 0)
       let cancelled = false
       try {
-        await waitUntilIdle(timeoutMs, signal)
+        await waitUntilIdle(timeoutMs, signal, shouldWaitFor)
       } catch (error) {
         if (!signal?.aborted) throw error
         cancelled = true
@@ -1059,12 +1061,18 @@ export function attachNetworkObserver(target, {
       detachPageDiagnostics()
 
       const pendingAtSeal = states.size
-      const discardedPending = discardPending ? pendingAtSeal : 0
+      let discardedPending = 0
       for (const candidate of [...deferredFailures]) flushDeferredFailure(candidate)
       for (const group of [...diagnosticGroups.values()]) flushDiagnosticGroup(group)
       for (const state of [...states.values()]) {
         if (state.finalized) continue
-        if (discardPending) {
+        const excluded = typeof shouldWaitFor === 'function' && shouldWaitFor({
+          request: state.request, url: state.url, category: state.category, resourceType: state.resourceType,
+          response: state.response, responseHeaders: safely(() => state.response?.headers(), {}) ?? {},
+          superseded: Boolean(state.frame && state.navigationGeneration !== frameGenerations.get(state.frame)),
+        }) === false
+        if (discardPending || excluded) {
+          discardedPending += 1
           retireState(state)
           continue
         }

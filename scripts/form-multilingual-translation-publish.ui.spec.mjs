@@ -1,3 +1,6 @@
+import { assertPublicLanguageControl, inspectLanguageControlVariants } from './support/public-language-control.mjs'
+import { createPageCompletionTracker, isRequiredPageRequest } from './support/page-response-completion.mjs'
+import { resolveAdminLocale } from './support/admin-locale.mjs'
 import { clickWhenReady, observeUiReadiness } from './support/ui-readiness.mjs'
 import { publicOriginForSite } from '../shared/form-environment.mjs'
 import { isSystemItem } from './support/form-link-contract.mjs'
@@ -1254,6 +1257,17 @@ function structuralSignature(payload, { draft = false } = {}) {
   }
 }
 
+function draftDefinitionSignature(payload) {
+  const { form } = unwrapFormPayload(payload)
+  return {
+    currentRevision: numericValue(form.current_revision_no),
+    draftRevision: numericValue(form.draft_revision_no),
+    structure: structuralSignature(payload, { draft: true }),
+    source: sourceTextSignature(payload),
+    theme: structureOnly(form.theme_config),
+  }
+}
+
 function projectSignatureAgainstReference(reference, candidate) {
   if (Array.isArray(reference)) {
     // The public endpoint omits an empty option array. It is semantically the
@@ -2401,16 +2415,16 @@ async function assertSaveRoundTrip(
 }
 
 async function completeAndPublish(page, formId, workspace, formTitle, logger) {
-  const completeButton = page.getByRole('button', { name: /完成并发布|完成並發佈|Complete and publish/i }).first()
+  const completeButton = page.getByRole('button', { name: /完成并发布|完成並發[佈布]|Complete and publish/i }).first()
   await expect(completeButton, '全部目标语言完成后“完成并发布”按钮应可用').toBeEnabled()
   await flowExpect(completeButton, '发布流程依赖全部已启用语言达到 100%').toBeEnabled()
   await clickWhenReady(completeButton)
 
-  const confirmationText = page.getByText(/确认发布全部已启用语言|確認發佈全部已啟用語言|Publish all enabled languages/i)
+  const confirmationText = page.getByText(/确认发布全部已启用语言|確認發[佈布]全部已啟用語言|Publish all enabled languages/i)
   await expect(confirmationText, '完成并发布前应二次确认全部已启用语言').toBeVisible()
   const confirmationPopup = page.locator('.arco-popconfirm, .arco-trigger-popup').filter({ has: confirmationText }).last()
   const confirmButton = confirmationPopup.getByRole('button', {
-    name: /完成并发布|完成並發佈|Complete and publish/i,
+    name: /完成并发布|完成並發[佈布]|Complete and publish/i,
   }).last()
   await expect(confirmButton, '发布确认层应提供“完成并发布”按钮').toBeVisible()
 
@@ -2452,19 +2466,19 @@ async function completeAndPublish(page, formId, workspace, formTitle, logger) {
   await page.waitForURL(/\/form-activity\/list(?:[/?#]|$)/, { timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) })
 
   const statusFilter = page.locator('.filter-card-field').filter({
-    has: page.locator('.filter-card-label', { hasText: /发布状态|發佈狀態|Publication status/i }),
+    has: page.locator('.filter-card-label', { hasText: /发布状态|發[佈布]狀態|Publication status/i }),
   })
   await flowExpect(statusFilter, '发布后列表必须提供发布状态筛选器').toHaveCount(1)
   const statusSelect = statusFilter.locator('.arco-select')
   await flowExpect(statusSelect, '发布状态筛选器必须可操作').toBeVisible()
   await clickWhenReady(statusSelect)
   const publishedOption = page.locator('.arco-select-option:visible').filter({
-    hasText: /^(已发布|已發佈|Published)$/i,
+    hasText: /^(已发布|已發[佈布]|Published)$/i,
   })
   await flowExpect(publishedOption, '发布状态筛选器必须提供已发布选项').toHaveCount(1)
   await clickWhenReady(publishedOption)
   await flowExpect(statusSelect, '发布后定向查询必须限定为已发布状态')
-    .toHaveAttribute('title', /^(已发布|已發佈|Published)$/i)
+    .toHaveAttribute('title', /^(已发布|已發[佈布]|Published)$/i)
   const titleInput = page.getByPlaceholder(/请输入标题|請輸入標題|Enter title/i)
   await flowExpect(titleInput, '发布后列表标题筛选框必须可用').toBeVisible()
   await titleInput.fill(formTitle)
@@ -2521,7 +2535,7 @@ async function assertPublishedListUi(page, formTitle, formId, recordIndex) {
   const translationCell = translationLink.locator('xpath=ancestor::td[1]')
   await expect(translationCell, '多语言列表列应显示 2/2 完成进度').toContainText('2/2')
   await expect(
-    translationCell.getByText(/^(已发布|已發佈|Published)$/i),
+    translationCell.getByText(/^(已发布|已發[佈布]|Published)$/i),
     '多语言列表列应显示已发布状态',
   ).toHaveCount(1)
   await flowExpect(translationLink, '多语言列表进度应可进入目标表单翻译页').toBeVisible()
@@ -2608,7 +2622,7 @@ function isMainFrameNavigationRequest(request, page) {
   }
 }
 
-async function inspectDirectOpenButton(page, row, openedUrl, expectedLandingUrl, label) {
+async function inspectDirectOpenButton(page, row, openedUrl, expectedLandingUrl, label, completionTracker) {
   const directOpen = row.getByRole('button', { name: /直接打开|直接打開|Open directly/i })
   await expect(directOpen, `${label}应提供一个“直接打开”按钮`).toHaveCount(1)
   if (await directOpen.count() !== 1) return null
@@ -2645,6 +2659,7 @@ async function inspectDirectOpenButton(page, row, openedUrl, expectedLandingUrl,
       .toBe(expectedLandingUrl.searchParams.get('id'))
     expect(actualUrl.searchParams.get('channel_code'), `${label}直接打开后应保留分享渠道`)
       .toBe(expectedLandingUrl.searchParams.get('channel_code'))
+    await completionTracker.waitForPage(popup, `${label}直接打开后关闭弹窗前`)
     return actualUrl.toString()
   } catch (error) {
     expect(false, `${label}直接打开应成功创建并导航公开页：${error instanceof Error ? error.message : String(error)}`)
@@ -2656,7 +2671,7 @@ async function inspectDirectOpenButton(page, row, openedUrl, expectedLandingUrl,
   }
 }
 
-async function assertUnauthenticatedShareRedirect(context, shortUrlValue, longUrlValue, formId) {
+async function assertUnauthenticatedShareRedirect(context, shortUrlValue, longUrlValue, formId, completionTracker) {
   const shortUrl = new URL(shortUrlValue)
   const longUrl = new URL(longUrlValue)
   const page = await context.newPage()
@@ -2689,6 +2704,7 @@ async function assertUnauthenticatedShareRedirect(context, shortUrlValue, longUr
     expect(landingUrl.searchParams.get('id'), '无认证短链最终表单 ID 应与长链一致').toBe(formId)
     expect(landingUrl.searchParams.get('channel_code'), '无认证短链最终渠道应与长链一致')
       .toBe(longUrl.searchParams.get('channel_code'))
+    await completionTracker.waitForPage(page, '无认证短链页面关闭前')
   } finally {
     context.off('request', trackNavigation)
     await page.close().catch(() => undefined)
@@ -2712,6 +2728,7 @@ async function inspectShareSettingsPage({
   extraHTTPHeaders,
   artifactWriter,
   logger,
+  completionTracker,
 }) {
   const shareUrl = new URL('/form-activity/settings', `${new URL(siteBaseUrl).origin}/`)
   shareUrl.searchParams.set('id', formId)
@@ -2785,8 +2802,8 @@ async function inspectShareSettingsPage({
     await decodeQrImage(qrImage, rawLongUrl, '切回后的分享长链')
   }
 
-  await inspectDirectOpenButton(page, rows.nth(0), longUrl, longUrl, '分享长链')
-  const shortOpenedUrl = await inspectDirectOpenButton(page, rows.nth(1), shortUrl, longUrl, '分享短链')
+  await inspectDirectOpenButton(page, rows.nth(0), longUrl, longUrl, '分享长链', completionTracker)
+  const shortOpenedUrl = await inspectDirectOpenButton(page, rows.nth(1), shortUrl, longUrl, '分享短链', completionTracker)
   if (shortOpenedUrl) {
     expect(new URL(shortOpenedUrl).searchParams.get('channel_code'), '短链重定向后应落到同一分享渠道')
       .toBe(longUrl.searchParams.get('channel_code'))
@@ -2847,6 +2864,7 @@ async function openPublicPreview({
     assertWorkspaceAppliedToPayload(workspace, sourcePayload, outcome.body, language)
   }
   const snapshot = await assertPublicPreviewUi(page, outcome.body, language, formId)
+  await assertPublicLanguageControl(page, { language, headerVisible: form.thumb?.show !== false })
   const artifact = await captureEvidence(
     page,
     artifactWriter,
@@ -2946,6 +2964,7 @@ async function assertShareLanguageMenu(page, previews, formId, shareLongUrl, art
     expect(currentUrl.searchParams.get('id'), `${language} 切换后应保留表单 ID`).toBe(formId)
     expect(currentUrl.searchParams.get('channel_code'), `${language} 切换后应保留 channel_code`)
       .toBe(shareUrl.searchParams.get('channel_code'))
+    await assertPublicLanguageControl(page, { language, headerVisible: unwrapFormPayload(previews[language].outcome.body).form.thumb?.show !== false })
     const switchedSnapshot = await assertPublicPreviewUi(page, previews[language].outcome.body, language, formId)
 
     await clickWhenReady(page.getByRole('button', { name: SWITCH_LANGUAGE_PATTERN }))
@@ -3034,6 +3053,9 @@ export async function run({
   let adminNetworkObserver = { setPhase: () => undefined, stop: async () => undefined }
   let publicNetworkObserver = { setPhase: () => undefined, stop: async () => undefined }
   let shareNetworkObserver = { setPhase: () => undefined, stop: async () => undefined }
+  let adminCompletionTracker
+  let publicCompletionTracker
+  let shareCompletionTracker
   const evidence = []
   const apiMutations = []
   const adminTokenViolations = []
@@ -3063,14 +3085,14 @@ export async function run({
     adminContext = await browser.newContext({
       ignoreHTTPSErrors,
       viewport: { width: 1600, height: 1000 },
-      locale: 'zh-CN',
+      locale: resolveAdminLocale(variables),
       timezoneId: 'Asia/Shanghai',
     })
-    await adminContext.addInitScript(({ token, adminOrigin }) => {
+    await adminContext.addInitScript(({ token, adminOrigin, adminLocale }) => {
       if (globalThis.location?.origin !== adminOrigin) return
       localStorage.setItem('token', token)
-      localStorage.setItem('arco-locale', 'zh-CN')
-    }, { token: authorization, adminOrigin: siteOrigin })
+      localStorage.setItem('arco-locale', adminLocale)
+    }, { token: authorization, adminOrigin: siteOrigin, adminLocale: resolveAdminLocale(variables) })
     adminNetworkObserver = attachNetworkObserver(adminContext, {
       initialPhase: '多语言浏览器初始化',
       onApiResponse: recordApiResponse,
@@ -3118,6 +3140,7 @@ export async function run({
     flowExpect(detailOutcome.succeeded, '表单详情接口必须成功，才能执行 AI 翻译或发布').toBe(true)
     // The editing page still loads draft=1. Translation workspaces are bound
     // to the last published revision, even when a newer designer draft exists.
+    const initialDraftDefinition = draftDefinitionSignature(detailOutcome.body)
     const sourcePayload = await readPublishedFormDetail(page, apiBaseUrl, formId, '翻译原文发布版本详情')
     const source = assertPublishedSourceFormDetail(sourcePayload, formId, { sectionContract })
     flowExpect(String(source.form.form_id ?? source.form.id ?? ''), '发布门禁必须确认表单详情属于目标 FORM_ID')
@@ -3303,6 +3326,7 @@ export async function run({
     const publishedWorkspaceOutcome = await inspectBusinessResponse(publishedWorkspaceResponse, '多语言发布后翻译工作区回读')
     flowExpect(publishedDetailOutcome.succeeded, '发布后表单详情必须成功回读').toBe(true)
     flowExpect(publishedWorkspaceOutcome.succeeded, '发布后翻译工作区必须成功回读').toBe(true)
+    expect(draftDefinitionSignature(publishedDetailOutcome.body), '完成翻译快照不得发布或改变独立的设计草稿').toEqual(initialDraftDefinition)
     const publishedSourcePayload = await readPublishedFormDetail(page, apiBaseUrl, formId, '翻译发布后原文发布版本回读')
     assertPublishedSourceFormDetail(publishedSourcePayload, formId, { sectionContract })
     const publishedSource = unwrapFormPayload(publishedSourcePayload)
@@ -3353,6 +3377,9 @@ export async function run({
 
     throwIfRunAborted(signal)
     adminNetworkObserver.setPhase('分享设置页')
+    adminCompletionTracker = createPageCompletionTracker(adminContext, {
+      origins: [apiOrigin, publicOriginForSite(siteBaseUrl)], networkObserver: adminNetworkObserver, signal,
+    })
     const shareSettings = await inspectShareSettingsPage({
       page,
       siteBaseUrl,
@@ -3362,6 +3389,7 @@ export async function run({
       extraHTTPHeaders,
       artifactWriter,
       logger,
+      completionTracker: adminCompletionTracker,
     })
     if (shareSettings.artifact) evidence.push(shareSettings.artifact)
 
@@ -3378,6 +3406,9 @@ export async function run({
       onResourceResponse: recordResourceResponse,
     })
     await publicNetworkObserver.ready
+    publicCompletionTracker = createPageCompletionTracker(publicContext, {
+      origins: [publicOriginForSite(siteBaseUrl)], networkObserver: publicNetworkObserver, signal,
+    })
     publicContext.on('request', (request) => {
       const url = new URL(request.url())
       if (request.headers().authorization) {
@@ -3401,7 +3432,10 @@ export async function run({
         logger,
       })
       if (previews[language].artifact) evidence.push(previews[language].artifact)
-      if (language !== 'zh_CN') await previews[language].page.close()
+      if (language !== 'zh_CN') {
+        await publicCompletionTracker.waitForPage(previews[language].page, `${language}预览关闭前`)
+        await previews[language].page.close()
+      }
     }
 
     throwIfRunAborted(signal)
@@ -3417,6 +3451,9 @@ export async function run({
       onResourceResponse: recordResourceResponse,
     })
     await shareNetworkObserver.ready
+    shareCompletionTracker = createPageCompletionTracker(shareContext, {
+      origins: [publicOriginForSite(siteBaseUrl)], networkObserver: shareNetworkObserver, signal,
+    })
     shareContext.on('request', (request) => {
       if (!request.headers().authorization) return
       const url = new URL(request.url())
@@ -3427,6 +3464,7 @@ export async function run({
       shareSettings.shortUrl,
       shareSettings.longUrl,
       formId,
+      shareCompletionTracker,
     )
     const sharePage = await shareContext.newPage()
     observeUiReadiness(sharePage)
@@ -3442,6 +3480,12 @@ export async function run({
     )
     if (shareArtifact) evidence.push(shareArtifact)
 
+    const languageControlVariants = await inspectLanguageControlVariants(publicContext, previews.zh_CN.previewUrl, previews.zh_CN.outcome.body, formId,
+      { completionTracker: publicCompletionTracker })
+    await adminCompletionTracker.waitForOpenPages()
+    await publicCompletionTracker.waitForOpenPages()
+    await shareCompletionTracker.waitForOpenPages()
+
     adminNetworkObserver.setPhase('运行结果汇总')
     publicNetworkObserver.setPhase('运行结果汇总')
     shareNetworkObserver.setPhase('运行结果汇总')
@@ -3452,6 +3496,7 @@ export async function run({
     expect(publicAuthorizationLeaks, '公开预览和分享请求不得携带管理端 Token').toEqual([])
     expect(adminPublicAuthorizationLeaks, '管理端打开分享链接时不得向公开域名发送 Authorization').toEqual([])
     const mutationPaths = apiMutations.map((entry) => `${entry.method} ${entry.pathname}`)
+    expect(apiMutations.filter(entry => /\/(?:publish|audit\/submit)$/.test(entry.pathname)), '完成翻译仅发布语言快照，不应触发整份草稿发布或审批').toEqual([])
     expect(mutationPaths.some((entry) => entry.endsWith(`/be/form/${formId}/translation/ai`)), '本次运行必须真实调用 AI 一键翻译接口').toBe(true)
     expect(mutationPaths.some((entry) => entry.endsWith(`/be/form/${formId}/translation`) && entry.startsWith('PUT ')), '本次运行必须真实调用翻译保存 PUT 接口').toBe(true)
     expect(mutationPaths.some((entry) => entry.endsWith(`/be/form/${formId}/translation/complete`)), '本次运行必须真实调用多语言完成发布接口').toBe(true)
@@ -3476,6 +3521,7 @@ export async function run({
       sourceLanguage: 'zh_CN',
       targetLanguages: [...TARGET_LANGUAGES],
       publishedLanguages: [...SUPPORTED_LANGUAGES],
+      languageControlVariants,
       translationProgress: Object.fromEntries(TARGET_LANGUAGES.map((language) => [
         language,
         persistedWorkspaces[language].languages.find((entry) => entry.language === language)?.progress,
@@ -3507,13 +3553,14 @@ export async function run({
     }
     throw error
   } finally {
+    await Promise.allSettled([adminCompletionTracker?.dispose(), publicCompletionTracker?.dispose(), shareCompletionTracker?.dispose()])
     adminNetworkObserver.setPhase('结束清理')
     publicNetworkObserver.setPhase('结束清理')
     shareNetworkObserver.setPhase('结束清理')
     const observerStops = await Promise.allSettled([
-      adminNetworkObserver.stop({ discardPending: true, signal }),
-      publicNetworkObserver.stop({ discardPending: true, signal }),
-      shareNetworkObserver.stop({ discardPending: true, signal }),
+      adminNetworkObserver.stop({ signal, shouldWaitFor: candidate => isRequiredPageRequest(candidate, new Set([apiOrigin, publicOriginForSite(siteBaseUrl)])) }),
+      publicNetworkObserver.stop({ signal, shouldWaitFor: candidate => isRequiredPageRequest(candidate, new Set([publicOriginForSite(siteBaseUrl)])) }),
+      shareNetworkObserver.stop({ signal, shouldWaitFor: candidate => isRequiredPageRequest(candidate, new Set([publicOriginForSite(siteBaseUrl)])) }),
     ])
     const discardedPending = observerStops.reduce((total, result) => (
       result.status === 'fulfilled'
@@ -3521,7 +3568,7 @@ export async function run({
         : total
     ), 0)
     if (discardedPending > 0) {
-      logger('warning', '结束清理时忽略浏览器仍在后台加载的未完成请求；已完成的接口和资源健康断言不受影响', {
+      logger('info', '结束清理时排除不属于必要页面检查的后台请求', {
         discardedPending,
       })
     }
@@ -3589,6 +3636,7 @@ export {
   runActionAndWaitForApiResponses,
   sourceTextSignature,
   structuralSignature,
+  draftDefinitionSignature,
   translationApiUrl,
   translationProbeRecoveryAction,
   templateTokens,

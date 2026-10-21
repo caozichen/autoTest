@@ -115,6 +115,8 @@ async function createFixtureRun(t, {
   submissionBusinessFailureFilterKey = '',
   assertionMode = 'full',
   extendedFields = false,
+  preparedSamples = false,
+  missingPreparedSamples = false,
 } = {}) {
   const fixture = createSubmissionListFixture({
     formId: `list-check-${scenario}`,
@@ -130,6 +132,7 @@ async function createFixtureRun(t, {
       { key: 'filter[remark]', basicKey: 'dyn_remark', itemKey: 'remark', label: '备注信息', kind: 'text' },
     ]
     fixture.record.answers.push({ item_key: 'remark', answer: '新增备注完整检索样本' })
+    if (preparedSamples && !missingPreparedSamples) fixture.record.answers.find(item => item.item_key === 'channel').answer = 'runChannel4291'
   }
   const artifactRoot = await mkdtemp(join(tmpdir(), `autotest-submission-list-${scenario}-`))
   const observedRequests = []
@@ -317,6 +320,7 @@ async function createFixtureRun(t, {
               title: fixture.title,
               primaryContactName: fixture.primaryContactName,
               groupContactName: fixture.groupContactName,
+              ...(preparedSamples ? { searchSamples: { channel: { code: 'runChannel4291', title: '测试渠道' }, remark: '新增备注完整检索样本' } } : {}),
               fields: {
                 '姓名[1]': fixture.primaryContactName,
                 '姓名[2]': fixture.groupContactName,
@@ -565,7 +569,7 @@ test('checks all submission/contact filters with contains probes, exact ids, Tok
     const [url] = matches
     assert.deepEqual(filterKeys(url), [field.key], `${field.label} 查询不得残留其它筛选条件`)
     assert.equal(url.searchParams.get('page'), '1')
-    assert.equal(url.searchParams.get('per_page'), '10')
+    assert.equal(url.searchParams.get('per_page'), '20')
     if (field.kind === 'text') {
       const answer = answerFor(fixture, field.itemKey)
       const probe = url.searchParams.get(field.key)
@@ -620,22 +624,48 @@ test('checks all submission/contact filters with contains probes, exact ids, Tok
   assert.doesNotMatch(JSON.stringify(result), /submission-list-success-sensitive-token/)
 })
 
-test('checks 24 basic and 20 visible search fields with channel and remarks searches temporarily disabled', async (t) => {
+test('checks all 24 basic and 20 search fields including channel and remarks', async (t) => {
   const { result, observedRequests, fixture } = await createFixtureRun(t, {
     scenario: 'extended-fields', extendedFields: true, locale: 'zh-CN',
   })
   assert.equal(result.ok, true, JSON.stringify(failureAssertions(result)))
   assert.equal(result.result.basicFieldCount, 24)
   assert.equal(result.result.searchFieldCount, 20)
-  assert.equal(result.result.submissionSearchCount, 18)
-  assert.equal(result.result.successfulSubmissionSearchCount, 18)
+  assert.equal(result.result.submissionSearchCount, 20)
+  assert.equal(result.result.successfulSubmissionSearchCount, 20)
   assert.ok(result.resourceResponses.some((entry) => entry.url.endsWith('/detail-image.png')
     && entry.status === 200 && !entry.incomplete))
   for (const field of fixture.additionalSearchFields) {
     const requests = observedRequests.map(requestUrl).filter((url) => filterKeys(url).includes(field.key))
-    assert.equal(requests.length, 0)
+    assert.ok(requests.length > 0, `${field.key} 必须实际发送检索请求`)
   }
-  assert.ok(!result.logs.some((log) => log.message.includes('目标记录该字段为空')))
+  assert.ok(result.logs.some((log) => log.message.includes('目标记录该字段为空')))
+})
+
+test('prepared channel and remark samples require full/fuzzy matches, unrelated exclusion and cleared-filter recovery', async t => {
+  const { result, observedRequests, fixture } = await createFixtureRun(t, {
+    scenario: 'prepared-samples', extendedFields: true, preparedSamples: true, locale: 'zh-CN',
+  })
+  assert.equal(result.ok, true, JSON.stringify(failureAssertions(result)))
+  assert.equal(result.result.successfulSubmissionSearchCount, 20)
+  for (const [key, sample] of [['filter[channel]', 'runChannel4291'], ['filter[remark]', '新增备注完整检索样本']]) {
+    const values = observedRequests.map(requestUrl).map(url => url.searchParams.get(key)).filter(Boolean)
+    assert.ok(values.includes(sample))
+    assert.ok(values.includes(createFuzzyProbe(sample)))
+    assert.ok(values.includes(`autotest_absent_${fixture.submissionId}`))
+  }
+  assert.equal(result.logs.some(log => log.message.includes('目标记录该字段为空')), false)
+  assert.ok(result.assertions.some(entry => entry.name.includes('清空筛选后应恢复目标行') && entry.status === 'passed'))
+})
+
+test('a missing prepared channel fails rather than downgrading to empty-value negative coverage', async t => {
+  const { result } = await createFixtureRun(t, {
+    scenario: 'lost-prepared-sample', extendedFields: true, preparedSamples: true, missingPreparedSamples: true, locale: 'zh-CN',
+  })
+  assert.equal(result.ok, false)
+  assert.ok(failureAssertions(result).some(item => item.name.includes('响应列表应包含目标提报 ID')))
+  assert.equal(result.logs.some(log => log.message.includes('目标记录该字段为空')), false)
+  assert.equal(result.result.submissionSearchCount, 20, '渠道正向检索失败后应继续检索其余字段')
 })
 
 test('derives the form title and both contact names from the exact target detail when assertions are empty', async (t) => {

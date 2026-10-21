@@ -1,3 +1,5 @@
+import { resolveAdminLocale } from './support/admin-locale.mjs'
+import { parseSearchSamples, assertPersistedSearchSamples } from './support/submission-search-samples.mjs'
 import { scaleTimeout } from './support/environment-timeouts.mjs'
 import { expect as flowExpect } from './support/environment-timeouts.mjs'
 import { clickWhenReady, observeUiReadiness, waitForUiReady } from './support/ui-readiness.mjs'
@@ -133,7 +135,7 @@ function parseSubmissionAssertions(value) {
   const fields = normalizeFieldAssertions(parsed.fields)
   const editFields = normalizeEditFieldAssertions(parsed.editFields)
   const unknownKeys = Object.keys(parsed).filter((key) => (
-    !['title', 'status', 'texts', 'fields', 'editFields', 'primaryContactName', 'groupContactName'].includes(key)
+    !['title', 'status', 'texts', 'fields', 'editFields', 'primaryContactName', 'groupContactName', 'searchSamples'].includes(key)
   ))
   if (unknownKeys.length > 0) {
     throw new Error(`SUBMISSION_ASSERTIONS 包含不支持的配置项：${unknownKeys.join(', ')}`)
@@ -144,6 +146,7 @@ function parseSubmissionAssertions(value) {
     texts,
     fields,
     editFields,
+    ...(parsed.searchSamples === undefined ? {} : { searchSamples: parseSearchSamples(parsed.searchSamples) }),
     configuredAssertionCount: Number(Boolean(title))
       + Number(Boolean(status))
       + texts.length
@@ -499,8 +502,10 @@ async function screenshotFailure(page, submissionId, artifactWriter) {
 }
 
 async function detailAnswersSnapshot(page) {
-  await flowExpect(page.locator('.reply-kv__row'), '详情答案必须加载完成').not.toHaveCount(0)
-  const rows = page.locator('.reply-kv__row')
+  // The aside switches between metadata and remarks during these checks.
+  // Snapshot answer rows independently of that tab and its changing metadata.
+  const rows = page.locator('.reply-kv__row:not(.reply-detail-page__aside .reply-kv__row)')
+  await flowExpect(rows, '详情答案必须加载完成').not.toHaveCount(0)
   const snapshot = await rows.evaluateAll((rows) => rows.map((row) => ({
     label: row.querySelector('.reply-kv__label')?.textContent?.trim() ?? '',
     value: row.querySelector('.reply-kv__value')?.textContent?.replace(/\s+/g, ' ').trim() ?? '',
@@ -686,12 +691,12 @@ export async function run({
     context = await browser.newContext({
       ignoreHTTPSErrors,
       viewport: { width: 1440, height: 1000 },
-      locale: 'zh-CN',
+      locale: resolveAdminLocale(variables),
     })
-    await context.addInitScript(({ token }) => {
+    await context.addInitScript(({ token, adminLocale }) => {
       localStorage.setItem('token', token)
-      localStorage.setItem('arco-locale', 'zh-CN')
-    }, { token: authorization })
+      localStorage.setItem('arco-locale', adminLocale)
+    }, { token: authorization, adminLocale: resolveAdminLocale(variables) })
     throwIfRunAborted(signal)
     networkObserver = attachNetworkObserver(context, {
       initialPhase: '浏览器初始化',
@@ -733,6 +738,7 @@ export async function run({
     await flowExpect(page, '编辑前必须定位本次提报的精确详情地址').toHaveURL(detailUrl)
     await waitForUiReady(page, { timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) })
     const editButton = await assertInitialDetailStructure(page, { submissionId, assertions })
+    await assertPersistedSearchSamples(page, { apiBaseUrl, formId, submissionId, searchSamples: assertions.searchSamples })
     const originalAnswers = verifyPersistence ? await detailAnswersSnapshot(page) : null
     const originalApiAnswers = verifyPersistence ? await readSubmissionAnswerSnapshot(page, apiBaseUrl, formId, submissionId) : null
     if (originalApiAnswers) resolveEditedAnswerKeys(originalApiAnswers, editValues)
@@ -801,11 +807,12 @@ export async function run({
       await assertInitialDetailStructure(page, { submissionId, assertions, verifyConfiguredAssertions: false })
       await assertAppliedDetailValues(page, editValues)
       if (appliedEditFields.length === 0) {
-        expect(await detailAnswersSnapshot(page), '原答案直接提交并刷新后，全部详情值和图片应保持一致').toEqual(originalAnswers)
+        expect(await detailAnswersSnapshot(page), '原答案直接提交并刷新后，全部题目答案、矩阵、附件和图片应保持一致').toEqual(originalAnswers)
       }
       assertSubmissionAnswersPreserved(originalApiAnswers,
         await readSubmissionAnswerSnapshot(page, apiBaseUrl, formId, submissionId), editValues)
     }
+    await assertPersistedSearchSamples(page, { apiBaseUrl, formId, submissionId, searchSamples: assertions.searchSamples })
     if (captureSuccessScreenshots && artifactWriter?.captureScreenshot) {
       await artifactWriter.captureScreenshot(page, 'screenshots/submission-edit-saved.png', { fullPage: true })
     }

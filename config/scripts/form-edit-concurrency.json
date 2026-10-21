@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "revision": 2,
+  "id": "form-edit-concurrency",
+  "name": "共享草稿编辑并发检查",
+  "description": "使用两个独立 Chrome 上下文的 API 客户端验证旧编辑令牌保存及发布冲突，独立核对草稿和发布态，并安全恢复头图开关；不代表双页面 UI 操作覆盖。",
+  "directory": "scripts",
+  "entryFile": "form-edit-concurrency.ui.spec.mjs",
+  "timeoutMs": 180000,
+  "enabled": true,
+  "inputParameters": [
+    {
+      "id": "concurrency-form-id",
+      "key": "FORM_ID",
+      "value": "",
+      "description": "必须指定本次测试新建的已发布表单 ID。"
+    }
+  ],
+  "responseVariableBindings": [],
+  "tags": [
+    "Playwright",
+    "Chrome",
+    "并发保护",
+    "P0"
+  ],
+  "createdAt": "2026-10-19T12:00:00.000Z",
+  "updatedAt": "2026-10-21T02:15:56.327Z"
+}

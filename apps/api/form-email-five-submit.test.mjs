@@ -10,6 +10,7 @@ import {
   emailTestContent,
 } from '../../scripts/form-email-five-submit.ui.spec.mjs'
 import { createFormSettingsContent } from '../../scripts/support/form-settings-content.mjs'
+import { assertSubmissionPeriod, resolveSubmissionPeriod } from '../../scripts/support/form-submission-period.mjs'
 import { resolveScriptEntryUrl, validateScriptConfig } from './script-config-repository.mjs'
 
 const fieldKeys = { username: 'username_1', mobile: 'mobile_1', email: 'email_1' }
@@ -82,4 +83,27 @@ test('checks each submission by item key and rejects an earlier email', () => {
     answers: payload.answers.map(entry => entry.item_key === fieldKeys.email
       ? { ...entry, answer: TEST_EMAILS[0] } : entry),
   }, fieldKeys, data, '第 2 次', requestUrl))
+})
+
+test('mail submission periods use Shanghai dates across month boundaries and contain the whole run', () => {
+  const now = Date.parse('2026-01-31T16:30:00Z')
+  const period = resolveSubmissionPeriod({}, now)
+  assert.deepEqual(period, { startTime: '2026-01-31 00:00:00', endTime: '2026-02-08 23:59:59', timeRange: 'in_progress' })
+  assert.equal(resolveSubmissionPeriod({ SUBMISSION_START_TIME: '2026-01-30 12:00:00',
+    SUBMISSION_END_TIME: '2026-02-03 18:00:00' }, now).startTime, '2026-01-30 12:00:00')
+  for (const variables of [
+    { SUBMISSION_START_TIME: '2026-02-30 12:00:00' },
+    { SUBMISSION_START_TIME: '2026-02-02 00:00:00' },
+    { SUBMISSION_END_TIME: '2026-02-01 00:30:00' },
+    { SUBMISSION_START_TIME: '2026-02-01T00:00:00' },
+  ]) assert.throws(() => resolveSubmissionPeriod(variables, now))
+})
+
+test('period readback rejects settings or list timestamps that did not persist', () => {
+  const period = resolveSubmissionPeriod({}, Date.parse('2026-10-21T02:00:00Z'))
+  const form = { start_time: period.startTime, end_time: period.endTime,
+    submit_config: { time_range_close_rule: { enabled: '1', start_time: period.startTime, end_time: period.endTime } } }
+  assert.doesNotThrow(() => assertSubmissionPeriod(form, period, '测试'))
+  assert.throws(() => assertSubmissionPeriod({ ...form, end_time: null }, period, '测试'))
+  assert.throws(() => assertSubmissionPeriod({ ...form, submit_config: { time_range_close_rule: { enabled: 2 } } }, period, '测试'))
 })

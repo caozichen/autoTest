@@ -1,3 +1,5 @@
+import { observeFormEditTokens } from './support/form-edit-token-observer.mjs'
+import { resolveAdminLocale } from './support/admin-locale.mjs'
 import { attachNetworkObserver } from './support/api-response-recorder.mjs'
 import { expect as flowExpect, scaleTimeout } from './support/environment-timeouts.mjs'
 import { launchGoogleChrome } from './support/google-chrome.mjs'
@@ -38,8 +40,8 @@ function copiedId(body) {
     ?? data?.new_form_id ?? '').trim()
 }
 
-export function copyTitleFor(sourceTitle) {
-  return `${sourceTitle} - 复制`
+export function copyTitleFor(sourceTitle, locale = 'zh-CN') {
+  return `${sourceTitle} - ${locale === 'zh-HK' ? '複製' : '复制'}`
 }
 
 export function identifyNewCopy(records, previousIds, title, sourceId, responseId = '') {
@@ -59,10 +61,12 @@ export function identifyNewCopy(records, previousIds, title, sourceId, responseI
 }
 
 function waitForExactResponse(page, method, path) {
-  return page.waitForResponse(response => response.request().method() === method
+  const pending = page.waitForResponse(response => response.request().method() === method
     && new URL(response.url()).pathname.endsWith(path), {
     timeout: scaleTimeout(ACTION_TIMEOUT_MS),
   })
+  pending.catch(() => undefined)
+  return pending
 }
 
 async function businessResponse(response, label) {
@@ -103,7 +107,7 @@ async function assertRow(page, record, title, status, label) {
   await expect(row.locator('.form-activity-list__title-link'), `${label}标题应完全匹配`)
     .toHaveText(title)
   await expect(row, `${label}列表应显示${status === 'draft' ? '草稿' : '已发布'}状态`)
-    .toContainText(status === 'draft' ? '草稿' : /已发布|已發佈/)
+    .toContainText(status === 'draft' ? '草稿' : /已发布|已發[佈布]/)
   return row
 }
 
@@ -120,17 +124,17 @@ async function assertMoreMenu(page, row, { archive, remove }, label) {
   return { menu, archiveAction, deleteAction }
 }
 
-async function copySource(page, sourceRow, sourceId, sourceTitle, previousIds, label) {
+async function copySource(page, sourceRow, sourceId, sourceTitle, previousIds, label, locale) {
   const promise = waitForExactResponse(page, 'POST', `/be/form/${sourceId}/duplicate`)
   await clickWhenReady(sourceRow.getByRole('button', { name: /^(复制|複製)$/ }))
   const body = await businessResponse(await promise, `${label}复制接口`)
   const responseId = copiedId(body)
-  const title = copyTitleFor(sourceTitle)
+  const title = copyTitleFor(sourceTitle, locale)
   const records = await searchList(page, title, label)
   const copy = identifyNewCopy(records, previousIds, title, sourceId, responseId)
   const id = formId(copy)
   expect(id, `${label}复制结果 ID 应与源表单不同`).not.toBe(sourceId)
-  expect(copy.title, `${label}复制表单名称应追加“ - 复制”`).toBe(title)
+  expect(copy.title, `${label}复制表单名称应追加当前语言的复制后缀`).toBe(title)
   expect(copy.status, `${label}复制后应为草稿`).toBe('draft')
   flowExpect(copy.status, `${label}必须是草稿才能继续`).toBe('draft')
   return { id, record: copy, records }
@@ -161,6 +165,7 @@ export async function run({
   const network = { api: [], resources: [] }
   const mutations = new Map()
   const tokenViolations = []
+  let editTokens
   let browser
   let context
   let page
@@ -173,7 +178,7 @@ export async function run({
     context = await browser.newContext({
       ignoreHTTPSErrors,
       viewport: { width: 1600, height: 1000 },
-      locale: 'zh-CN',
+      locale: resolveAdminLocale(variables),
       timezoneId: 'Asia/Shanghai',
     })
     observer = attachNetworkObserver(context, {
@@ -182,6 +187,7 @@ export async function run({
       onResourceResponse: entry => { network.resources.push(entry); recordResourceResponse?.(entry) },
     })
     await observer.ready
+    editTokens = observeFormEditTokens(context, apiBaseUrl)
     page = await context.newPage()
     observeUiReadiness(page)
     page.setDefaultTimeout(scaleTimeout(ACTION_TIMEOUT_MS))
@@ -197,10 +203,10 @@ export async function run({
         mutations.set(key, (mutations.get(key) ?? 0) + 1)
       }
     })
-    await context.addInitScript(({ token }) => {
+    await context.addInitScript(({ token, adminLocale }) => {
       localStorage.setItem('token', token)
-      localStorage.setItem('arco-locale', 'zh-CN')
-    }, { token: authorization })
+      localStorage.setItem('arco-locale', adminLocale)
+    }, { token: authorization, adminLocale: resolveAdminLocale(variables) })
 
     await page.goto(listUrl, { waitUntil: 'domcontentloaded' })
     await expect(page, 'Token 生效后不应跳转登录页').not.toHaveURL(/\/login(?:[/?#]|$)/)
@@ -224,13 +230,13 @@ export async function run({
     await assertMoreMenu(page, originalRow, { archive: true, remove: false }, '源表单')
     await page.keyboard.press('Escape')
 
-    const copyTitle = copyTitleFor(sourceTitle)
+    const copyTitle = copyTitleFor(sourceTitle, resolveAdminLocale(variables))
     const initialCopies = await searchList(page, copyTitle, '复制前同名基线')
     observer.setPhase('首次复制源表单')
     await searchList(page, sourceTitle, '首次复制源表单定位')
     const firstSourceRow = await assertRow(page, sourceRecord, sourceTitle, 'published', '首次复制源表单')
     const first = await copySource(page, firstSourceRow, sourceId, sourceTitle,
-      new Set(initialCopies.map(formId)), '第一次')
+      new Set(initialCopies.map(formId)), '第一次', resolveAdminLocale(variables))
     logger('success', '第一次复制已在列表中出现', { firstCopyId: first.id, title: copyTitle })
     const firstRow = await assertRow(page, first.record, copyTitle, 'draft', '第一次复制')
 
@@ -247,14 +253,14 @@ export async function run({
       .toHaveURL(new RegExp(`/form-activity/designer\\?id=${first.id}(?:[&#]|$)`))
     // 后续对话增加复制表单内部题目与设置校验时，在此处扩展。
     const publishPromise = waitForExactResponse(page, 'POST', `/be/form/${first.id}/publish`)
-    await clickWhenReady(page.getByRole('button', { name: /^(发布|發佈)$/ }))
+    await clickWhenReady(page.getByRole('button', { name: /^(发布|發[佈布])$/ }))
     const unsavedDialog = page.locator('.arco-modal:visible')
-      .filter({ hasText: /表单未保存|表單未儲存|保存后发布|儲存後發佈/ })
+      .filter({ hasText: /表单未保存|表[單格]未儲存|保存后发布|儲存後發[佈布]/ })
     if (await unsavedDialog.isVisible().catch(() => false)) {
       await expect(unsavedDialog, '设计器未保存时应提示保存后发布').toBeVisible()
       const itemsPromise = waitForExactResponse(page, 'PUT', `/be/form/${first.id}/items`)
       const configPromise = waitForExactResponse(page, 'PUT', `/be/form/${first.id}/config`)
-      await clickWhenReady(unsavedDialog.getByRole('button', { name: /保存后发布|儲存後發佈/ }))
+      await clickWhenReady(unsavedDialog.getByRole('button', { name: /保存后发布|儲存後發[佈布]/ }))
       await businessResponse(await itemsPromise, '第一次复制发布前保存题目')
       await businessResponse(await configPromise, '第一次复制发布前保存配置')
     }
@@ -277,7 +283,7 @@ export async function run({
     await searchList(page, sourceTitle, '第二次复制源表单定位')
     const secondSourceRow = await assertRow(page, sourceRecord, sourceTitle, 'published', '第二次复制源表单')
     const second = await copySource(page, secondSourceRow, sourceId, sourceTitle,
-      new Set(publishedCopies.map(formId)), '第二次')
+      new Set(publishedCopies.map(formId)), '第二次', resolveAdminLocale(variables))
     flowExpect(second.id, '第二次复制 ID 必须不同于第一次').not.toBe(first.id)
     expect(second.record.title, '两次复制的名称应完全相同').toBe(first.record.title)
     const secondRow = await assertRow(page, second.record, copyTitle, 'draft', '第二次复制')
@@ -314,6 +320,7 @@ export async function run({
     await observer.waitForIdle({ timeoutMs: scaleTimeout(5_000), signal })
     expect(network.api.length, '应采集到后台接口证据').toBeGreaterThan(0)
     expect(network.resources.length, '应采集到静态资源证据').toBeGreaterThan(0)
+    await editTokens.assert()
     logger('success', '表单复制、发布、再次复制及删除流程完成', {
       sourceId, firstCopyId: first.id, deletedCopyId: second.id,
     })
@@ -344,6 +351,7 @@ export async function run({
     }
     throw error
   } finally {
+    editTokens?.stop()
     observer.setPhase('结束清理')
     await observer.stop({ signal })
     const abortCloseStarted = await stopAbortClose()

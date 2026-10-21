@@ -74,6 +74,12 @@ export function assertAgreementPersistence(actual, submitted, label = '用户协
 }
 
 export function assertStoredSettings(form, settings, { published = false, notificationTemplates } = {}) {
+  if (settings.channel) {
+    const stored = form?.share_config?.channel?.find(item => String(item.id) === String(settings.channel.id))
+    for (const key of ['code', 'title', 'link', 'short_link', 'enabled']) {
+      flowExpect(stored?.[key], `分享渠道 ${key} 在保存和发布后必须保持一致`).toEqual(settings.channel[key])
+    }
+  }
   if (settings.submissionQuota) {
     assertSubmissionQuotaPersistence(form?.submit_config?.submission_quota, settings.submissionQuota,
       published ? '填报数量限制发布回读' : '填报数量限制草稿回读')
@@ -190,8 +196,7 @@ export async function configureFeedback({ page, formId, content, imagePath, uplo
   // Cover the enabled basic text styles, both list types, alignment, and links.
   for (const selector of [
     'h2', 'strong', 'em', 'u', 's', 'ul > li', 'ol > li', 'a[href="https://www.baidu.com/"]',
-    // 与 form-settings-content.mjs 中的蓝色提示和背景高亮段落一起暂时停用。
-    // '[style*="color"]', '[style*="background"]',
+    '[style*="color"]', '[style*="background"]',
     '[style*="text-align"]',
   ]) {
     await expect(editor.locator(selector).first(), `自定义反馈富文本应保留 ${selector}`).toBeAttached()
@@ -280,9 +285,9 @@ export async function configurePostCollectionSettings({
   const feedback = await configureFeedback({ ...args, content: content.feedback, imagePath, uploadImage })
   const promotion = await configurePromotion({ ...args, content: content.promotion })
   setPhase('创建分享渠道')
-  await createFormShareChannel({ page, formId, channelName: content.channelName, logger })
+  const channel = await createFormShareChannel({ page, formId, channelName: content.channelName, logger })
   const settings = { schemaVersion: 1, runMarker: content.runMarker, environment: content.environment,
-    submissionQuota, agreement, classificationTags, managerNotification, automationNotification, feedback, promotion }
+    channel, submissionQuota, agreement, classificationTags, managerNotification, automationNotification, feedback, promotion }
   assertStoredSettings(await readForm(), settings)
   if (artifactWriter) await artifactWriter.writeFile('form-settings.json', JSON.stringify(settings, null, 2), {
     encoding: 'utf8', type: 'attachment', mimeType: 'application/json',

@@ -1,3 +1,5 @@
+import { observeFormEditTokens } from './support/form-edit-token-observer.mjs'
+import { resolveAdminLocale } from './support/admin-locale.mjs'
 import { clickWhenReady, observeUiReadiness, waitForUiReady } from './support/ui-readiness.mjs'
 import { expect as flowExpect, scaleTimeout } from './support/environment-timeouts.mjs'
 import { access, mkdir, rename, rm, writeFile } from 'node:fs/promises'
@@ -339,10 +341,12 @@ async function inspectBusinessResponse(response, label) {
 }
 
 function waitForExactResponse(page, method, pathnameSuffix) {
-  return page.waitForResponse((response) => {
+  const pending = page.waitForResponse((response) => {
     const url = new URL(response.url())
     return response.request().method() === method && url.pathname.endsWith(pathnameSuffix)
   }, { timeout: scaleTimeout(ACTION_TIMEOUT_MS) })
+  pending.catch(() => undefined)
+  return pending
 }
 
 async function fetchFormDetail(page, apiBaseUrl, formId, authorization, resource = '') {
@@ -548,7 +552,7 @@ async function waitForDesignerBootstrap(page, logger, timeoutMs = scaleTimeout(N
 }
 
 const CONTACT_DIALOG_TIMEOUT_MS = 45_000
-const CONTACT_DIALOG_TEXT = /此表单目前设置为不收录联系人|此表單目前設定為不收錄聯絡人|是否收录联系人|是否收錄聯絡人|联系人信息替换确认|聯絡人資訊替換確認/
+const CONTACT_DIALOG_TEXT = /此表单目前设置为不收录联系人|此表[單格]目前設定為不收錄聯絡人|是否收录联系人|是否收錄聯絡人|联系人信息替换确认|聯絡人資訊替換確認/
 
 const contactPageRequests = new WeakMap()
 function observeContactPageRequests(page) {
@@ -590,7 +594,7 @@ async function chooseContactCollectionInDesigner(page, logger, timeoutMs = scale
   const deadline = Date.now() + timeoutMs
   const remaining = () => Math.max(1, deadline - Date.now())
   const dialogs = page.getByRole('dialog')
-  const prompt = dialogs.filter({ hasText: /此表单目前设置为不收录联系人|此表單目前設定為不收錄聯絡人/ })
+  const prompt = dialogs.filter({ hasText: /此表单目前设置为不收录联系人|此表[單格]目前設定為不收錄聯絡人/ })
   const collectDialog = dialogs.filter({ hasText: /是否收录联系人|是否收錄聯絡人/ })
   const replaceDialog = dialogs.filter({ hasText: /联系人信息替换确认|聯絡人資訊替換確認/ })
   const visibleStep = page.locator('[role="dialog"]:visible').filter({ hasText: CONTACT_DIALOG_TEXT })
@@ -1170,6 +1174,7 @@ export async function run({
   const apiOrigin = new URL(apiBaseUrl).origin
   if (siteOrigin !== apiOrigin) throw new Error('Web 基址与 API 基址必须同源')
 
+  let editTokens
   let browser
   let context
   let page
@@ -1187,7 +1192,7 @@ export async function run({
     context = await browser.newContext({
       ignoreHTTPSErrors,
       viewport: { width: 1600, height: 1000 },
-      locale: 'zh-CN',
+      locale: resolveAdminLocale(variables),
       timezoneId: 'Asia/Shanghai',
     })
     throwIfRunAborted(signal)
@@ -1197,6 +1202,7 @@ export async function run({
       onResourceResponse: recordResourceResponse,
     })
     await networkObserver.ready
+    editTokens = observeFormEditTokens(context, apiBaseUrl)
     page = await context.newPage()
     observeUiReadiness(page)
     observeContactPageRequests(page)
@@ -1216,10 +1222,10 @@ export async function run({
       tokenViolations.push(`${request.method()} ${redactUrl(request.url())}`)
     })
 
-    await context.addInitScript(({ token }) => {
+    await context.addInitScript(({ token, adminLocale }) => {
       localStorage.setItem('token', token)
-      localStorage.setItem('arco-locale', 'zh-CN')
-    }, { token: authorization })
+      localStorage.setItem('arco-locale', adminLocale)
+    }, { token: authorization, adminLocale: resolveAdminLocale(variables) })
     logger('success', '已将环境登录 Token 注入浏览器会话（Token 内容已隐藏）')
 
     let formId = ''
@@ -1232,7 +1238,7 @@ export async function run({
     const createResponse = await waitForApiResponse(
       page,
       '/be/form',
-      () => clickWhenReady(page.getByText(/从空白表单开始|從空白表單開始/, { exact: true })),
+      () => clickWhenReady(page.getByText(/从空白表单开始|從空白表[單格]開始/, { exact: true })),
       '通过页面创建空白表单',
     )
     await page.waitForURL(/\/form-activity\/designer\?[^#]*id=/, { timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) })
@@ -1290,13 +1296,19 @@ export async function run({
     logger('info', '点击“保存草稿”')
     const itemSavePromise = waitForExactResponse(page, 'PUT', `/be/form/${formId}/items`)
     const configSavePromise = waitForExactResponse(page, 'PUT', `/be/form/${formId}/config`)
+    configSavePromise.catch(() => undefined)
     await clickWhenReady(page.getByRole('button', { name: /^(保存草稿|儲存草稿|保存|儲存)$/ }))
-    const [itemSaveResponse, configSaveResponse] = await Promise.all([
-      itemSavePromise,
-      configSavePromise,
-    ])
-    await inspectBusinessResponse(itemSaveResponse, '保存表单题目')
-    await inspectBusinessResponse(configSaveResponse, '保存表单配置')
+    // A rejected item save prevents the application from sending the config save.
+    // Report the first business failure directly.
+    const itemSaveResponse = await itemSavePromise
+    const itemSaveOutcome = await inspectBusinessResponse(itemSaveResponse, '保存表单题目')
+    if (!itemSaveOutcome.succeeded) {
+      await editTokens.assert()
+      throw new Error(`保存表单题目失败：${itemSaveOutcome.body?.message ?? '响应无法确认业务成功'}`)
+    }
+    const configSaveResponse = await configSavePromise
+    const configSaveOutcome = await inspectBusinessResponse(configSaveResponse, '保存表单配置')
+    flowExpect(configSaveOutcome.succeeded, '保存表单配置必须成功，才能继续发布').toBe(true)
     const itemsPayload = parseRequestPayload(itemSaveResponse.request(), '保存表单题目')
     const configPayload = parseRequestPayload(configSaveResponse.request(), '保存表单配置')
     const savedRevisionNo = assertSavedPayloads({
@@ -1332,7 +1344,7 @@ export async function run({
 
     networkObserver.setPhase('发布表单')
     logger('info', '点击设置页“发布”按钮')
-    const publishButton = page.getByRole('button', { name: /^(发布|發佈)$/ })
+    const publishButton = page.getByRole('button', { name: /^(发布|發[佈布])$/ })
     if (!await publishButton.isVisible().catch(() => false)) {
       const auditButton = page.getByRole('button', { name: /提交审核|提交審核/ })
       if (await auditButton.isVisible().catch(() => false)) {
@@ -1359,7 +1371,7 @@ export async function run({
     await dismissFormOnboarding(page)
     const auditTabs = page.locator('.form-activity-audit-tabs')
     if (await auditTabs.isVisible().catch(() => false)) {
-      await clickWhenReady(auditTabs.getByText(/已发布|已發佈/, { exact: true }))
+      await clickWhenReady(auditTabs.getByText(/已发布|已發[佈布]/, { exact: true }))
     }
     await titleInput.fill(title)
     const [listSearchResponse] = await Promise.all([
@@ -1433,6 +1445,7 @@ export async function run({
       authenticatedRequestCount,
       token: '[REDACTED]',
     })
+    await editTokens.assert()
     logger('success', 'Chrome 无头全题型三页 UI 自动化执行完成，网络健康结果将在 Runner 收口时汇总')
 
     return {
@@ -1481,6 +1494,7 @@ export async function run({
     }
     throw error
   } finally {
+    editTokens?.stop()
     networkObserver.setPhase('结束清理')
     await networkObserver.stop({ signal })
     const abortCloseStarted = await stopAbortClose()
