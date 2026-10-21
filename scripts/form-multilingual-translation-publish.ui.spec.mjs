@@ -1,5 +1,5 @@
 import { assertPublicLanguageControl, inspectLanguageControlVariants } from './support/public-language-control.mjs'
-import { createPageCompletionTracker, isRequiredPageRequest } from './support/page-response-completion.mjs'
+import { createPageCompletionTracker, isRequiredPageRequest, waitForPageResponsesBeforeNavigation } from './support/page-response-completion.mjs'
 import { resolveAdminLocale } from './support/admin-locale.mjs'
 import { clickWhenReady, observeUiReadiness } from './support/ui-readiness.mjs'
 import { publicOriginForSite } from '../shared/form-environment.mjs'
@@ -142,7 +142,7 @@ const CRITICAL_TRANSLATIONS = Object.freeze({
     ['姓名', /\b(?:full\s+)?name\b/i],
     ['手机号', /mobile|phone/i],
     ['邮箱', /e-?mail/i],
-    ['身份证件', /identity|\bID\b/i],
+    ['身份证件', /identity|identification|\bID\b/i],
     ['固定电话', /landline|telephone/i],
     ['地址', /address/i],
     ['生日', /birth/i],
@@ -2014,10 +2014,11 @@ async function triggerAiTranslation(page, workspace, formId, aiTimeoutMs, logger
   }
 }
 
-async function loadPersistedWorkspace(page, translationUrl, formId, language, expectedRevision) {
+async function loadPersistedWorkspace(page, translationUrl, formId, language, expectedRevision, beforeNavigation = () => undefined) {
   const url = new URL(translationUrl)
   url.searchParams.set('target_language', language)
   url.searchParams.set('revision_no', String(expectedRevision))
+  await beforeNavigation()
   const [response] = await runActionAndWaitForApiResponses(page, {
     method: 'GET',
     pathnameSuffix: `/be/form/${formId}/translation`,
@@ -2315,6 +2316,7 @@ async function assertSaveRoundTrip(
   language,
   workspace,
   logger,
+  beforeNavigation,
 ) {
   const unit = workspace.units.find((candidate) => (
     candidate.field_path === 'form.title'
@@ -2352,6 +2354,7 @@ async function assertSaveRoundTrip(
       formId,
       language,
       workspace.revision_no,
+      beforeNavigation,
     )
     const persistedProbe = workspaceUnitByKey(probeRead.outcome.body, unit.unit_key)
     expect(persistedProbe?.translated_text, `${language} 探针保存后 GET 应回读相同译文`).toBe(probeValue)
@@ -2403,6 +2406,7 @@ async function assertSaveRoundTrip(
     formId,
     language,
     workspace.revision_no,
+    beforeNavigation,
   )
   const restoredUnit = workspaceUnitByKey(restoredRead.outcome.body, unit.unit_key)
   expect(restoredUnit?.translated_text, `${language} 恢复保存后应回读原译文`).toBe(originalValue)
@@ -3041,6 +3045,7 @@ export async function run({
   const aiTimeoutMs = scaleTimeout(resolveAiTimeout(variables.AI_TRANSLATION_TIMEOUT_MS))
   const siteOrigin = new URL(siteBaseUrl).origin
   const apiOrigin = new URL(apiBaseUrl).origin
+  const trackDocumentCommits = /hk/i.test(environmentCode ?? '')
   if (siteOrigin !== apiOrigin) throw new Error('Web 基址与 API 基址必须同源')
 
   let browser
@@ -3095,6 +3100,7 @@ export async function run({
     }, { token: authorization, adminOrigin: siteOrigin, adminLocale: resolveAdminLocale(variables) })
     adminNetworkObserver = attachNetworkObserver(adminContext, {
       initialPhase: '多语言浏览器初始化',
+      trackDocumentCommits,
       onApiResponse: recordApiResponse,
       onResourceResponse: recordResourceResponse,
     })
@@ -3117,6 +3123,10 @@ export async function run({
     observeUiReadiness(page)
     page.setDefaultTimeout(scaleTimeout(ACTION_TIMEOUT_MS))
     page.setDefaultNavigationTimeout(scaleTimeout(NAVIGATION_TIMEOUT_MS))
+    const beforeAdminNavigation = () => waitForPageResponsesBeforeNavigation(page, adminNetworkObserver, {
+      origins: trackDocumentCommits ? [apiOrigin, publicOriginForSite(siteBaseUrl)] : [apiOrigin],
+      signal, timeoutMs: scaleTimeout(NAVIGATION_TIMEOUT_MS), logger, environmentCode,
+    })
     adminNetworkObserver.setPhase('加载多语言设置')
     const initialTranslationUrl = new URL(translationUrl)
     initialTranslationUrl.searchParams.set('target_language', 'zh_HK')
@@ -3206,7 +3216,7 @@ export async function run({
       throwIfRunAborted(signal)
       adminNetworkObserver.setPhase(`${language} 翻译保存与回读`)
       logger('info', `开始加载 ${language} 翻译工作区并校验响应体`)
-      const firstRead = await loadPersistedWorkspace(page, translationUrl, formId, language, source.revisionNo)
+      const firstRead = await loadPersistedWorkspace(page, translationUrl, formId, language, source.revisionNo, beforeAdminNavigation)
       const workspaceGate = requireWorkspaceMutationGate(firstRead.outcome.body, {
         expectedRevision: source.revisionNo,
         expectedTargetLanguage: language,
@@ -3243,6 +3253,7 @@ export async function run({
         language,
         workspace,
         logger,
+        beforeAdminNavigation,
       )
       const reloadedWorkspace = assertTranslationWorkspace(secondRead.outcome.body, {
         label: `${language} 保存后第二次独立回读`,
@@ -3310,6 +3321,7 @@ export async function run({
     adminNetworkObserver.setPhase('发布后回读与原文保护')
     const publishedTranslationUrl = new URL(translationUrl)
     publishedTranslationUrl.searchParams.set('target_language', 'zh_HK')
+    await beforeAdminNavigation()
     const [publishedDetailResponse, publishedWorkspaceResponse] = await runActionAndWaitForApiResponses(page, [
       {
         method: 'GET',
@@ -3348,6 +3360,7 @@ export async function run({
             formId,
             language,
             source.revisionNo,
+            beforeAdminNavigation,
           )).outcome
       const publishedWorkspace = assertTranslationWorkspace(publishedOutcome.body, {
         label: `多语言发布后 ${language} 工作区`,
@@ -3377,8 +3390,10 @@ export async function run({
 
     throwIfRunAborted(signal)
     adminNetworkObserver.setPhase('分享设置页')
+    await beforeAdminNavigation()
     adminCompletionTracker = createPageCompletionTracker(adminContext, {
       origins: [apiOrigin, publicOriginForSite(siteBaseUrl)], networkObserver: adminNetworkObserver, signal,
+      trackDocumentCommits,
     })
     const shareSettings = await inspectShareSettingsPage({
       page,

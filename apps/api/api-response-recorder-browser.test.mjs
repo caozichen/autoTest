@@ -6,8 +6,8 @@ import { attachNetworkObserver } from '../../scripts/support/api-response-record
 import { launchGoogleChrome } from '../../scripts/support/google-chrome.mjs'
 
 test('Chrome keeps fetched static JSON as resource evidence across language navigation, including HTTP failures', async t => {
-  const regionPath = '/form-building/v0.0.5/area-tree.en-US.83295e280aec.json'
-  const missingPath = '/assets/missing-regions.json'
+  const regionPath = '/project/form-building/v0.0.5/area-tree.en-US.83295e280aec.json'
+  const missingPath = '/project/form-building/v0.0.5/missing-regions.json'
   const businessPath = '/api/be/form/export.json'
   const requests = new Map()
   const server = createServer((request, response) => {

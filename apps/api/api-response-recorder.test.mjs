@@ -272,38 +272,40 @@ test('context observer separates APIs and resources and snapshots request phase 
 })
 
 for (const resourceType of ['fetch', 'xhr']) {
-  for (const status of [200, 404]) {
-    test(`records ${resourceType} region data with HTTP ${status} as a resource without reading its body`, async () => {
-      const target = new FakeNetworkTarget()
-      const observer = attachNetworkObserver(target, { initialPhase: '繁体翻译回读' })
-      const request = fakeRequest({
-        resourceType,
-        url: 'https://example.test/form-building/v0.0.5/area-tree.en-US.83295e280aec.json?locale=en-US',
-      })
-      const response = fakeResponse(request, { status })
-      let bodyReads = 0
-      response.text = async () => {
-        bodyReads += 1
-        throw new Error('Response body is not available for a response that was navigated away from')
-      }
-      target.emit('request', request)
-      observer.setPhase('英文翻译回读')
-      target.emit('response', response)
-      target.emit('requestfinished', request)
-      const result = await observer.stop()
+  for (const prefix of ['/form-building', '/project/form-building']) {
+    for (const status of [200, 404]) {
+      test(`records ${resourceType} region data under ${prefix} with HTTP ${status} as a resource without reading its body`, async () => {
+        const target = new FakeNetworkTarget()
+        const observer = attachNetworkObserver(target, { initialPhase: '繁体翻译回读' })
+        const request = fakeRequest({
+          resourceType,
+          url: `https://example.test${prefix}/v0.0.5/area-tree.en-US.83295e280aec.json?locale=en-US`,
+        })
+        const response = fakeResponse(request, { status })
+        let bodyReads = 0
+        response.text = async () => {
+          bodyReads += 1
+          throw new Error('Response body is not available for a response that was navigated away from')
+        }
+        target.emit('request', request)
+        observer.setPhase('英文翻译回读')
+        target.emit('response', response)
+        target.emit('requestfinished', request)
+        const result = await observer.stop()
 
-      assert.equal(bodyReads, 0)
-      assert.equal(result.api.length, 0)
-      assert.equal(result.resources.length, 1)
-      const entry = result.resources[0]
-      assert.equal(entry.resourceType, resourceType)
-      assert.equal(entry.phase, '繁体翻译回读')
-      assert.equal(entry.status, status)
-      assert.equal(entry.ok, status === 200)
-      assert.equal(entry.warning, undefined)
-      assert.equal(result.summary.resources.failed, status === 404 ? 1 : 0)
-      if (status === 404) assert.equal(entry.failureKind, 'http')
-    })
+        assert.equal(bodyReads, 0)
+        assert.equal(result.api.length, 0)
+        assert.equal(result.resources.length, 1)
+        const entry = result.resources[0]
+        assert.equal(entry.resourceType, resourceType)
+        assert.equal(entry.phase, '繁体翻译回读')
+        assert.equal(entry.status, status)
+        assert.equal(entry.ok, status === 200)
+        assert.equal(entry.warning, undefined)
+        assert.equal(result.summary.resources.failed, status === 404 ? 1 : 0)
+        if (status === 404) assert.equal(entry.failureKind, 'http')
+      })
+    }
   }
 }
 
@@ -314,16 +316,25 @@ test('keeps JSON business routes, static-looking writes, preflights and streams 
     { url: 'https://example.test/api/be/form/export.json' },
     { url: 'https://example.test/regions.json' },
     { url: 'https://example.test/assets/api/regions.json' },
+    { url: 'https://example.test/project/form-building/api/regions.json' },
+    { url: 'https://example.test/project/form-building/be/regions.json' },
+    { url: 'https://example.test/project/form-building/base/regions.json' },
+    { url: 'https://example.test/project/form-building/f/regions.json' },
+    { url: 'https://example.test/project/regions.json' },
+    { url: 'https://example.test/project/form-building-archive/regions.json' },
     { method: 'POST', url: 'https://example.test/static/settings.json' },
+    { method: 'POST', url: 'https://example.test/project/form-building/settings.json' },
     { method: 'OPTIONS', url: 'https://example.test/assets/settings.json', resourceType: 'other' },
+    { method: 'OPTIONS', url: 'https://example.test/project/form-building/settings.json', resourceType: 'other' },
     { url: 'https://example.test/assets/events.json', resourceType: 'eventsource' },
+    { url: 'https://example.test/project/form-building/events.json', resourceType: 'eventsource' },
   ]) {
     const request = fakeRequest(options)
     finish(target, request, fakeResponse(request, { body: '{"code":30001,"message":"业务校验失败"}' }))
   }
   const result = await observer.stop()
   assert.equal(result.resources.length, 0)
-  assert.equal(result.api.length, 6)
+  assert.equal(result.api.length, 15)
   assert.ok(result.api.filter(entry => !entry.streaming).every(entry => entry.responseBody.code === 30001))
 })
 

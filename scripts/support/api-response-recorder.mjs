@@ -6,7 +6,7 @@ const HONG_KONG_RESPONSE_DRAIN_TIMEOUT_MS = 15_000
 const DEFAULT_NETWORK_PHASE = '未标记'
 const DIAGNOSTIC_CORRELATION_WINDOW_MS = 100
 const API_RESOURCE_TYPES = new Set(['eventsource', 'fetch', 'xhr'])
-const STATIC_ASSET_PATH = /^\/(?:assets|static|form-building)\//
+const STATIC_ASSET_PATH = /^\/(?:assets|static|(?:project\/)?form-building)\//
 const STATIC_ASSET_EXTENSION = /\.(?:json|[cm]?js|css|wasm|svg|png|jpe?g|gif|webp|ico|woff2?|ttf|otf)$/i
 const BUSINESS_API_PATH = /\/(?:api|be|base|f)(?:\/|$)/
 const HTTP_PROTOCOLS = new Set(['http:', 'https:'])
@@ -315,6 +315,7 @@ export function attachNetworkObserver(target, {
   includeApi = true,
   includeResources = true,
   fullResponseBodies = false,
+  trackDocumentCommits = false,
 } = {}) {
   if (!target || typeof target.on !== 'function' || typeof target.off !== 'function') {
     throw new TypeError('网络观察器必须挂载到 Playwright BrowserContext 或 Page')
@@ -330,6 +331,8 @@ export function attachNetworkObserver(target, {
   const attachedPages = new Map()
   const attachedWebSockets = new Map()
   const frameGenerations = new WeakMap()
+  const pendingDocumentNavigations = new WeakMap()
+  const attachedDocumentPages = new Map()
   const api = []
   const resources = []
   let phase = normalizePhase(initialPhase)
@@ -344,6 +347,37 @@ export function attachNetworkObserver(target, {
 
   const notifyIdle = () => {
     for (const checkIdle of idleWaiters) checkIdle()
+  }
+
+  const isSuperseded = (state) => Boolean(state.frame
+    && state.navigationGeneration !== frameGenerations.get(state.frame)
+    // A new document cannot establish whether an unfinished mutation worked.
+    // Keep writes required under the opt-in commit-aware policy.
+    && (!trackDocumentCommits || ['GET', 'HEAD'].includes(state.method)))
+
+  const onDocumentCommitted = (frame) => {
+    const navigation = pendingDocumentNavigations.get(frame)
+    // Same-document URL changes have no document request. In particular, a
+    // router update must not make an unfinished request from that page stale.
+    const committedUrl = safely(() => new URL(frame.url()).href.split('#')[0], '')
+    const navigationStatus = safely(() => navigation?.response?.status(), 0) ?? 0
+    if (!navigation || navigationStatus < 200 || navigationStatus === 204 || navigationStatus === 205
+      || (navigationStatus >= 300 && navigationStatus < 400)
+      || committedUrl !== navigation.url.split('#')[0]) return
+    const generation = (frameGenerations.get(frame) ?? 0) + 1
+    frameGenerations.set(frame, generation)
+    pendingDocumentNavigations.delete(frame)
+    for (const request of navigation.requests) {
+      const state = states.get(request)
+      if (state) state.navigationGeneration = generation
+    }
+    notifyIdle()
+  }
+
+  const attachDocumentPage = (page) => {
+    if (!trackDocumentCommits || !page || attachedDocumentPages.has(page)) return
+    page.on('framenavigated', onDocumentCommitted)
+    attachedDocumentPages.set(page, onDocumentCommitted)
   }
 
   const track = (work) => {
@@ -773,8 +807,20 @@ export function attachNetworkObserver(target, {
       const resourceType = safely(() => request.resourceType(), 'other')
       const method = safely(() => request.method(), 'GET')
       const frame = safely(() => request.frame(), null)
+      if (trackDocumentCommits && frame && !frameGenerations.has(frame)) {
+        frameGenerations.set(frame, 0)
+      }
       if (frame && safely(() => request.isNavigationRequest(), false)) {
-        frameGenerations.set(frame, (frameGenerations.get(frame) ?? 0) + 1)
+        if (trackDocumentCommits) {
+          const redirectedFrom = safely(() => request.redirectedFrom(), null)
+          const previous = pendingDocumentNavigations.get(frame)
+          const requests = previous?.requests.has(redirectedFrom)
+            ? previous.requests : new Set()
+          requests.add(request)
+          pendingDocumentNavigations.set(frame, { requests, latest: request, url: url.toString() })
+        } else {
+          frameGenerations.set(frame, (frameGenerations.get(frame) ?? 0) + 1)
+        }
       }
       const navigationGeneration = frame ? (frameGenerations.get(frame) ?? 0) : undefined
       const category = requestCategory(url, method, resourceType)
@@ -807,6 +853,7 @@ export function attachNetworkObserver(target, {
         finalized: false,
         diagnostics: [],
       })
+      notifyIdle()
     } catch {
       // Playwright 事件处理器不向测试流程抛出采集错误。
     }
@@ -815,6 +862,11 @@ export function attachNetworkObserver(target, {
   const onResponse = (response) => {
     try {
       const request = response.request()
+      if (trackDocumentCommits) {
+        const frame = safely(() => request.frame(), null)
+        const navigation = frame ? pendingDocumentNavigations.get(frame) : null
+        if (navigation?.latest === request) navigation.response = response
+      }
       const state = states.get(request)
       if (!state || state.finalized) return
       state.response = response
@@ -867,10 +919,17 @@ export function attachNetworkObserver(target, {
 
   const onRequestFailed = (request) => {
     try {
+      if (trackDocumentCommits) {
+        const frame = safely(() => request.frame(), null)
+        if (frame && pendingDocumentNavigations.get(frame)?.latest === request) {
+          pendingDocumentNavigations.delete(frame)
+        }
+      }
       const state = states.get(request)
       if (!state || state.finalized) return
       const error = safely(() => request.failure()?.errorText, '') || '请求失败且未收到响应'
-      const ignored = isIgnoredRequestAbort(state, error, frameGenerations)
+      const ignored = (!trackDocumentCommits || ['GET', 'HEAD'].includes(state.method))
+        && isIgnoredRequestAbort(state, error, frameGenerations)
       const entry = applyDiagnostics({
         ...commonEntry(state, state.response),
         ok: ignored,
@@ -900,6 +959,7 @@ export function attachNetworkObserver(target, {
   const onPageCreated = (page) => {
     try {
       attachPageDiagnostics(page)
+      attachDocumentPage(page)
     } catch {
       // BrowserContext page 事件不向外抛出诊断错误。
     }
@@ -907,11 +967,18 @@ export function attachNetworkObserver(target, {
   if (includeResources) {
     if (isContextTarget) {
       target.on('console', onConsole)
-      target.on('page', onPageCreated)
       for (const page of safely(() => target.pages(), [])) attachPageDiagnostics(page)
     } else {
       attachPageDiagnostics(target, { captureConsole: true })
     }
+  }
+  if (isContextTarget && (includeResources || trackDocumentCommits)) {
+    target.on('page', onPageCreated)
+  }
+  if (trackDocumentCommits) {
+    if (isContextTarget) {
+      for (const page of safely(() => target.pages(), [])) attachDocumentPage(page)
+    } else attachDocumentPage(target)
   }
 
   const bindingName = `__autoTestNetworkDiagnostic${++observerSequence}`
@@ -990,7 +1057,7 @@ export function attachNetworkObserver(target, {
     return phase
   }
 
-  const waitUntilIdle = (timeoutMs, signal, shouldWaitFor) => {
+  const waitUntilIdle = (timeoutMs, signal, shouldWaitFor, quietMs = 0) => {
     const abortReason = () => signal.reason ?? new DOMException('等待网络请求完成已取消', 'AbortError')
     if (signal?.aborted) return Promise.reject(abortReason())
     // Selected states stay live until their response bodies or resources finish.
@@ -1003,21 +1070,23 @@ export function attachNetworkObserver(target, {
         resourceType: state.resourceType,
         response: state.response,
         responseHeaders: safely(() => state.response?.headers(), {}) ?? {},
-        superseded: Boolean(state.frame && state.navigationGeneration !== frameGenerations.get(state.frame)),
+        superseded: isSuperseded(state),
       }) !== false)
       : isIdle
     try {
-      if (isWaitIdle()) return Promise.resolve(true)
+      if (isWaitIdle() && quietMs === 0) return Promise.resolve(true)
     } catch (error) {
       return Promise.reject(error)
     }
     return new Promise((resolve, reject) => {
       let settled = false
       let timer
+      let quietTimer
       const finish = (idle, failed = false, error) => {
         if (settled) return
         settled = true
         clearTimeout(timer)
+        clearTimeout(quietTimer)
         idleWaiters.delete(checkIdle)
         signal?.removeEventListener('abort', onAbort)
         if (failed) reject(error)
@@ -1025,7 +1094,13 @@ export function attachNetworkObserver(target, {
       }
       const checkIdle = () => {
         try {
-          if (isWaitIdle()) finish(true)
+          if (isWaitIdle()) {
+            if (quietMs === 0) finish(true)
+            else if (!quietTimer) quietTimer = setTimeout(() => finish(true), quietMs)
+          } else {
+            clearTimeout(quietTimer)
+            quietTimer = undefined
+          }
         } catch (error) {
           finish(false, true, error)
         }
@@ -1034,6 +1109,7 @@ export function attachNetworkObserver(target, {
       timer = setTimeout(() => finish(false), timeoutMs)
       idleWaiters.add(checkIdle)
       signal?.addEventListener('abort', onAbort, { once: true })
+      if (quietMs > 0) checkIdle()
     })
   }
 
@@ -1054,10 +1130,14 @@ export function attachNetworkObserver(target, {
       target.off('response', onResponse)
       target.off('requestfinished', onRequestFinished)
       target.off('requestfailed', onRequestFailed)
-      if (includeResources && isContextTarget) {
-        target.off('console', onConsole)
+      if (isContextTarget && (includeResources || trackDocumentCommits)) {
         target.off('page', onPageCreated)
       }
+      if (includeResources && isContextTarget) target.off('console', onConsole)
+      for (const [page, handler] of attachedDocumentPages) {
+        safely(() => page.off('framenavigated', handler), undefined)
+      }
+      attachedDocumentPages.clear()
       detachPageDiagnostics()
 
       const pendingAtSeal = states.size
@@ -1069,7 +1149,7 @@ export function attachNetworkObserver(target, {
         const excluded = typeof shouldWaitFor === 'function' && shouldWaitFor({
           request: state.request, url: state.url, category: state.category, resourceType: state.resourceType,
           response: state.response, responseHeaders: safely(() => state.response?.headers(), {}) ?? {},
-          superseded: Boolean(state.frame && state.navigationGeneration !== frameGenerations.get(state.frame)),
+          superseded: isSuperseded(state),
         }) === false
         if (discardPending || excluded) {
           discardedPending += 1
@@ -1116,7 +1196,9 @@ export function attachNetworkObserver(target, {
     ready,
     setPhase,
     stop,
-    waitForIdle: ({ timeoutMs = responseDrainTimeoutMs, signal, shouldWaitFor } = {}) => waitUntilIdle(Math.max(0, Number(timeoutMs) || 0), signal, shouldWaitFor),
+    waitForIdle: ({ timeoutMs = responseDrainTimeoutMs, quietMs = 0, signal, shouldWaitFor } = {}) => waitUntilIdle(
+      Math.max(0, Number(timeoutMs) || 0), signal, shouldWaitFor, Math.max(0, Number(quietMs) || 0),
+    ),
     get phase() {
       return phase
     },

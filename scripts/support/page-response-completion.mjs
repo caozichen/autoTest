@@ -17,6 +17,41 @@ export function isRequiredPageRequest({ url, category, resourceType, responseHea
   return REQUIRED_RESOURCES.has(resourceType)
 }
 
+export async function waitForPageResponsesBeforeNavigation(page, networkObserver, {
+  origins, signal, timeoutMs = scaleTimeout(45_000), logger = () => undefined,
+  environmentCode, quietMs = /hk/i.test(environmentCode ?? '') ? 500 : 0,
+} = {}) {
+  const waitForPendingAi = /hk/i.test(environmentCode ?? '')
+  const allowedOrigins = new Set(origins)
+  const completed = await networkObserver.waitForIdle({
+    timeoutMs,
+    signal,
+    quietMs,
+    shouldWaitFor: candidate => {
+      let owner
+      try { owner = candidate.request.frame().page() } catch { return false }
+      if (owner !== page || candidate.superseded) return false
+      if (candidate.resourceType === 'eventsource' || candidate.resourceType === 'websocket'
+        || /text\/event-stream/i.test(candidate.responseHeaders?.['content-type'] ?? '')) return false
+      if (isRequiredPageRequest(candidate, allowedOrigins)) return true
+      // Static fetches need their terminal event, not an API response body.
+      if (candidate.category === 'resource' && ['fetch', 'xhr'].includes(candidate.resourceType)) return true
+      // Slow Hong Kong polls can receive headers only after the navigation
+      // check. Drain existing polls and their follow-up reads before leaving.
+      // Other environments retain the existing headers-only prerequisite.
+      return candidate.category === 'api' && (waitForPendingAi || Boolean(candidate.response))
+        && allowedOrigins.has(candidate.url.origin)
+        && /\/translation\/ai\/status\/?$/.test(candidate.url.pathname)
+    },
+  })
+  if (!completed) {
+    // Capture must not retry a business operation or change its result. Keep
+    // unfinished responses in the observer so normal diagnostics retain them.
+    logger('warning', '页面跳转前响应采集等待超时，继续原流程并保留未完成响应诊断', { timeoutMs })
+  }
+  return completed
+}
+
 export function assertCompletedPageEvidence(evidence, label) {
   const failures = [...evidence.api, ...evidence.resources].filter(entry => {
     if (!entry.ok || entry.warning || entry.incomplete || entry.bodyReadError || entry.ignored) return true
@@ -34,7 +69,7 @@ export function assertCompletedPageEvidence(evidence, label) {
 // Attach when the context is created, before new pages (including popups) can
 // start requests. Each page is sealed once, immediately before its final close.
 export function createPageCompletionTracker(context, { origins, networkObserver, signal,
-  timeoutMs = scaleTimeout(45_000) }) {
+  timeoutMs = scaleTimeout(45_000), trackDocumentCommits = false }) {
   const allowedOrigins = new Set(origins)
   const pages = new Map()
   const track = page => {
@@ -42,6 +77,7 @@ export function createPageCompletionTracker(context, { origins, networkObserver,
     const observer = attachNetworkObserver(page, {
       initialPhase: '关闭前必要响应完整性检查', responseDrainTimeoutMs: timeoutMs,
       fullResponseBodies: true,
+      trackDocumentCommits,
       shouldRecord: candidate => isRequiredPageRequest(candidate, allowedOrigins),
     })
     pages.set(page, observer)
