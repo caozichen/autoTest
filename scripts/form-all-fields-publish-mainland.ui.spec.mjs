@@ -10,6 +10,7 @@ import {
 } from './form-all-fields-publish.ui.spec.mjs'
 import { expect as flowExpect, scaleTimeout } from './support/environment-timeouts.mjs'
 import { clickWhenReady } from './support/ui-readiness.mjs'
+import { openFormSettingsMenu } from './support/form-navigation.mjs'
 import { configurePostCollectionSettings } from './support/form-post-collection-settings.mjs'
 import { assertClassificationTagOptionsAvailable } from './support/form-settings-channels.mjs'
 
@@ -53,12 +54,11 @@ export async function initializeMainlandContactFields(page, logger, timeoutMs = 
 }
 
 export async function configureMainlandContactSettings(page, logger) {
-  await enterBasicSettings(page)
-  const formMenu = page.locator('[data-menu-key="form"]')
-  await flowExpect(formMenu, '内地基础设置应加载填报设定菜单').toBeVisible()
-  await clickWhenReady(formMenu)
-  await flowExpect(page.getByRole('switch', { name: '填报开始结束时间开关', exact: true }),
-    '内地填报设定面板应完成加载').toBeVisible()
+  await enterBasicSettings(page, logger)
+  await openFormSettingsMenu(page, 'form', {
+    ready: page.getByRole('switch', { name: '填报开始结束时间开关', exact: true }),
+    logger, label: '打开内地填报设定',
+  })
 
   const deadline = Date.now() + scaleTimeout(30_000)
   await waitForContactPageReady(page, () => Math.max(1, deadline - Date.now()))

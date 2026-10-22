@@ -1668,6 +1668,55 @@ test('normalizes template tokens while preserving duplicate occurrences', () => 
   assert.notDeepEqual(templateTokens('{{name}} {{name}}'), templateTokens('{{name}}'))
 })
 
+function knownFeedbackTranslationResponse() {
+  const response = publicationReadyResponse({ units: [{
+    unit_key: '8522c0ce35ad045c0a84ea38d7c0655a',
+    field_path: 'notification_config.customized_feedback.body',
+    source_hash: 'feedback-hash', source_text: '<p>提交成功，与用于验证富文本样式。</p>',
+    translated_text: '<p>Submitted. Blue tip 与 Background highlight 用于验证富文本样式。</p>',
+    status: 'translated', editor_type: 'rich_text',
+  }] })
+  Object.assign(response.data.sections[0], { group_key: 'other_translation', section_key: 'customized_feedback', scope_type: 'config', scope_key: 'notification_config.customized_feedback' })
+  response.data.languages.forEach(language => { language.published = true })
+  return response
+}
+
+test('temporarily skips known feedback English mixing in both individual and aggregate assertions at all four stages', () => {
+  const response = knownFeedbackTranslationResponse()
+  const assertions = [], warnings = []
+  for (const label of ['en_US AI 翻译保存后回读', 'en_US 保存后第二次独立回读', '多语言完成并发布响应', '多语言发布后 en_US 工作区']) {
+    runWithAssertionRecorder('form-multilingual-translation-publish', entry => assertions.push(entry), () => {
+      assertTranslationWorkspace(response, {
+        label, expectedTargetLanguage: 'en_US', requireComplete: true, requirePublished: true,
+        logger: (...args) => warnings.push(args),
+      })
+    })
+  }
+  assert.deepEqual(assertions.filter(entry => entry.status === 'failed'), [])
+  assert.equal(warnings.length, 4)
+  assert.ok(warnings.every(([level, message]) => level === 'warning' && message.includes('暂时跳过')))
+  assert.equal(assertions.filter(entry => entry.name.includes('不应存在空白、陈旧、语言混用')).length, 4)
+  assert.ok(languageQualityIssues(normalizeWorkspace(response), 'en_US').some(issue => issue.type === 'english-contains-han'), '原始问题检测与响应证据仍应保留')
+})
+
+test('the temporary feedback exception preserves other fields, unit identities and template failures', () => {
+  for (const change of [
+    unit => { unit.field_path = 'form.description' },
+    unit => { unit.unit_key = 'another-feedback-unit' },
+  ]) {
+    const response = knownFeedbackTranslationResponse()
+    change(response.data.sections[0].units[0])
+    assert.throws(() => assertTranslationWorkspace(response, {
+      expectedTargetLanguage: 'en_US', requireComplete: true,
+    }), /english-contains-han/)
+  }
+  const response = knownFeedbackTranslationResponse()
+  response.data.sections[0].units[0].source_text += ' {{name}}'
+  assert.throws(() => assertTranslationWorkspace(response, {
+    expectedTargetLanguage: 'en_US', requireComplete: true,
+  }), /保留模板变量/)
+})
+
 test('hard-blocks deterministic translation hazards but keeps language heuristics diagnostic', () => {
   const properName = publicationReadyResponse({
     units: [{

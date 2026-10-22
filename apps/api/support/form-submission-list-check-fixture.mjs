@@ -249,6 +249,7 @@ export function createSubmissionListFixture({
   const createdAt = '2026-09-09 14:36:00'
   const record = {
     id: submissionId,
+    form_id: formId,
     submission_id: submissionId,
     special_code: '-',
     source: 'public',
@@ -388,6 +389,11 @@ export function filterSubmissionRecords(requestUrl, records, additionalFields = 
         }
         continue
       }
+      if (field.key === 'filter[channel]') {
+        const codes = valuesForKey(url, field.key).flatMap(value => value.split(',')).map(value => value.trim()).filter(Boolean)
+        if (codes.length && !codes.includes(String(answerValue(record, field.itemKey)))) return false
+        continue
+      }
       const query = String(url.searchParams.get(field.key) ?? '').trim().toLocaleLowerCase()
       if (!query) continue
       const candidate = field.kind === 'source'
@@ -428,6 +434,9 @@ export function createSubmissionListHtml({
   resourcePath = '/fixture-assets/submission-list.css',
   injectWriteRequest = false,
   omitContactTag = false,
+  detailPresentation = 'page',
+  choiceDropdownBehavior = '',
+  channelDropdownBehavior = '',
 } = {}) {
   if (!fixture) throw new Error('提报列表 HTML fixture 缺少业务数据')
   const ui = UI_TEXT[locale] ?? UI_TEXT['zh-CN']
@@ -459,6 +468,18 @@ export function createSubmissionListHtml({
     initialBasic: initiallyCheckedBasics,
     initialSearch: initiallyCheckedSearches,
     injectWriteRequest,
+    detailPresentation,
+    choiceDropdownBehavior,
+    channelDropdownBehavior,
+    detailDrawerHtml: `<div class="arco-drawer-container submission-reply-detail-drawer" role="dialog" aria-label="填报详情"><div class="arco-drawer">
+      <button type="button" class="arco-drawer-close-btn" aria-label="Close">×</button>
+      <h2>${escapeHtml(fixture.title)}</h2>
+      <img src="/fixture-assets/detail-image.png" alt="提报图片">
+      <section class="reply-kv">
+        <div class="reply-kv__row"><span class="reply-kv__label">姓名</span><div class="reply-kv__value">${escapeHtml(fixture.primaryContactName)} Mr.（先生）</div></div>
+        <div class="reply-kv__row"><span class="reply-kv__label">姓名</span><div class="reply-kv__value">${escapeHtml(fixture.groupContactName)}</div></div>
+      </section>
+    </div></div>`,
     choiceSamples: fixture.additionalSearchFields ? Object.fromEntries(
       fixture.record.answers.filter((answer) => /^(radio|checkbox|select)_/.test(answer.item_key))
         .map((answer) => [`filter[${answer.item_key}]`, String(answer.answer).split(',')]),
@@ -672,25 +693,73 @@ export function createSubmissionListHtml({
         selected.dataset.choiceLabel = ''
         select.append(selected)
         input.addEventListener('input', () => {
-          document.querySelector('[data-choice-dropdown]')?.remove()
+          document.querySelectorAll('[data-choice-dropdown]').forEach((node) => {
+            if (node.dataset.choiceDropdown === key) node.remove()
+          })
           const dropdown = document.createElement('div')
           dropdown.className = 'arco-select-dropdown'
-          dropdown.dataset.choiceDropdown = ''
+          dropdown.dataset.choiceDropdown = key
+          const firstChoice = key.startsWith('filter[radio_')
+          const ready = model.choiceDropdownBehavior === 'slow' && firstChoice
+            ? getJson('/api/be/choice-options-ready') : Promise.resolve()
           for (const sample of [...samples, '不相关干扰项']) {
             if (!sample.includes(input.value)) continue
+            if (model.choiceDropdownBehavior === 'missing-first' && firstChoice) continue
             const option = document.createElement('div')
             option.className = 'arco-select-option'
             option.textContent = sample
-            option.addEventListener('click', () => {
-              state.filterValues[key] = sample
-              selected.textContent = sample
-              input.value = ''
-              dropdown.remove()
+            ready.then(() => {
+              option.addEventListener('click', () => {
+                state.filterValues[key] = sample
+                selected.textContent = sample
+                input.value = ''
+                // Multiple selections remain open until an outside click.
+                if (!key.startsWith('filter[checkbox_')) dropdown.remove()
+              })
             })
             dropdown.append(option)
           }
+          if (model.choiceDropdownBehavior === 'missing-first' && firstChoice) dropdown.textContent = '未找到目标项'
           document.body.append(dropdown)
         })
+      }
+      if (model.channelDropdownBehavior) {
+        const key = 'filter[channel]'
+        const input = Array.from(container.querySelectorAll('[data-filter-input]'))
+          .find(candidate => candidate.dataset.filterInput === key)
+        if (input) {
+          input.removeAttribute('data-filter-input')
+          const select = document.createElement('div')
+          select.className = 'arco-select'
+          input.replaceWith(select)
+          select.append(input)
+          const selected = document.createElement('span')
+          selected.dataset.choiceLabel = ''
+          select.append(selected)
+          input.addEventListener('input', () => {
+            document.querySelector('[data-channel-dropdown]')?.remove()
+            const dropdown = document.createElement('div')
+            dropdown.className = 'arco-select-dropdown'
+            dropdown.dataset.channelDropdown = ''
+            for (const title of ['测试渠道', '测试渠道-干扰项']) {
+              if (!title.includes(input.value)) continue
+              const option = document.createElement('div')
+              option.className = 'arco-select-option'
+              const checkbox = document.createElement('input')
+              checkbox.type = 'checkbox'
+              option.append(checkbox, title)
+              option.addEventListener('click', () => {
+                checkbox.checked = true
+                selected.textContent = title
+                state.filterValues[key] = model.channelDropdownBehavior === 'wrong-code' || title !== '测试渠道'
+                  ? 'another-channel' : 'runChannel4291'
+                input.value = ''
+              })
+              dropdown.append(option)
+            }
+            document.body.append(dropdown)
+          })
+        }
       }
       const source = document.querySelector('[data-source-select]')
       if (source) source.addEventListener('click', () => {
@@ -711,6 +780,13 @@ export function createSubmissionListHtml({
         dropdown.hidden = false
       })
     }
+    document.addEventListener('mousedown', (event) => {
+      if (event.target.closest('.arco-select, .arco-select-dropdown')) return
+      if (model.choiceDropdownBehavior && event.target.closest('[data-action="reset"]')) return
+      document.querySelectorAll('[data-choice-dropdown]').forEach((node) => node.remove())
+      document.querySelector('[data-channel-dropdown]')?.remove()
+      document.querySelector('[data-source-dropdown]')?.setAttribute('hidden', '')
+    })
     const selectedColumnFields = () => model.basicFields.filter((field) => state.selectedBasic.has(field.key))
     const renderSubmissionTable = () => {
       const columns = selectedColumnFields()
@@ -729,7 +805,22 @@ export function createSubmissionListHtml({
       }).join('')
       byId('list-total').textContent = model.ui.total.replace('{count}', String(state.submissions.length))
       document.querySelectorAll('[data-view-submission]').forEach((button) => {
-        button.addEventListener('click', () => {
+        button.addEventListener('click', async () => {
+          if (model.detailPresentation === 'drawer') {
+            const response = await fetch('/api/be/form/' + encodeURIComponent(model.formId)
+              + '/submission/' + encodeURIComponent(button.dataset.viewSubmission), { headers: tokenHeaders() })
+            await response.json()
+            const background = document.querySelector('main')
+            background.inert = true
+            const overlay = document.createElement('div')
+            overlay.innerHTML = model.detailDrawerHtml
+            document.body.append(overlay)
+            overlay.querySelector('.arco-drawer-close-btn').addEventListener('click', () => {
+              overlay.remove()
+              background.inert = false
+            })
+            return
+          }
           location.href = '/form-activity/submission/preview/reply/' + encodeURIComponent(button.dataset.viewSubmission)
             + '?fid=' + encodeURIComponent(model.formId)
         })
@@ -776,7 +867,7 @@ export function createSubmissionListHtml({
     const resetFilters = () => {
       state.filterValues = Object.create(null)
       document.querySelectorAll('[data-choice-label]').forEach((node) => { node.textContent = '' })
-      document.querySelector('[data-choice-dropdown]')?.remove()
+      if (!model.choiceDropdownBehavior) document.querySelector('[data-choice-dropdown]')?.remove()
       document.querySelectorAll('#filter-fields input').forEach((input) => { input.value = '' })
       document.querySelector('[data-source-dropdown]')?.setAttribute('hidden', '')
     }

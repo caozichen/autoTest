@@ -1,6 +1,8 @@
 import { observeFormEditTokens } from './support/form-edit-token-observer.mjs'
 import { resolveAdminLocale } from './support/admin-locale.mjs'
 import { clickWhenReady, observeUiReadiness, waitForUiReady } from './support/ui-readiness.mjs'
+import { waitForDesignerReady } from './support/form-designer-ready.mjs'
+import { openFormSettingsMenu, openFormSettingsStep } from './support/form-navigation.mjs'
 import { expect as flowExpect, scaleTimeout } from './support/environment-timeouts.mjs'
 import { access, mkdir, rename, rm, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
@@ -527,7 +529,8 @@ async function screenshotFailure(page, title, artifactWriter) {
   )
 }
 
-// Called only immediately after creating the blank form, before any field edits.
+// Called after opening a designer, before any field edits. Reload recovery is
+// limited to an explicit load failure; initialization locks must never reload it.
 async function waitForDesignerBootstrap(page, logger, timeoutMs = scaleTimeout(NAVIGATION_TIMEOUT_MS)) {
   const expectedUrl = page.url()
   const deadline = Date.now() + timeoutMs
@@ -540,7 +543,10 @@ async function waitForDesignerBootstrap(page, logger, timeoutMs = scaleTimeout(N
       state = await palette.isVisible() ? 'ready' : await loadFailure.first().isVisible() ? 'failed' : 'loading'
       return state
     }, { timeout: Math.max(1, deadline - Date.now()), intervals: [100, 200, 300], message: '等待表单设计器题型库加载完成' }).not.toBe('loading')
-    if (state === 'ready') return
+    if (state === 'ready') {
+      await waitForDesignerReady(page, { timeout: Math.max(1, deadline - Date.now()) })
+      return
+    }
     if (attempt === 1 || page.url() !== expectedUrl || Date.now() >= deadline) {
       throw new Error('表单设计器页面加载失败，初始化恢复未成功；尚未修改题目')
     }
@@ -1096,22 +1102,15 @@ function assertSavedPayloads({
   return Number(itemsPayload.revision_no)
 }
 
-async function enterBasicSettings(page) {
-  const basicSettingsStep = page
-    .locator('.form-activity-step-nav .form-activity-step')
-    .filter({ hasText: /基础设置|基礎設定/ })
-  await expect(basicSettingsStep, '顶部步骤导航中应有唯一的“基础设置”入口').toHaveCount(1)
-  await expect(basicSettingsStep, '“基础设置”步骤应可点击').toBeVisible()
-  await clickWhenReady(basicSettingsStep)
-  await page.waitForURL(/\/form-activity\/settings\?[^#]*id=/, { timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) })
+async function enterBasicSettings(page, logger) {
+  await openFormSettingsStep(page, 'settings', { logger, label: '进入基础设置', expectSaved: false })
 }
 
 async function ensureIgnoreStrategyInSettings(page, logger) {
   logger('info', '进入基础设置并打开“收录联系人设置”')
-  await enterBasicSettings(page)
-  await clickWhenReady(page.locator('[data-menu-key="collect-contact"]'))
-
+  await enterBasicSettings(page, logger)
   const switchControl = page.getByRole('switch', { name: /是否收录联系人开关|是否收錄聯絡人開關/ })
+  await openFormSettingsMenu(page, 'collect-contact', { ready: switchControl, logger, label: '打开收录联系人设置' })
   await expect(switchControl, '联系人收录开关应显示').toBeVisible()
   const state = await switchControl.getAttribute('data-state')
   if (state !== 'checked' && await switchControl.getAttribute('aria-checked') !== 'true') {

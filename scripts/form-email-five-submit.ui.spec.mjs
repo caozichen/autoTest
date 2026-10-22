@@ -13,6 +13,7 @@ import {
 import { launchGoogleChrome } from './support/google-chrome.mjs'
 import { expect } from './support/recorded-expect.mjs'
 import { clickWhenReady, observeUiReadiness } from './support/ui-readiness.mjs'
+import { openFormSettingsStep } from './support/form-navigation.mjs'
 import {
   CONTACT_PRESET_TYPES,
   dismissFormOnboarding,
@@ -358,9 +359,10 @@ export async function run(options, { mainland = false } = {}) {
       readForm: async () => (await fetchFormDetail(page, apiBaseUrl, formId, authorization))?.data?.form,
     })
     observer.setPhase('消息及触达邮件配置')
-    const messageStep = page.locator('.form-activity-step-nav .form-activity-step')
-      .filter({ hasText: /消息及触达|訊息及觸達/ })
-    await clickWhenReady(messageStep)
+    await openFormSettingsStep(page, 'message', {
+      ready: page.getByRole('switch', { name: /^(启用消息通知|啟用訊息通知|Enable message notifications)$/i }),
+      formId, logger, label: '进入邮件消息及触达配置',
+    })
     const emailContent = emailTestContent(title, formId, siteBaseUrl)
     const notification = await configureAutomationNotification({
       page, formId, content: emailContent, logger,

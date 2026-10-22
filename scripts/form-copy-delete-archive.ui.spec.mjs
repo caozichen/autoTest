@@ -5,6 +5,7 @@ import { expect as flowExpect, scaleTimeout } from './support/environment-timeou
 import { launchGoogleChrome } from './support/google-chrome.mjs'
 import { expect } from './support/recorded-expect.mjs'
 import { clickWhenReady, observeUiReadiness } from './support/ui-readiness.mjs'
+import { publishFormFromDesigner } from './support/form-navigation.mjs'
 import {
   dismissFormOnboarding,
   fetchFormDetail,
@@ -111,10 +112,16 @@ async function assertRow(page, record, title, status, label) {
   return row
 }
 
-async function assertMoreMenu(page, row, { archive, remove }, label) {
+export async function openFormMoreMenu(page, row, label) {
   await clickWhenReady(row.getByRole('button', { name: /^(更多|更多操作|More)$/ }))
+  // Arco teleports the dropdown outside the source table row.
   const menu = page.locator('.form-activity-operation-dropdown:visible')
   await flowExpect(menu, `${label}更多菜单必须唯一展开`).toHaveCount(1)
+  return menu
+}
+
+async function assertMoreMenu(page, row, { archive, remove }, label) {
+  const menu = await openFormMoreMenu(page, row, label)
   const archiveAction = menu.getByText(/归档|歸檔/).last()
   const deleteAction = menu.getByText(/删除|刪除/).last()
   if (archive) await expect(menu, `${label}应有归档操作`).toContainText(/归档|歸檔/)
@@ -125,8 +132,12 @@ async function assertMoreMenu(page, row, { archive, remove }, label) {
 }
 
 async function copySource(page, sourceRow, sourceId, sourceTitle, previousIds, label, locale) {
+  const menu = await openFormMoreMenu(page, sourceRow, label)
+  const action = menu.getByRole('button', { name: /^(复制|複製)$/ })
+  await flowExpect(action, `${label}复制操作必须唯一存在`).toHaveCount(1)
+  await flowExpect(action, `${label}复制操作必须可用`).toBeEnabled()
   const promise = waitForExactResponse(page, 'POST', `/be/form/${sourceId}/duplicate`)
-  await clickWhenReady(sourceRow.getByRole('button', { name: /^(复制|複製)$/ }))
+  await clickWhenReady(action)
   const body = await businessResponse(await promise, `${label}复制接口`)
   const responseId = copiedId(body)
   const title = copyTitleFor(sourceTitle, locale)
@@ -252,19 +263,9 @@ export async function run({
     await expect(page, '设计器必须打开第一次复制的表单')
       .toHaveURL(new RegExp(`/form-activity/designer\\?id=${first.id}(?:[&#]|$)`))
     // 后续对话增加复制表单内部题目与设置校验时，在此处扩展。
-    const publishPromise = waitForExactResponse(page, 'POST', `/be/form/${first.id}/publish`)
-    await clickWhenReady(page.getByRole('button', { name: /^(发布|發[佈布])$/ }))
-    const unsavedDialog = page.locator('.arco-modal:visible')
-      .filter({ hasText: /表单未保存|表[單格]未儲存|保存后发布|儲存後發[佈布]/ })
-    if (await unsavedDialog.isVisible().catch(() => false)) {
-      await expect(unsavedDialog, '设计器未保存时应提示保存后发布').toBeVisible()
-      const itemsPromise = waitForExactResponse(page, 'PUT', `/be/form/${first.id}/items`)
-      const configPromise = waitForExactResponse(page, 'PUT', `/be/form/${first.id}/config`)
-      await clickWhenReady(unsavedDialog.getByRole('button', { name: /保存后发布|儲存後發[佈布]/ }))
-      await businessResponse(await itemsPromise, '第一次复制发布前保存题目')
-      await businessResponse(await configPromise, '第一次复制发布前保存配置')
-    }
-    const publishBody = await businessResponse(await publishPromise, '第一次复制发布')
+    const { body: publishBody } = await publishFormFromDesigner(page, {
+      formId: first.id, logger, label: '第一次复制发布',
+    })
     expect(String(publishBody?.data?.form_id ?? ''), '发布响应表单 ID 应为第一次复制 ID').toBe(first.id)
     expect(publishBody?.data?.status, '发布响应应为已发布').toBe('published')
     await page.waitForURL(/\/form-activity\/list(?:[/?#]|$)/, {

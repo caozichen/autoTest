@@ -1,6 +1,7 @@
 import { expect } from './recorded-expect.mjs'
 import { expect as flowExpect, scaleTimeout } from './environment-timeouts.mjs'
 import { clickWhenReady } from './ui-readiness.mjs'
+import { openFormSettingsMenu } from './form-navigation.mjs'
 
 const DAY_MS = 86_400_000
 const DATE_TIME = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/
@@ -61,8 +62,8 @@ async function chooseDateTime(page, trigger, value) {
 }
 
 export async function configureSubmissionPeriod({ page, formId, period, readForm, inspectBusinessResponse, logger = () => undefined }) {
-  await clickWhenReady(page.locator('[data-menu-key="form"]'))
   const toggle = page.getByRole('switch', { name: /^(填报开始结束时间开关|填報開始結束時間開關)$/ })
+  await openFormSettingsMenu(page, 'form', { ready: toggle, formId, logger, label: '打开填报时间设定' })
   await flowExpect(toggle, '填报时间开关必须可见').toBeVisible()
   const section = toggle.locator('xpath=ancestor::div[contains(@class,"fb-rounded-lg")][1]')
   if (await toggle.getAttribute('aria-checked') !== 'true') await clickWhenReady(toggle)

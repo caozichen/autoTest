@@ -1138,6 +1138,7 @@ function assertTranslationWorkspace(payload, {
   requireComplete = false,
   requirePublished = false,
   customExpectations = {},
+  logger = () => {},
 } = {}) {
   const workspace = normalizeWorkspace(payload)
   const prefix = label || `${expectedTargetLanguage || '目标语言'}翻译工作区`
@@ -1201,7 +1202,20 @@ function assertTranslationWorkspace(payload, {
   }
 
   if (requireComplete && expectedTargetLanguage) {
-    const issues = languageQualityIssues(workspace, expectedTargetLanguage)
+    const issues = languageQualityIssues(workspace, expectedTargetLanguage).filter((issue) => {
+      // 按用户要求暂时注释此已知单元的英文夹中文失败检查；恢复时移除此分支。
+      // 逐项和汇总断言共用过滤结果，其余字段及其它问题类型仍照常检查。
+      if (expectedTargetLanguage === 'en_US'
+        && issue.type === 'english-contains-han'
+        && issue.context === 'other_translation/customized_feedback/notification_config.customized_feedback.body'
+        && issue.unit_key === '8522c0ce35ad045c0a84ea38d7c0655a') {
+        logger('warning', `${prefix}：已按用户要求暂时跳过提交成功提示的英文夹中文检查`, {
+          type: issue.type, context: issue.context, unitKey: issue.unit_key,
+        })
+        return false
+      }
+      return true
+    })
     for (const issue of issues) {
       expect(issue, `${prefix}语言质量不应出现 ${issue.type}：${issue.context}`).toBeNull()
     }
@@ -2443,6 +2457,7 @@ async function completeAndPublish(page, formId, workspace, formTitle, logger) {
   expect(requestPayload.target_language, '多语言完成并发布请求应携带当前目标语言').toBe(workspace.target_language)
   const completedWorkspace = assertTranslationWorkspace(outcome.body, {
     label: '多语言完成并发布响应',
+    logger,
     expectedRevision: workspace.revision_no,
     expectedTargetLanguage: workspace.target_language,
     requireComplete: true,
@@ -3224,6 +3239,7 @@ export async function run({
       })
       const workspace = assertTranslationWorkspace(firstRead.outcome.body, {
         label: `${language} AI 翻译保存后回读`,
+        logger,
         expectedRevision: source.revisionNo,
         expectedTargetLanguage: language,
         requireComplete: true,
@@ -3257,6 +3273,7 @@ export async function run({
       )
       const reloadedWorkspace = assertTranslationWorkspace(secondRead.outcome.body, {
         label: `${language} 保存后第二次独立回读`,
+        logger,
         expectedRevision: source.revisionNo,
         expectedTargetLanguage: language,
         requireComplete: true,
@@ -3364,6 +3381,7 @@ export async function run({
           )).outcome
       const publishedWorkspace = assertTranslationWorkspace(publishedOutcome.body, {
         label: `多语言发布后 ${language} 工作区`,
+        logger,
         expectedRevision: source.revisionNo,
         expectedTargetLanguage: language,
         requireComplete: true,

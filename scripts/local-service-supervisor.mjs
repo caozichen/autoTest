@@ -135,7 +135,8 @@ export function startSupervisor() {
     isHealthy: () => isHealthy(RUNNER_HEALTH_URL),
     startProcess: () => {
       if (managedRunner?.exitCode === null) managedRunner.kill()
-      const child = spawn(process.execPath, ['--watch', 'server.mjs'], {
+      // watch 会因执行脚本的文件变化向 Runner 发 SIGTERM，关闭运行中的 Chrome。
+      const child = spawn(process.execPath, ['server.mjs'], {
         cwd: API_DIRECTORY,
         env: process.env,
         stdio: 'inherit',

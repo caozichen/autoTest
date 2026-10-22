@@ -39,6 +39,7 @@ const FORM_PATH = `/form/?id=${FORM_ID}`
 const EXPECTED_FORM_TITLE = '自动化测试全题型表单-1787048650389'
 const NAVIGATION_TIMEOUT_MS = 45_000
 const ACTION_TIMEOUT_MS = 30_000
+const UPLOAD_TIMEOUT_MS = 60_000
 const SELECT_MAX_ATTEMPTS = 3
 const SELECT_VISIBILITY_TIMEOUT_MS = 3_000
 const SELECT_COMMIT_TIMEOUT_MS = 1_500
@@ -962,23 +963,27 @@ async function waitForPublicMutation(
       && url.pathname.endsWith(pathSuffix)
       && request.method() === 'POST'
   }
+  // 页面关闭或请求超时可能早于 action 完成，必须立即接住拒绝，保留 action 的原始错误。
   const requestPromise = page.waitForRequest(matchesMutation, {
     timeout: scaleTimeout(CLIENT_VALIDATION_SETTLE_TIMEOUT_MS),
-  })
+  }).then((request) => ({ request }), (error) => ({ error }))
   const responsePromise = page.waitForResponse((response) => matchesMutation(response.request()), {
     timeout: scaleTimeout(ACTION_TIMEOUT_MS),
   }).then((response) => ({ response }), (error) => ({ error }))
   await action()
-  try {
-    await requestPromise
-  } catch (error) {
+  const requestOutcome = await requestPromise
+  if (requestOutcome.error) {
+    const { error } = requestOutcome
+    if (page.isClosed()) {
+      throw new Error(`${label}等待请求时页面、上下文或浏览器已关闭`, { cause: error })
+    }
+    if (error.name !== 'TimeoutError') throw error
     const visibleErrors = (await page.locator('.fb-runtime-field-error:visible').allTextContents())
       .map((text) => text.trim())
       .filter(Boolean)
-    throw new Error([
-      `${label}未发送请求，页面仍被本地校验拦截`,
-      visibleErrors.length > 0 ? `可见错误：${visibleErrors.join('；')}` : '',
-    ].filter(Boolean).join('；'), { cause: error })
+    throw new Error(visibleErrors.length > 0
+      ? `${label}未发送请求，页面仍被本地校验拦截；可见错误：${visibleErrors.join('；')}`
+      : `${label}等待请求超时，未观察到匹配请求`, { cause: error })
   }
   const responseOutcome = await responsePromise
   if (responseOutcome.error) throw responseOutcome.error
@@ -1376,17 +1381,16 @@ async function uploadAndAssert(card, filePath, label) {
   const fileName = filePath.split(/[\\/]/).pop()
   const uploadStatus = card.locator('.fb-runtime-upload-status')
   await expect(uploadStatus, `“${label}”应显示上传状态`).toBeVisible()
+  const completionOptions = { timeout: scaleTimeout(UPLOAD_TIMEOUT_MS) }
   if (label === '图片上传') {
     const previewImage = card.locator('.fb-runtime-upload-image-preview img')
-    await expect(previewImage, '图片上传完成后应显示一个缩略图').toHaveCount(1)
-    await expect(previewImage, '图片上传缩略图应可见').toBeVisible()
-    await expect(previewImage, '图片上传结果应保留原文件名').toHaveAttribute('alt', fileName)
-    await expect(previewImage, '图片上传结果应包含可访问地址').toHaveAttribute('src', /\S+/)
+    await expect(previewImage, '图片上传完成后应显示一个缩略图').toHaveCount(1, completionOptions)
+    await expect(previewImage, '图片上传缩略图应可见').toBeVisible(completionOptions)
+    await expect(previewImage, '图片上传结果应保留原文件名').toHaveAttribute('alt', fileName, completionOptions)
+    await expect(previewImage, '图片上传结果应包含可访问地址').toHaveAttribute('src', /\S+/, completionOptions)
     return
   }
-  await expect(card, `“${label}”上传完成后应回显文件名`).toContainText(fileName, {
-    timeout: scaleTimeout(ACTION_TIMEOUT_MS),
-  })
+  await expect(card, `“${label}”上传完成后应回显文件名`).toContainText(fileName, completionOptions)
 }
 
 async function drawSignature(page, card, logger) {

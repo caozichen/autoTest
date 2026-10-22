@@ -1,5 +1,6 @@
 import { scaleTimeout } from './support/environment-timeouts.mjs'
 import { expect } from './support/recorded-expect.mjs'
+import { openFormSettingsMenu, openFormSettingsStep } from './support/form-navigation.mjs'
 import { attachNetworkObserver } from './support/api-response-recorder.mjs'
 import {
   createFormLinkContract,
@@ -225,16 +226,9 @@ async function hasAllContactFields(page) {
 
 async function ensureIgnoreStrategyInSettings(page, logger) {
   logger('info', '进入基础设置并打开“收录联系人设置”')
-  const basicSettingsStep = page
-    .locator('.form-activity-step-nav .form-activity-step')
-    .filter({ hasText: /基础设置|基礎設定/ })
-  await expect(basicSettingsStep, '顶部步骤导航中应有唯一的“基础设置”入口').toHaveCount(1)
-  await expect(basicSettingsStep, '“基础设置”步骤应可点击').toBeVisible()
-  await basicSettingsStep.click()
-  await page.waitForURL(/\/form-activity\/settings\?[^#]*id=/, { timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) })
-  await page.locator('[data-menu-key="collect-contact"]').click()
-
+  await openFormSettingsStep(page, 'settings', { logger, label: '进入基础设置' })
   const switchControl = page.getByRole('switch', { name: /是否收录联系人开关|是否收錄聯絡人開關/ })
+  await openFormSettingsMenu(page, 'collect-contact', { ready: switchControl, logger, label: '打开收录联系人设置' })
   await expect(switchControl, '联系人收录开关应显示').toBeVisible()
   const state = await switchControl.getAttribute('data-state')
   if (state !== 'checked' && await switchControl.getAttribute('aria-checked') !== 'true') {

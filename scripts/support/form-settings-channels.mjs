@@ -1,18 +1,11 @@
 import { expect } from './recorded-expect.mjs'
 import { expect as flowExpect, scaleTimeout } from './environment-timeouts.mjs'
 import { clickWhenReady, waitForUiReady } from './ui-readiness.mjs'
+import { openFormSettingsMenu, openFormSettingsStep, reloadSavedFormPage } from './form-navigation.mjs'
 
 const CONFIRM = /^(确认|確認)$/
 const CATEGORY = /^(设置分类|設定分類)$/
 const TAG = /^(设置标签|設定標籤)(?:[:：].*)?$/
-
-function settingsUrl(page, formId, { step, menu } = {}) {
-  const url = new URL('/form-activity/settings', page.url())
-  url.searchParams.set('id', formId)
-  if (step) url.searchParams.set('step', step)
-  if (menu) url.hash = menu
-  return url.toString()
-}
 
 function waitForResponse(page, method, path, payloadPredicate = () => true) {
   return page.waitForResponse(response => {
@@ -58,7 +51,7 @@ async function savedConfig(page, formId, action, key, label) {
 async function reloadDetail(page, formId, label) {
   const [response] = await Promise.all([
     waitForResponse(page, 'GET', `/be/form/${formId}`),
-    page.reload({ waitUntil: 'domcontentloaded' }),
+    reloadSavedFormPage(page, { label }),
   ])
   const body = await successfulBody(response, label)
   await waitForUiReady(page)
@@ -80,15 +73,15 @@ export async function configureFormClassificationTags({
   page, formId, logger = () => {}, assertOptionsAvailable = assertClassificationTagOptionsAvailable,
 }) {
   logger('info', '进入分类与标签，读取当前环境可选分类和标签')
+  const control = page.getByRole('switch', { name: /^(启用分类标签设定|啟用分類標籤設定)$/ })
   const [categoryResponse, tagResponse] = await Promise.all([
     waitForResponse(page, 'GET', '/be/form/contact/category'),
     waitForResponse(page, 'GET', '/be/form/contact/tag'),
-    page.goto(settingsUrl(page, formId, { menu: 'category' }), { waitUntil: 'domcontentloaded' }),
+    openFormSettingsMenu(page, 'category', { ready: control, formId, logger, label: '打开分类与标签设定' }),
   ])
   const categories = metadataOptions(await successfulBody(categoryResponse, '读取联系人分类'))
   const tags = metadataOptions(await successfulBody(tagResponse, '读取联系人标签'))
   await waitForUiReady(page)
-  const control = page.getByRole('switch', { name: /^(启用分类标签设定|啟用分類標籤設定)$/ })
   await flowExpect(control, '分类标签设定开关应可见').toBeVisible()
   const selectedCategory = categories[0] ?? null
   const selectedTag = tags[0] ?? null
@@ -167,8 +160,8 @@ export async function configureFormClassificationTags({
 /** Return the independently persisted channel for the public filling workflow. */
 export async function createFormShareChannel({ page, formId, channelName, logger = () => {} }) {
   flowExpect(String(channelName ?? '').trim(), '新建分享渠道需要本次运行的渠道名称').not.toBe('')
-  await page.goto(settingsUrl(page, formId, { step: 'share' }), { waitUntil: 'domcontentloaded' })
   const cards = page.locator('.share-link-channel-card')
+  await openFormSettingsStep(page, 'share', { ready: cards.first(), formId, logger, label: '进入分享与传播' })
   await flowExpect(cards.first(), '分享页必须至少显示默认渠道').toBeVisible()
   await waitForUiReady(page)
   const previousCount = await cards.count()

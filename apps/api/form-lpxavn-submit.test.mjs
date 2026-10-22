@@ -708,6 +708,104 @@ test('records HTTP and business failures from a public mutation and continues', 
   }
 })
 
+test('preserves a public mutation action error when the page closes during the action', async () => {
+  const browser = await launchGoogleChrome()
+  try {
+    const page = await browser.newPage()
+    const actionError = new Error('pagination click failed after page closure')
+
+    await assert.rejects(waitForPublicMutation(
+      page,
+      'https://public.example.test',
+      '/validate-page',
+      async () => {
+        await page.close()
+        await new Promise((resolve) => setTimeout(resolve, 50))
+        throw actionError
+      },
+      '第二页校验',
+    ), (error) => error === actionError)
+  } finally {
+    await browser.close()
+  }
+})
+
+test('handles late public mutation wait failures after an action has already failed', async () => {
+  const browser = await launchGoogleChrome()
+  try {
+    const page = await browser.newPage()
+    const actionError = new Error('pagination button is not ready')
+
+    await assert.rejects(waitForPublicMutation(
+      page,
+      'https://public.example.test',
+      '/validate-page',
+      async () => { throw actionError },
+      '第二页校验',
+    ), (error) => error === actionError)
+    await page.close()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  } finally {
+    await browser.close()
+  }
+})
+
+test('reports public mutation page closure without blaming local validation', async () => {
+  const browser = await launchGoogleChrome()
+  try {
+    const page = await browser.newPage()
+
+    await assert.rejects(waitForPublicMutation(
+      page,
+      'https://public.example.test',
+      '/validate-page',
+      () => page.close(),
+      '第二页校验',
+    ), (error) => (
+      /第二页校验.*已关闭/.test(error.message)
+      && !/本地校验拦截/.test(error.message)
+      && /Target page, context or browser has been closed/.test(error.cause?.message)
+    ))
+  } finally {
+    await browser.close()
+  }
+})
+
+test('handles a public mutation request timeout before its action settles and reports visible validation errors', async () => {
+  const browser = await launchGoogleChrome()
+  try {
+    const page = await browser.newPage()
+    await page.setContent('<div class="fb-runtime-field-error">请填写姓名</div>')
+
+    await assert.rejects(waitForPublicMutation(
+      page,
+      'https://public.example.test',
+      '/validate-page',
+      () => page.waitForTimeout(4_200),
+      '第二页校验',
+    ), /第二页校验未发送请求，页面仍被本地校验拦截；可见错误：请填写姓名/)
+  } finally {
+    await browser.close()
+  }
+})
+
+test('reports a public mutation timeout without inventing a validation failure', async () => {
+  const browser = await launchGoogleChrome()
+  try {
+    const page = await browser.newPage()
+
+    await assert.rejects(waitForPublicMutation(
+      page,
+      'https://public.example.test',
+      '/validate-page',
+      async () => {},
+      '第二页校验',
+    ), /第二页校验等待请求超时，未观察到匹配请求/)
+  } finally {
+    await browser.close()
+  }
+})
+
 test('selects the traditional Chinese address alias and returns the rendered value', async () => {
   const browser = await launchGoogleChrome()
   try {

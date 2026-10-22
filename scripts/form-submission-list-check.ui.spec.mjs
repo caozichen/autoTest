@@ -495,8 +495,8 @@ async function targetRowFromIndex(page, targetIndex) {
   return row
 }
 
-async function detailNameValues(page) {
-  const rows = page.locator('.reply-kv__row').filter({
+async function detailNameValues(page, scope = page) {
+  const rows = scope.locator('.reply-kv__row').filter({
     has: page.locator('.reply-kv__label').filter({ hasText: NAME_LABEL_PATTERN }),
   })
   await expect(rows, '提报详情页应显示题组外和题组内两个姓名字段').toHaveCount(2)
@@ -539,19 +539,36 @@ async function openAndInspectDetail(page, {
     }),
     '目标提报详情接口',
   ))
+  const listUrl = page.url()
+  const drawer = page.locator('.submission-reply-detail-drawer .arco-drawer:visible')
   await clickWhenReady(viewButton)
   const expectedUrl = exactDetailUrl(siteOrigin, formId, submissionId)
-  await flowExpect(page, '查看操作必须进入目标提报 ID 的精确详情 URL')
-    .toHaveURL(expectedUrl, { timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) })
-  await expect(page, '详情 URL 中的提报 ID 和 fid 应与流水线参数完全一致').toHaveURL(expectedUrl)
+  await flowExpect.poll(async () => (
+    await drawer.isVisible() || page.url() === expectedUrl
+  ), {
+    message: '查看操作应打开提报详情抽屉或目标提报的精确详情页',
+    timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS),
+  }).toBe(true)
+  const presentation = await drawer.isVisible() ? 'drawer' : 'page'
+  const detailRoot = presentation === 'drawer' ? drawer : page.locator('main')
+  if (presentation === 'drawer') {
+    await recordAndRequireCount(drawer, 1, '查看操作应唯一打开提报详情抽屉')
+    await recordAndRequireVisible(drawer, '提报详情抽屉应可见')
+    await expect(page, '打开详情抽屉应保留原列表地址').toHaveURL(listUrl)
+  } else {
+    await expect(page, '详情 URL 中的提报 ID 和 fid 应与流水线参数完全一致').toHaveURL(expectedUrl)
+  }
   const detailResponse = await detailResponsePromise
   const detailInspection = await readJsonResponse(detailResponse, '目标提报详情接口')
-  expect(
-    objectContainsExactValue(detailInspection.body, submissionId),
-    '详情接口响应应包含目标提报 ID',
-  ).toBe(true)
+  await flowExpect(detailInspection.httpSucceeded && detailInspection.businessSucceeded,
+    '详情接口必须成功后才能校验目标答卷').toBe(true)
+  const submission = detailInspection.body?.data?.submission ?? detailInspection.body?.data
+  expect(submission?.id, '详情接口答卷 ID 应与目标提报 ID 完全一致').toBe(submissionId)
+  await flowExpect(submission?.id, '答卷 ID 不匹配时应停止后续详情检查').toBe(submissionId)
+  expect(submission?.form_id, '详情接口答卷所属表单 ID 应与当前表单完全一致').toBe(formId)
+  await flowExpect(submission?.form_id, '答卷所属表单不匹配时应停止后续详情检查').toBe(formId)
 
-  const names = await detailNameValues(page)
+  const names = await detailNameValues(page, detailRoot)
   const answerNames = []
   const collectNames = (value) => {
     if (!value || typeof value !== 'object') return
@@ -578,14 +595,27 @@ async function openAndInspectDetail(page, {
     expect(actualGroupName, '详情页题组内姓名应与前序填写脚本输出一致')
       .toBe(assertions.groupContactName)
   }
-  await expect.poll(() => page.locator('main img[src]').evaluateAll((images) => (
+  await expect.poll(() => detailRoot.locator('img[src]').evaluateAll((images) => (
     images.filter((image) => !image.complete || image.naturalWidth === 0).length
   )), {
     message: '离开详情前图片应完成加载且可解码，避免导航打断图片请求',
     timeout: scaleTimeout(10000),
   }).toBe(0)
+  const detailUrl = page.url()
+  if (presentation === 'drawer') {
+    const closeButton = drawer.locator('.arco-drawer-close-btn')
+    await recordAndRequireCount(closeButton, 1, '详情抽屉应唯一显示关闭按钮')
+    await recordAndRequireVisible(closeButton, '详情抽屉关闭按钮应可见')
+    await clickWhenReady(closeButton)
+    await expect(drawer, '关闭后提报详情抽屉应消失').toBeHidden()
+    await flowExpect(drawer, '详情抽屉必须关闭后才能继续列表操作').toBeHidden()
+    await expect(page, '关闭详情抽屉应保留原列表地址').toHaveURL(listUrl)
+    await flowExpect(page, '关闭详情抽屉后必须仍在原列表').toHaveURL(listUrl)
+    await recordAndRequireVisible(row, '关闭详情抽屉后目标提报行应仍然可见')
+  }
   return {
-    detailUrl: expectedUrl,
+    presentation,
+    detailUrl,
     detailResponse: detailInspection.body,
     actualPrimaryName,
     actualGroupName,
@@ -794,7 +824,28 @@ function responseHasSearch(response, basePredicate, searchKey, expectedValue, mo
   return values.includes(expectedValue)
 }
 
+async function closeFilterDropdowns(filterCard) {
+  const page = filterCard.page()
+  const dropdowns = page.locator('.arco-select-dropdown:visible')
+  if (!await dropdowns.count()) return
+  await page.keyboard.press('Escape')
+  // Arco multiple selects can remain open after choosing an option. An outside
+  // click also works during error recovery, without invoking another query/reset.
+  await filterCard.locator('.filter-card-label').first().click({ timeout: scaleTimeout(ACTION_TIMEOUT_MS) })
+  await flowExpect(dropdowns, '继续筛选前应关闭所有选择下拉层').toHaveCount(0, { timeout: scaleTimeout(ACTION_TIMEOUT_MS) })
+}
+
+async function currentFilterDropdown(page, label) {
+  // Arco teleports its popup to body without an aria-controls relationship.
+  // Reset/cleanup guarantees none were open before this control was used; require
+  // exactly one new popup rather than picking first/last among unrelated popups.
+  const dropdown = page.locator('.arco-select-dropdown:visible')
+  await flowExpect(dropdown, `${label}应唯一打开当前筛选控件的下拉层`).toHaveCount(1, { timeout: scaleTimeout(ACTION_TIMEOUT_MS) })
+  return dropdown
+}
+
 async function resetFilterCard(filterCard) {
+  await closeFilterDropdowns(filterCard)
   const resetButton = filterCard.getByRole('button', { name: RESET_PATTERN })
   await recordAndRequireCount(resetButton, 1, '每项检索前应有唯一重置按钮')
   await clickWhenReady(resetButton)
@@ -807,7 +858,7 @@ async function resetFilterCard(filterCard) {
 async function chooseSource(page, field, expectedSource) {
   const selectControl = field.locator('.filter-card-control').first()
   await clickWhenReady(selectControl)
-  const dropdown = page.locator('.arco-select-dropdown:visible')
+  const dropdown = await currentFilterDropdown(page, '来源筛选')
   await recordAndRequireVisible(dropdown, '来源筛选下拉选项应可见')
   const exactOption = dropdown.locator('.arco-select-option').filter({
     hasText: new RegExp(`^\\s*${escapeRegExp(expectedSource)}\\s*$`),
@@ -854,6 +905,7 @@ async function runSubmissionSearchCase(page, {
   queryOverride,
   expectMatch = true,
   sampleValue,
+  channelTitle,
 }) {
   const field = filterCard.locator('.filter-card-field').filter({
     has: page.locator('.filter-card-label').filter({
@@ -884,9 +936,34 @@ async function runSubmissionSearchCase(page, {
     emptySample = !value || value === '-' || value === '—'
     const choiceControl = field.locator('.arco-select')
     const isChoice = await choiceControl.count() > 0
-    const selectedLabel = isChoice ? value.split(/[,，]/)[0].trim() : value
-    expectedQueryValue = emptySample ? `autotest_absent_${submissionId}` : createFuzzyProbe(selectedLabel)
+    const isChannelChoice = isChoice && definition.value === 'filter[channel]'
+    const selectedLabel = isChannelChoice ? channelTitle || value
+      : isChoice ? value.split(/[,，]/)[0].trim() : value
+    expectedQueryValue = emptySample ? `autotest_absent_${submissionId}`
+      : definition.value === 'filter[channel]' ? value : createFuzzyProbe(selectedLabel)
     if (queryOverride !== undefined) expectedQueryValue = queryOverride
+    if (isChannelChoice && !expectMatch) {
+      // A select cannot submit arbitrary codes. Keep these exact-match negative
+      // checks as read-only API probes, without claiming the UI was filtered.
+      const endpoint = new URL(buildAdminApiPath(apiContext.apiPathPrefix,
+        `/be/form/${encodeURIComponent(apiContext.formId)}/submission`), apiContext.origin)
+      endpoint.search = new URLSearchParams({ page: '1', per_page: '20', [definition.value]: expectedQueryValue }).toString()
+      logger('info', '渠道下拉不接受任意 code，使用只读接口验证反向筛选', { value: expectedQueryValue })
+      const responsePromise = suppressUnhandledRejection(page.waitForResponse(response => responseHasSearch(
+        response, candidate => isSubmissionListResponse(candidate, apiContext), definition.value, expectedQueryValue, 'text',
+      ), { timeout: scaleTimeout(SEARCH_RESPONSE_TIMEOUT_MS) }))
+      await page.evaluate(async ({ url, timeout }) => {
+        const response = await fetch(url, { headers: { Authorization: localStorage.getItem('token') ?? '' },
+          signal: AbortSignal.timeout(timeout) })
+        await response.text()
+      }, { url: endpoint.toString(), timeout: scaleTimeout(SEARCH_RESPONSE_TIMEOUT_MS) })
+      const response = await responsePromise
+      assertIsolatedSearch(response, definition.value, '渠道反向筛选接口')
+      const inspection = await readJsonResponse(response, '渠道反向筛选接口')
+      const located = locateSubmissionRecord(inspection.body, submissionId)
+      expect(located.targetIndex, '不匹配的渠道 code 应在接口结果中排除目标提报').toBe(-1)
+      return inspection.httpSucceeded && inspection.businessSucceeded && located.targetIndex === -1
+    }
     if (emptySample) {
       logger('warning', '目标记录该字段为空：验证非空条件应排除目标记录，无法验证正向模糊命中', {
         field: definition.label,
@@ -897,20 +974,23 @@ async function runSubmissionSearchCase(page, {
     const controlCount = await controls.count()
     expect(controlCount, `检索字段“${definition.label}”应提供唯一文本输入控件`).toBe(1)
     if (controlCount !== 1) return false
-    await controls.fill(expectedQueryValue)
+    const inputValue = isChannelChoice ? selectedLabel : expectedQueryValue
+    await controls.fill(inputValue)
     await expect(
       controls,
-      `检索字段“${definition.label}”应回显中间片段模糊搜索值`,
-    ).toHaveValue(expectedQueryValue)
+      `检索字段“${definition.label}”应回显查询值`,
+    ).toHaveValue(inputValue)
     if (isChoice) {
       mode = 'choice'
-      const dropdown = page.locator('.arco-select-dropdown:visible')
+      const dropdown = await currentFilterDropdown(page, `“${definition.label}”`)
       await recordAndRequireVisible(dropdown, `“${definition.label}”应显示模糊搜索匹配选项`)
       const option = dropdown.locator('.arco-select-option').filter({
         hasText: new RegExp(`^\\s*${escapeRegExp(selectedLabel)}\\s*$`),
       })
-      await recordAndRequireCount(option, 1, `“${definition.label}”中间片段应匹配目标选项`)
-      await clickWhenReady(option, { timeout: scaleTimeout(5000) })
+      await recordAndRequireCount(option, 1, isChannelChoice
+        ? `“${definition.label}”应按完整渠道名称匹配唯一选项`
+        : `“${definition.label}”中间片段应匹配目标选项`)
+      await clickWhenReady(option, { timeout: scaleTimeout(ACTION_TIMEOUT_MS) })
       await clickWhenReady(field.locator('.filter-card-label'))
       await expect(choiceControl, `“${definition.label}”应回显已确认的目标选项`).toContainText(selectedLabel)
     }
@@ -941,8 +1021,11 @@ async function runSubmissionSearchCase(page, {
   assertIsolatedSearch(response, definition.value, `提报筛选“${definition.label}”`)
   const actualValues = queryValues(requestUrl, definition.value)
   expect(actualValues.length, `检索字段“${definition.label}”请求应携带非空查询参数`).toBeGreaterThan(0)
-  if (mode === 'text') {
-    expect(actualValues, `检索字段“${definition.label}”请求值应为输入的中间片段`).toContain(expectedQueryValue)
+  if (mode === 'choice' && definition.value === 'filter[channel]') {
+    expect(actualValues, '渠道选择后请求必须且只能携带目标渠道 code').toEqual([expectedQueryValue])
+    if (actualValues.length !== 1 || actualValues[0] !== expectedQueryValue) return false
+  } else if (mode === 'text') {
+    expect(actualValues, `检索字段“${definition.label}”请求值应与输入值一致`).toContain(expectedQueryValue)
   }
   if (emptySample || !expectMatch) {
     const inspection = await readJsonResponse(response, `提报字段“${definition.label}”反向筛选接口`)
@@ -1012,6 +1095,7 @@ async function runAllSubmissionSearches(page, {
         submissionId,
         primaryContactName,
         logger,
+        channelTitle: searchSamples?.channel?.title,
       }
       const sample = definition.value === 'filter[channel]' ? searchSamples?.channel?.code
         : definition.value === 'filter[remark]' ? searchSamples?.remark : undefined
@@ -1019,8 +1103,10 @@ async function runAllSubmissionSearches(page, {
       if (sample === undefined) succeeded = await runSubmissionSearchCase(page, args)
       else {
         const outcomes = []
+        const exactMatch = definition.value === 'filter[channel]'
         for (const [scenario, queryOverride, expectMatch] of [
-          ['完整值命中', sample, true], ['中间片段命中', createFuzzyProbe(sample), true],
+          ['完整值命中', sample, true],
+          [exactMatch ? '部分 code 排除' : '中间片段命中', createFuzzyProbe(sample), !exactMatch],
           ['无关值排除', `autotest_absent_${submissionId}`, false],
         ]) {
           logger('info', `验证${definition.label}：${scenario}`, { field: definition.value })
@@ -1043,6 +1129,10 @@ async function runAllSubmissionSearches(page, {
         key: definition.value,
         reason: error instanceof Error ? error.message : String(error),
       })
+    } finally {
+      // Preserve a failed field's evidence, but never let its popup contaminate
+      // the next field. If dismissal fails, stop instead of cascading failures.
+      if (!signal?.aborted && !page.isClosed()) await closeFilterDropdowns(filterCard)
     }
   }
   await resetFilterCard(filterCard)
@@ -1467,27 +1557,30 @@ export async function run({
 
     throwIfRunAborted(signal)
     networkObserver.setPhase('返回提报列表')
-    const returnedListPromise = suppressUnhandledRejection(waitForRequiredResponse(
-      page,
-      (response) => isSubmissionListResponse(response, apiContext),
-      '返回后的提报列表接口',
-    ))
-    const returnedCountsPromise = suppressUnhandledRejection(waitForRequiredResponse(
-      page,
-      (response) => isTabCountsResponse(response, apiContext),
-      '返回后的 Tab 计数接口',
-    ))
-    await page.goto(listUrl, { waitUntil: 'domcontentloaded' })
-    const [returnedListResponse, returnedCountsResponse] = await Promise.all([
-      returnedListPromise,
-      returnedCountsPromise,
-    ])
-    const returnedInspection = await inspectListResponse(returnedListResponse, {
-      submissionId,
-      expectedNames: [primaryContactName],
-      label: '返回后的提报列表接口',
-    })
-    await readJsonResponse(returnedCountsResponse, '返回后的 Tab 计数接口')
+    let returnedInspection = initialInspection
+    if (detail.presentation === 'page') {
+      const returnedListPromise = suppressUnhandledRejection(waitForRequiredResponse(
+        page,
+        (response) => isSubmissionListResponse(response, apiContext),
+        '返回后的提报列表接口',
+      ))
+      const returnedCountsPromise = suppressUnhandledRejection(waitForRequiredResponse(
+        page,
+        (response) => isTabCountsResponse(response, apiContext),
+        '返回后的 Tab 计数接口',
+      ))
+      await page.goto(listUrl, { waitUntil: 'domcontentloaded' })
+      const [returnedListResponse, returnedCountsResponse] = await Promise.all([
+        returnedListPromise,
+        returnedCountsPromise,
+      ])
+      returnedInspection = await inspectListResponse(returnedListResponse, {
+        submissionId,
+        expectedNames: [primaryContactName],
+        label: '返回后的提报列表接口',
+      })
+      await readJsonResponse(returnedCountsResponse, '返回后的 Tab 计数接口')
+    }
     const returnedTargetRow = await targetRowFromIndex(page, returnedInspection.targetIndex)
     await expect(returnedTargetRow, '返回列表后目标行应包含题组外姓名').toContainText(primaryContactName)
 
@@ -1568,6 +1661,7 @@ export async function run({
       submissionId,
       listUrl,
       detailUrl: detail.detailUrl,
+      detailPresentation: detail.presentation,
       title: topInformation.actualTitle,
       primaryContactName,
       groupContactName,

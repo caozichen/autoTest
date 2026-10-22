@@ -5,6 +5,7 @@ import { createFormSettingsContent } from './form-settings-content.mjs'
 import { configureFormClassificationTags, createFormShareChannel } from './form-settings-channels.mjs'
 import { configureManagerNotification, configureAutomationNotification, assertPublishedNotification, assertNotificationPersistence } from './form-settings-notifications.mjs'
 import { withAgreementLocaleCompatibility } from './form-agreement-locale.mjs'
+import { openFormSettingsMenu, openFormSettingsStep, reloadSavedFormPage } from './form-navigation.mjs'
 
 const CONFIRM = /^(确认|確定|確認|确定)$/
 
@@ -127,8 +128,8 @@ export function assertSubmissionQuotaPersistence(actual, expected, label = '填�
 }
 
 export async function configureSubmissionQuota({ page, formId, content, inspectBusinessResponse, readForm, logger }) {
-  await clickWhenReady(page.locator('[data-menu-key="form"]'))
   const toggle = page.getByRole('switch', { name: /^(?:填报数量限制开关|填報數量限制開關|Submission quantity limit switch)$/i })
+  await openFormSettingsMenu(page, 'form', { ready: toggle, formId, logger, label: '打开填报数量限制设定' })
   await setSwitch(toggle, true, '填报数量限制')
   const container = toggle.locator('xpath=ancestor::div[contains(@class,"fb-rounded-lg")][1]')
   const quantity = container.getByPlaceholder(/^(?:请输入数字|請輸入數字|Please enter a number)$/i)
@@ -149,8 +150,7 @@ export async function configureSubmissionQuota({ page, formId, content, inspectB
   const savedParameters = payload.submit_config?.submission_quota
   assertSubmissionQuotaPersistence(savedParameters, content, '填报数量限制保存请求')
   assertSubmissionQuotaPersistence((await readForm()).submit_config?.submission_quota, content, '填报数量限制独立接口回读')
-  await waitForUiReady(page)
-  await page.reload({ waitUntil: 'domcontentloaded' })
+  await reloadSavedFormPage(page, { label: '填报数量限制保存后刷新回读' })
   await flowExpect(toggle, '刷新后数量限制开关应保持开启').toHaveAttribute('data-state', 'checked')
   await expect(container, '刷新后应显示完整已满提示').toContainText(content.message)
   await expect(container.getByText(String(content.quota), { exact: true }), '刷新后应显示上限 2').toBeVisible()
@@ -160,8 +160,8 @@ export async function configureSubmissionQuota({ page, formId, content, inspectB
 }
 
 export async function configureAgreement({ page, formId, content, inspectBusinessResponse, readForm, logger }) {
-  await clickWhenReady(page.locator('[data-menu-key="form"]'))
   const toggle = page.getByRole('switch', { name: /(?:用户|用戶)(?:隐私|隱私)?(?:协议|協議)(?:开关|開關)/ })
+  await openFormSettingsMenu(page, 'form', { ready: toggle, formId, logger, label: '打开用户协议设定' })
   await setSwitch(toggle, true, '用户协议')
   const nameInput = page.getByPlaceholder(/请输入自定义协议名称|請輸入自訂協議名稱/)
   if (!await nameInput.isVisible()) await clickWhenReady(page.getByRole('button', { name: /编辑.*协议|編輯.*協議/ }))
@@ -276,11 +276,16 @@ export async function configurePostCollectionSettings({
     page, formId, logger, assertOptionsAvailable: assertClassificationTagOptionsAvailable,
   })
   setPhase('管理者通知')
-  await clickWhenReady(page.locator('[data-menu-key="permission"]'))
+  await openFormSettingsMenu(page, 'permission', {
+    ready: page.getByRole('switch', { name: /^(管理者通知开关|管理者通知開關|Manager notification switch)$/i }),
+    formId, logger, label: '打开权限设定和管理者通知',
+  })
   const managerNotification = await configureManagerNotification({ page, formId, content: content.managerNotification, logger, readForm })
   setPhase('消息及触达')
-  const messageStep = page.locator('.form-activity-step-nav .form-activity-step').filter({ hasText: /消息及触达|訊息及觸達/ })
-  await clickWhenReady(messageStep)
+  await openFormSettingsStep(page, 'message', {
+    ready: page.getByRole('switch', { name: /^(启用消息通知|啟用訊息通知|Enable message notifications)$/i }),
+    formId, logger, label: '进入消息及触达',
+  })
   const automationNotification = await configureAutomationNotification({ page, formId, content: content.automationNotification, logger, readForm })
   const feedback = await configureFeedback({ ...args, content: content.feedback, imagePath, uploadImage })
   const promotion = await configurePromotion({ ...args, content: content.promotion })

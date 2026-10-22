@@ -117,6 +117,10 @@ async function createFixtureRun(t, {
   extendedFields = false,
   preparedSamples = false,
   missingPreparedSamples = false,
+  detailPresentation = 'page',
+  detailMismatch = '',
+  choiceDropdownBehavior = '',
+  channelDropdownBehavior = '',
 } = {}) {
   const fixture = createSubmissionListFixture({
     formId: `list-check-${scenario}`,
@@ -165,6 +169,9 @@ async function createFixtureRun(t, {
             ? '/fixture-assets/missing-submission-list.css'
             : '/fixture-assets/submission-list.css',
           injectWriteRequest: scenario === 'write-request' && listDocumentCount === 1,
+          detailPresentation,
+          choiceDropdownBehavior,
+          channelDropdownBehavior,
         })
         if (scenario === 'slow-checkbox-navigation') {
           html = html.replace('</body>', `<script>
@@ -233,7 +240,17 @@ async function createFixtureRun(t, {
         request.method === 'GET'
         && url.pathname === `/api/be/form/${fixture.formId}/submission/${fixture.submissionId}`
       ) {
-        sendJson(response, fixture.detailResponse)
+        const detail = structuredClone(fixture.detailResponse)
+        if (detailMismatch === 'submission') detail.data.id = 'another-submission'
+        if (detailMismatch === 'form') detail.data.form_id = 'another-form'
+        if (detailPresentation === 'drawer') {
+          detail.data = {
+            submission: detail.data,
+            requested_submission_id: fixture.submissionId,
+            requested_form_id: fixture.formId,
+          }
+        }
+        sendJson(response, detail)
         return
       }
       if (
@@ -245,6 +262,10 @@ async function createFixtureRun(t, {
       }
       if (request.method === 'GET' && url.pathname === '/api/be/checkbox-ready') {
         setTimeout(() => sendJson(response, { code: 0, data: {} }), 2000)
+        return
+      }
+      if (request.method === 'GET' && url.pathname === '/api/be/choice-options-ready') {
+        setTimeout(() => sendJson(response, { code: 0, data: {} }), 6500)
         return
       }
       if (request.method === 'GET' && url.pathname === '/fixture-assets/checkbox-navigation') {
@@ -350,6 +371,65 @@ test('waits for the final contact reset response body before sealing network evi
   assert.deepEqual(failureAssertions(result), [])
   assert.ok(result.apiResponses.every(entry => !entry.incomplete))
 })
+
+test('choice filtering waits beyond five seconds for option readiness and dismisses a multi-select popup', async t => {
+  const { result, observedRequests } = await createFixtureRun(t, {
+    scenario: 'slow-choice-options', extendedFields: true, preparedSamples: true,
+    choiceDropdownBehavior: 'slow',
+  })
+  assert.equal(result.status, 'passed', [result.error, JSON.stringify(failureAssertions(result))].filter(Boolean).join('\n'))
+  assert.equal(result.result.successfulSubmissionSearchCount, result.result.submissionSearchCount)
+  assert.ok(observedRequests.some(entry => requestUrl(entry).pathname === '/api/be/choice-options-ready'))
+})
+
+test('a missing choice remains a failure but its leftover popup cannot break subsequent choice filters', async t => {
+  const { result, observedRequests, fixture } = await createFixtureRun(t, {
+    scenario: 'missing-choice-option', extendedFields: true, preparedSamples: true,
+    choiceDropdownBehavior: 'missing-first',
+  })
+  const failures = failureAssertions(result)
+  assert.equal(result.status, 'partial')
+  assert.ok(failures.length > 0)
+  assert.ok(failures.every(entry => entry.name.includes('单项选择')), JSON.stringify(failures))
+  assert.equal(result.result.successfulSubmissionSearchCount, result.result.submissionSearchCount - 1)
+  assert.equal(result.result.successfulContactSearchCount, 3)
+  for (const field of SEARCHABLE_SUBMISSION_FIELDS.filter(field => /^(checkbox|select)_/.test(field.itemKey))) {
+    assert.ok(observedRequests.some(entry => requestUrl(entry).pathname === `/api/be/form/${fixture.formId}/submission`
+      && filterKeys(requestUrl(entry)).includes(field.filterKey)), field.label)
+  }
+})
+
+test('inspects the target detail drawer and closes it before continuing list checks without reloading', async t => {
+  const { result, observedRequests, fixture, listDocumentCount } = await createFixtureRun(t, {
+    scenario: 'detail-drawer',
+    detailPresentation: 'drawer',
+  })
+  assert.equal(result.status, 'passed', [result.error, JSON.stringify(failureAssertions(result))].filter(Boolean).join('\n'))
+  assert.equal(result.result.detailPresentation, 'drawer')
+  assert.equal(new URL(result.result.detailUrl).pathname, '/form-activity/submission/preview')
+  assert.equal(listDocumentCount, 1)
+  assert.equal(result.result.submissionSearchCount, SUBMISSION_SEARCH_FIELDS.length)
+  assert.equal(result.result.contactSearchCount, 3)
+  assert.ok(result.assertions.some(entry => entry.name === '关闭后提报详情抽屉应消失' && entry.status === 'passed'))
+  assert.ok(observedRequests.some(entry => entry.path === `/api/be/form/${fixture.formId}/submission/${fixture.submissionId}`))
+  assert.ok(observedRequests.every(entry => !requestUrl(entry).pathname.includes('/preview/reply/')))
+})
+
+for (const detailMismatch of ['submission', 'form']) {
+  test(`rejects a detail drawer with the wrong ${detailMismatch} id even when metadata contains the requested ids`, async t => {
+    const { result } = await createFixtureRun(t, {
+      scenario: `detail-drawer-wrong-${detailMismatch}`,
+      detailPresentation: 'drawer',
+      detailMismatch,
+    })
+    assert.equal(result.status, 'failed')
+    assert.match(result.error, /答卷.*不匹配/)
+    assert.ok(failureAssertions(result).some(entry => entry.name.includes(
+      detailMismatch === 'submission' ? '答卷 ID 应与目标提报 ID 完全一致' : '答卷所属表单 ID 应与当前表单完全一致',
+    )))
+    assert.ok(!result.assertions.some(entry => entry.name === '关闭后提报详情抽屉应消失'))
+  })
+}
 
 test('keeps checkbox selections and linked search fields while an unrelated navigation stalls', async t => {
   const { result, observedRequests } = await createFixtureRun(t, { scenario: 'slow-checkbox-navigation' })
@@ -642,7 +722,7 @@ test('checks all 24 basic and 20 search fields including channel and remarks', a
   assert.ok(result.logs.some((log) => log.message.includes('目标记录该字段为空')))
 })
 
-test('prepared channel and remark samples require full/fuzzy matches, unrelated exclusion and cleared-filter recovery', async t => {
+test('prepared channel uses exact codes while remarks use fuzzy matches, with exclusion and cleared-filter recovery', async t => {
   const { result, observedRequests, fixture } = await createFixtureRun(t, {
     scenario: 'prepared-samples', extendedFields: true, preparedSamples: true, locale: 'zh-CN',
   })
@@ -654,6 +734,8 @@ test('prepared channel and remark samples require full/fuzzy matches, unrelated 
     assert.ok(values.includes(createFuzzyProbe(sample)))
     assert.ok(values.includes(`autotest_absent_${fixture.submissionId}`))
   }
+  assert.ok(result.assertions.some(entry => entry.name.includes('不匹配的非空搜索“channel”应排除目标提报') && entry.status === 'passed'))
+  assert.ok(result.assertions.some(entry => entry.name.includes('提报筛选“备注信息”接口响应列表应包含目标提报 ID') && entry.status === 'passed'))
   assert.equal(result.logs.some(log => log.message.includes('目标记录该字段为空')), false)
   assert.ok(result.assertions.some(entry => entry.name.includes('清空筛选后应恢复目标行') && entry.status === 'passed'))
 })
@@ -666,6 +748,33 @@ test('a missing prepared channel fails rather than downgrading to empty-value ne
   assert.ok(failureAssertions(result).some(item => item.name.includes('响应列表应包含目标提报 ID')))
   assert.equal(result.logs.some(log => log.message.includes('目标记录该字段为空')), false)
   assert.equal(result.result.submissionSearchCount, 20, '渠道正向检索失败后应继续检索其余字段')
+})
+
+test('channel dropdown selects its exact title and submits its code, retaining negative API checks and reset recovery', async t => {
+  const { result, observedRequests, fixture } = await createFixtureRun(t, {
+    scenario: 'channel-dropdown', extendedFields: true, preparedSamples: true, locale: 'zh-CN',
+    channelDropdownBehavior: 'normal', detailPresentation: 'drawer',
+  })
+  assert.equal(result.status, 'passed', [result.error, JSON.stringify(failureAssertions(result))].filter(Boolean).join('\n'))
+  assert.equal(result.result.successfulSubmissionSearchCount, 20)
+  const values = observedRequests.map(requestUrl).flatMap(url => url.searchParams.getAll('filter[channel]'))
+  assert.deepEqual(values, ['runChannel4291', createFuzzyProbe('runChannel4291'), `autotest_absent_${fixture.submissionId}`])
+  assert.ok(result.assertions.some(entry => entry.name.includes('渠道选择后请求必须且只能携带目标渠道 code') && entry.status === 'passed'))
+  assert.equal(result.assertions.filter(entry => entry.name === '不匹配的渠道 code 应在接口结果中排除目标提报' && entry.status === 'passed').length, 2)
+  assert.ok(result.assertions.some(entry => entry.name.includes('channel清空筛选后应恢复目标行') && entry.status === 'passed'))
+  assert.ok(result.apiResponses.some(entry => new URL(entry.url).searchParams.get('filter[channel]') === createFuzzyProbe('runChannel4291') && !entry.incomplete))
+  assert.equal(result.result.unexpectedMutationCount, 0)
+})
+
+test('channel dropdown rejects a matching title mapped to the wrong code and continues later filters', async t => {
+  const { result } = await createFixtureRun(t, {
+    scenario: 'wrong-channel-code', extendedFields: true, preparedSamples: true, locale: 'zh-CN',
+    channelDropdownBehavior: 'wrong-code',
+  })
+  assert.equal(result.status, 'partial')
+  assert.ok(failureAssertions(result).some(entry => entry.name.includes('渠道选择后请求必须且只能携带目标渠道 code')))
+  assert.equal(result.result.successfulSubmissionSearchCount, 19)
+  assert.ok(result.assertions.some(entry => entry.name.includes('备注信息清空筛选后应恢复目标行') && entry.status === 'passed'))
 })
 
 test('derives the form title and both contact names from the exact target detail when assertions are empty', async (t) => {

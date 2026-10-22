@@ -5,6 +5,7 @@ import { expect as flowExpect, scaleTimeout } from './support/environment-timeou
 import { launchGoogleChrome } from './support/google-chrome.mjs'
 import { expect } from './support/recorded-expect.mjs'
 import { clickWhenReady, observeUiReadiness } from './support/ui-readiness.mjs'
+import { navigateForm, publishFormFromDesigner } from './support/form-navigation.mjs'
 import {
   dismissFormOnboarding,
   fetchFormDetail,
@@ -353,6 +354,7 @@ export async function run({
     await titleEditor.fill(modifiedName)
     await titleEditor.blur()
     await expect(titleEditor, '模板标题应增加修改标识').toHaveText(modifiedName)
+    await flowExpect(titleEditor, '模板标题必须完成编辑后才能保存').toHaveText(modifiedName)
     const itemsPromise = waitForExactResponse(page, 'PUT', `/be/form/${designerId}/items`)
     const configPromise = waitForExactResponse(page, 'PUT', `/be/form/${designerId}/config`)
     await clickWhenReady(page.getByRole('button', { name: /^(保存|儲存)$/ }))
@@ -366,9 +368,14 @@ export async function run({
     expect(editedDetail.title, '模板草稿详情应保存新名称').toBe(modifiedName)
 
     observer.setPhase('返回系统模板管理并核对名称')
-    await clickWhenReady(page.locator('.designer-back-btn'))
-    await page.waitForURL(/\/form-activity\/list(?:[/?#]|$)/, {
-      timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS),
+    const designerOrigin = new URL(page.url()).origin
+    await navigateForm(page, {
+      formId: designerId, logger, label: '保存模板后返回列表',
+      action: options => clickWhenReady(page.locator('.designer-back-btn'), options),
+      arrived: () => {
+        const url = new URL(page.url())
+        return url.origin === designerOrigin && /^\/form-activity\/list\/?$/.test(url.pathname)
+      },
     })
     await dismissFormOnboarding(page)
     records = await openTemplateTab(page, apiBaseUrl, authorization)
@@ -453,24 +460,15 @@ export async function run({
     expect(createdDetail.status, '模板新建表单应先处于草稿状态').toBe('draft')
 
     observer.setPhase('发布模板生成的表单')
-    const publishButton = page.getByRole('button', { name: /^(发布|發[佈布])$/ })
-    await flowExpect(publishButton, '模板新建表单必须允许直接发布').toBeVisible()
-    const publishPromise = waitForExactResponse(page, 'POST', `/be/form/${createdFormId}/publish`)
-    await clickWhenReady(publishButton)
-    const unsavedDialog = page.locator('.arco-modal:visible')
-      .filter({ hasText: /表单未保存|表[單格]未儲存|保存后发布|儲存後發[佈布]/ })
-    if (await unsavedDialog.isVisible().catch(() => false)) {
-      await expect(unsavedDialog, '未保存时应提示先保存再发布').toBeVisible()
-      const itemsPromise = waitForExactResponse(page, 'PUT', `/be/form/${createdFormId}/items`)
-      const configPromise = waitForExactResponse(page, 'PUT', `/be/form/${createdFormId}/config`)
-      await clickWhenReady(unsavedDialog.getByRole('button', { name: /保存后发布|儲存後發[佈布]/ }))
-      const itemsResponse = await itemsPromise
-      await businessResponse(itemsResponse, '发布前保存模板表单题目')
-      await businessResponse(await configPromise, '发布前保存模板表单配置')
+    const publication = await publishFormFromDesigner(page, {
+      formId: createdFormId, logger, label: '发布模板生成的表单',
+    })
+    if (publication.savedBeforePublish) {
+      const itemsResponse = publication.saves.find(entry => entry.kind === 'items').response
       expect(requestJson(itemsResponse, '发布前保存题目').title,
         '发布前保存的标题应继承模板').toBe(modifiedName)
     }
-    const publishBody = await businessResponse(await publishPromise, '发布模板生成的表单')
+    const publishBody = publication.body
     expect(String(publishBody?.data?.form_id ?? ''), '发布响应应指向模板新建表单')
       .toBe(createdFormId)
     expect(publishBody?.data?.status, '发布响应状态应为已发布').toBe('published')
