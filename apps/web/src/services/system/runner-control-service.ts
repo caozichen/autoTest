@@ -1,3 +1,5 @@
+import type { RunnerResourceSnapshot } from './runner-resources'
+
 export type RunnerServiceStatus = 'online' | 'offline'
 
 export interface RunnerServiceState {
@@ -12,6 +14,7 @@ export interface RunnerStartResult {
 }
 
 export interface RunnerControlService {
+  getResources(): Promise<RunnerResourceSnapshot>
   getStatus(): Promise<RunnerServiceState>
   start(): Promise<RunnerStartResult>
 }

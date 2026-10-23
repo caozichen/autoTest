@@ -19,8 +19,9 @@ import {
   ScriptConfigStoreError,
 } from './script-config-repository.mjs'
 import { retainScriptRejectionGuard } from './script-rejection-boundary.mjs'
-import { executeRegisteredScript, validateRegisteredRunRequest } from './script-runner.mjs'
+import { executeRegisteredScript, validateRegisteredRunRequest, scriptRuntimeDiagnostics } from './script-runner.mjs'
 import { WEB_ORIGINS } from '../../shared/local-services.mjs'
+import { createRunnerResourceSampler } from './runner-resources.mjs'
 import { AppSettingsStore } from './app-settings-store.mjs'
 
 const DEFAULT_HOST = '127.0.0.1'
@@ -436,6 +437,7 @@ export function createRunnerServer({
         run.executionId,
         run.scriptId,
         result.artifacts,
+        { includeRecord: false },
       )).then(
         () => null,
         (error) => error ?? new Error('未知错误'),
@@ -561,10 +563,11 @@ export function createRunnerServer({
     if (!run.historyPersistence) {
       run.historyPersistence = Promise.resolve().then(async () => {
         if (run.failBatchOnError && run.status === 'failed') {
-          await storedRunRecords.failPipelineStep?.(run.executionId, run.scriptId, run.historyResult)
+          await storedRunRecords.failPipelineStep?.(run.executionId, run.scriptId, run.historyResult, { includeRecord: false })
         }
-        await storedRunRecords.saveRunnerStepResult?.(run.executionId, run.scriptId, run.historyResult)
+        await storedRunRecords.saveRunnerStepResult?.(run.executionId, run.scriptId, run.historyResult, { includeRecord: false })
         run.historyPersisted = true
+        run.historyResult = null
       }).catch((error) => {
         run.historyPersistence = null
         if (!run.historyWarningLogged) {
@@ -591,7 +594,7 @@ export function createRunnerServer({
 
   async function executeLiveRun(run, payload) {
     try {
-      void storedRunRecords.startRunnerStep?.(run.executionId, run.scriptId).catch((error) => {
+      void storedRunRecords.startRunnerStep?.(run.executionId, run.scriptId, { includeRecord: false }).catch((error) => {
         appendRunLog(run, 'warning', `执行登记写入失败：${error.message}`)
       })
       const rawResult = await scriptExecutor(payload, {
@@ -645,12 +648,40 @@ export function createRunnerServer({
         responseBody: cancelled ? run.result : { ok: false, error: message },
       }
     } finally {
-      run.historyResult = redactRunRecordResult(run.result, payload.context, run.secretValues)
-      if (!run.pipelineManaged) await persistRunResult(run)
+      if (!run.pipelineManaged) {
+        run.historyResult = redactRunRecordResult(run.result, payload.context, run.secretValues)
+        await persistRunResult(run)
+      }
       run.settled = true
       scheduleRunCleanup(run)
     }
   }
+
+  const sampleResources = createRunnerResourceSampler({
+    records: storedRunRecords, directory: storedRunRecords.directory ?? runRecordDirectory,
+    capacity: () => ({
+      pipelines: { label: '活动流水线', value: pipelineRunner.list().length },
+      maxPipelines: { label: '并发流水线上限', value: MAX_CONCURRENT_PIPELINES },
+      liveScripts: { label: '执行中脚本 / 含清理', value: [...activeRuns.values()].filter(run => !run.settled).length },
+      snapshots: { label: '执行快照', value: activeRuns.size },
+      pendingResults: { label: '待保存执行结果', value: [...activeRuns.values()].filter(run => run.result && !run.historyPersisted && !run.pipelineManaged).length },
+      pendingFinalizations: { label: '待保存批次终态', value: pipelineRunner.list().filter(run => run.phase === 'saving').length },
+      scriptImports: { label: '累计脚本模块加载尝试 / 非缓存数', value: scriptRuntimeDiagnostics().scriptModuleImportAttempts },
+      pendingStops: { label: '预登记停止请求', value: pendingRunCancellations.size + pendingExecutionCancellations.size },
+    }),
+    limits: {
+      ...Object.fromEntries(Object.entries(scriptRuntimeDiagnostics()).filter(([id]) => id !== 'scriptModuleImportAttempts').map(([id, value]) => [id, {
+        label: ({ defaultScriptTimeoutMs: '默认脚本超时 / HK 按现有规则放大', minScriptTimeoutMs: '脚本配置超时下限', maxScriptTimeoutMs: '脚本配置超时上限',
+          abortCleanupTimeoutMs: '取消清理等待期限', maxApiResponses: 'API 响应采集上限', maxResourceResponses: '资源响应采集上限', maxNetworkFailureLogs: '网络失败日志上限', maxCaptureTextLength: '采集文本长度上限 / 字符' })[id],
+        value, unit: id.endsWith('Ms') ? 'ms' : 'count',
+      }])),
+      runSnapshotTtlMs: { label: '结束快照保留期', value: runSnapshotTtlMs },
+      cancellationWaitTimeoutMs: { label: '停止等待超时', value: cancellationWaitTimeoutMs },
+      artifactPersistenceTimeoutMs: { label: '制品保存等待期限', value: artifactPersistenceDeadlineMs },
+      maintenanceIntervalMs: { label: '存储维护间隔', value: recordMaintenanceIntervalMs },
+      recordRequestLimitBytes: { label: '记录请求体上限', value: RUN_RECORD_REQUEST_LIMIT_BYTES, unit: 'bytes' },
+    },
+  })
 
   const server = createServer(async (request, response) => {
   const origin = request.headers.origin || ''
@@ -676,6 +707,12 @@ export function createRunnerServer({
   }
 
   const pathname = requestPath(request.url)
+
+  if (request.method === 'GET' && pathname === '/runner/resources') {
+    response.setHeader('Cache-Control', 'no-store')
+    sendJson(response, 200, await sampleResources(), origin)
+    return
+  }
 
   if (pathname === '/app-settings' || pathname === '/app-settings/migrations/local-storage-v1') {
     try {
@@ -1178,9 +1215,11 @@ export function createRunnerServer({
       }
       await pipelineRunner.maintain()
       for (const run of activeRuns.values()) {
-        if (run.pipelineManaged && !run.settled) {
+        const durationMs = Math.round(performance.now() - run.startedAt)
+        if (run.pipelineManaged && !run.settled && (storedRunRecords.shouldUpdateRunnerProgress?.(
+          run.executionId, run.scriptId, { durationMs, logCount: run.logs.length }) ?? true)) {
           await storedRunRecords.updateRunnerProgress?.(run.executionId, run.scriptId,
-            redactRunRecordResult({ logs: run.logs, durationMs: Math.round(performance.now() - run.startedAt) }, {}, run.secretValues))
+            redactRunRecordResult({ logs: run.logs, durationMs }, {}, run.secretValues))
         }
       }
       await storedRunRecords.maintainRunnerRecords?.()

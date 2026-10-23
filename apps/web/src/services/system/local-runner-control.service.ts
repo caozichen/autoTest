@@ -1,3 +1,5 @@
+import { parseRunnerResources, type RunnerResourceSnapshot } from './runner-resources'
+
 import type {
   RunnerControlService,
   RunnerServiceState,
@@ -39,6 +41,22 @@ export class LocalRunnerControlService implements RunnerControlService {
       endpoint: this.healthUrl,
       checkedAt: new Date().toISOString(),
     }
+  }
+
+  async getResources(): Promise<RunnerResourceSnapshot> {
+    const controller = new AbortController()
+    const timeout = globalThis.setTimeout(() => controller.abort(), this.healthTimeoutMs)
+    try {
+      const response = await this.fetcher(new URL('/runner/resources', this.healthUrl).href, {
+        headers: { Accept: 'application/json' }, signal: controller.signal, cache: 'no-store',
+      })
+      if (!response.ok) throw new Error(`资源采集失败（HTTP ${response.status}），请检查 Runner 版本及状态`)
+      return parseRunnerResources(await response.json())
+    } catch (error) {
+      if (controller.signal.aborted) throw new Error('资源采集超时，请稍后手动刷新')
+      if (error instanceof TypeError) throw new Error('无法连接 Runner，资源数据不可用')
+      throw error
+    } finally { globalThis.clearTimeout(timeout) }
   }
 
   async start(): Promise<RunnerStartResult> {

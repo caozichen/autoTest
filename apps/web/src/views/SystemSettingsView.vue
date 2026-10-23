@@ -1,16 +1,32 @@
 <script setup lang="ts">
 import { formatDateTime } from '@/utils/date-time'
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { Connection, VideoPlay } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 
 import type { RunnerServiceState } from '@/services/system/runner-control-service'
+import RunnerResourcesPanel from '@/components/RunnerResourcesPanel.vue'
+import type { RunnerResourceSnapshot } from '@/services/system/runner-resources'
 import { services } from '@/services/container'
 
 const runner = ref<RunnerServiceState | null>(null)
 const checking = ref(true)
 const starting = ref(false)
-let refreshTimer: number | null = null
+const resources = ref<RunnerResourceSnapshot | null>(null)
+const resourceError = ref<string | null>(null)
+const collecting = ref(false)
+
+async function refreshResources(): Promise<void> {
+  if (collecting.value) return
+  collecting.value = true
+  try {
+    const [, snapshot] = await Promise.all([refreshStatus(), services.runnerControl.getResources()])
+    resources.value = snapshot
+    resourceError.value = null
+  } catch (error) {
+    resourceError.value = error instanceof Error ? error.message : 'Runner 资源采集失败'
+  } finally { collecting.value = false }
+}
 
 const statusLabel = computed(() => {
   if (checking.value && !runner.value) return '检查中'
@@ -44,6 +60,7 @@ async function startRunner(): Promise<void> {
     const result = await services.runnerControl.start()
     const latestState = await refreshStatus()
     if (latestState.status !== 'online') throw new Error('启动命令已完成，但 Runner 仍未通过健康检查')
+    await refreshResources()
     ElMessage.success(result.status === 'already-running' ? 'Runner 已经在线' : 'Runner 已启动')
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : 'Runner 启动失败')
@@ -53,14 +70,7 @@ async function startRunner(): Promise<void> {
   }
 }
 
-onMounted(() => {
-  void refreshStatus()
-  refreshTimer = window.setInterval(() => void refreshStatus(), 5_000)
-})
-
-onBeforeUnmount(() => {
-  if (refreshTimer !== null) window.clearInterval(refreshTimer)
-})
+onMounted(() => { void refreshResources() })
 </script>
 
 <template>
@@ -108,6 +118,7 @@ onBeforeUnmount(() => {
         {{ buttonLabel }}
       </el-button>
     </section>
+    <RunnerResourcesPanel :snapshot="resources" :loading="collecting" :error="resourceError" @refresh="refreshResources" />
   </div>
 </template>
 

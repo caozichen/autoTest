@@ -194,7 +194,7 @@ export class PipelineRunner {
         }
         if (execution.controller.signal.aborted) result = { ...result, status: 'interrupted', cancelled: true, ok: false, error: execution.reason || '用户已停止流水线' }
         execution.pendingStep = { scriptId: step.scriptId, result: sanitize(result) }
-        await this.records.saveRunnerStepResult(execution.id, step.scriptId, execution.pendingStep.result, { replace: true })
+        await this.records.saveRunnerStepResult(execution.id, step.scriptId, execution.pendingStep.result, { replace: true, includeRecord: false })
         execution.pendingStep = null
         if (result.status === 'failed' || result.status === 'interrupted') {
           terminal = { status: result.status, error: sanitize(result.error || '脚本执行失败'), stage: 'script' }
@@ -218,10 +218,11 @@ export class PipelineRunner {
   }
   async saveFinal(execution) {
     if (execution.pendingStep) {
-      await this.records.saveRunnerStepResult(execution.id, execution.pendingStep.scriptId, execution.pendingStep.result, { replace: true })
+      await this.records.saveRunnerStepResult(execution.id, execution.pendingStep.scriptId, execution.pendingStep.result, { replace: true, includeRecord: false })
       execution.pendingStep = null
     }
     await this.records.finishRunnerPipeline(execution.id, () => execution.pendingFinish, {
+      includeRecord: false,
       onCommitted: () => { execution.finishCommitted = true },
     })
     this.active.delete(execution.id)

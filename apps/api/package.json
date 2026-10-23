@@ -7,6 +7,6 @@
     "dev": "node server.mjs",
     "start": "node server.mjs",
     "test": "node --test --test-concurrency=1",
-    "typecheck": "node --check server.mjs && node --check app-settings-store.mjs && node --check ../../shared/local-services.mjs && node --check script-runner.mjs && node --check script-rejection-boundary.mjs && node --check pipeline-runner.mjs && node --check pipeline-login.mjs && node --check pipeline-values.mjs"
+    "typecheck": "node --check server.mjs && node --check run-record-store.mjs && node --check runner-resources.mjs && node --check app-settings-store.mjs && node --check ../../shared/local-services.mjs && node --check script-runner.mjs && node --check script-rejection-boundary.mjs && node --check pipeline-runner.mjs && node --check pipeline-login.mjs && node --check pipeline-values.mjs"
   }
 }

@@ -6,6 +6,12 @@ export const SAFE_RUN_RECORD_ID_PATTERN = /^[a-zA-Z0-9_-]{8,100}$/
 
 const RUN_RECORD_STATUSES = new Set(['running', 'passed', 'failed', 'partial', 'interrupted'])
 const RUN_SCRIPT_STATUSES = new Set(['queued', 'running', 'passed', 'partial', 'failed', 'skipped'])
+export const DEFAULT_DETAIL_CACHE_ENTRIES = 4
+export const DEFAULT_DETAIL_CACHE_BYTES = 32 * 1024 * 1024
+export const PROGRESS_FLUSH_INTERVAL_MS = 5_000
+export const HEARTBEAT_INTERVAL_MS = 10_000
+const SUMMARY_VERSION = 1
+const MAX_SUMMARY_BYTES = 2 * 1024 * 1024
 const DEFAULT_STALE_AFTER_MS = 4 * 60 * 60 * 1_000
 const ARTIFACT_SCOPE_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$/
 const ARTIFACT_TYPE_PATTERN = /^[a-zA-Z][a-zA-Z0-9_-]{0,99}$/
@@ -198,7 +204,7 @@ function validateCounts(counts) {
   if (counts.partial !== undefined) assertCount(counts.partial, 'counts.partial')
 }
 
-export function validateRunRecord(value) {
+export function validateRunRecord(value, { clone = true } = {}) {
   if (!isObject(value)) throw new RunRecordStoreError('运行记录必须是对象')
   if (value.schemaVersion !== 1) throw new RunRecordStoreError('运行记录 schemaVersion 无效')
   assertSafeRunRecordId(value.id)
@@ -227,7 +233,7 @@ export function validateRunRecord(value) {
   if (!isObject(value.analysis)) throw new RunRecordStoreError('analysis必须是对象')
 
   try {
-    const record = JSON.parse(JSON.stringify(value))
+    const record = clone ? JSON.parse(JSON.stringify(value)) : value
     let migratedLegacyAssertionFailure = false
     for (const script of record.scripts) {
       if (
@@ -363,6 +369,12 @@ function recoveredAnalysis(scripts, logs) {
   }
 }
 
+// Mutations own the record, script shells and top-level logs. Large immutable
+// evidence arrays are shared until replaced; never mutate a committed snapshot.
+function copyForMutation(source) {
+  return { ...source, scripts: source.scripts.map(script => ({ ...script })), logs: [...source.logs] }
+}
+
 export class RunRecordFileStore {
   constructor({
     directory,
@@ -371,6 +383,9 @@ export class RunRecordFileStore {
     logIdFactory = randomUUID,
     now = () => new Date(),
     staleAfterMs = DEFAULT_STALE_AFTER_MS,
+    detailCacheEntries = DEFAULT_DETAIL_CACHE_ENTRIES,
+    detailCacheBytes = DEFAULT_DETAIL_CACHE_BYTES,
+    progressFlushIntervalMs = PROGRESS_FLUSH_INTERVAL_MS,
     warningLogger = (message) => console.warn(message),
   }) {
     if (typeof directory !== 'string' || !directory) {
@@ -386,7 +401,30 @@ export class RunRecordFileStore {
     this.runnerActivityProvider = null
     this.runnerRecoveryGraceMs = 120_000
     this.runnerStartedAt = this.now().getTime()
+    // records contains summaries only, including private recovery metadata.
     this.records = new Map()
+    this.details = new Map()
+    // A corrective terminal write can fail after replacing the file. Retain the
+    // last published source until the correction commits, even with cache off.
+    this.pendingTerminalSources = new Map()
+    this.fileStats = new Map()
+    this.summarySizes = new Map()
+    this.historyDiskBytes = 0
+    this.summaryBytes = 0
+    if (!Number.isSafeInteger(detailCacheEntries) || detailCacheEntries < 0
+      || !Number.isSafeInteger(detailCacheBytes) || detailCacheBytes < 0
+      || !Number.isFinite(progressFlushIntervalMs) || progressFlushIntervalMs <= 0) throw new Error('记录缓存和进度间隔配置无效')
+    this.detailCacheEntries = detailCacheEntries
+    this.detailCacheLimitBytes = detailCacheBytes
+    this.detailCacheBytes = 0
+    this.cacheStats = { hits: 0, misses: 0, evictions: 0, oversized: 0 }
+    this.progressFlushIntervalMs = progressFlushIntervalMs
+    this.pendingProgress = new Map()
+    this.progressJobs = new Map()
+    this.progressStates = new Map()
+    this.writeStats = { queuedMutations: 0, writing: false, writes: 0, failures: 0, bytesWritten: 0,
+      indexWrites: 0, indexFailures: 0, lastIndexFailureAt: null, coalescedProgress: 0, lastSuccessAt: null, lastFailureAt: null, lastWriteDurationMs: null }
+    this.initialization = { status: 'not-started', legacyReads: 0, summaryReads: 0, invalidRecords: 0 }
     this.readyPromise = null
     this.mutationTail = Promise.resolve()
   }
@@ -412,7 +450,7 @@ export class RunRecordFileStore {
     assertSafeRunRecordId(id)
     return this.mutate(async () => {
       await this.recoverStaleRecords()
-      const record = this.records.get(id)
+      const record = await this.readDetail(id)
       return record ? structuredClone(record) : null
     })
   }
@@ -444,7 +482,7 @@ export class RunRecordFileStore {
     }
 
     return this.mutate(async () => {
-      const current = this.records.get(id)
+      const current = await this.readDetail(id)
       if (!current) {
         throw new RunRecordStoreError('运行记录不存在', {
           statusCode: 404,
@@ -513,16 +551,22 @@ export class RunRecordFileStore {
   }
 
   async maintainRunnerRecords() {
-    return this.mutate(() => this.recoverStaleRecords())
+    return this.mutate(async () => {
+      for (const key of this.pendingProgress.keys()) {
+        const previous = this.progressStates.get(key)
+        if (!previous || this.now().getTime() - previous.savedAt >= this.progressFlushIntervalMs) await this.flushProgress(key)
+      }
+      await this.recoverStaleRecords()
+    })
   }
 
-  async startRunnerStep(recordId, scriptId) {
+  async startRunnerStep(recordId, scriptId, { includeRecord = true } = {}) {
     return this.mutate(async () => {
-      const source = this.records.get(recordId)
+      const source = await this.readDetail(recordId)
       if (!source || source.status !== 'running') return null
-      const record = structuredClone(source)
+      const record = copyForMutation(source)
       const script = record.scripts.find((item) => item.id === scriptId)
-      if (!script) return null
+      if (!script || !['queued', 'running'].includes(script.status)) return null
       const timestamp = this.now().toISOString()
       script.status = 'running'
       record.runnerTracking = { ...record.runnerTracking, lastSeenAt: timestamp }
@@ -530,18 +574,18 @@ export class RunRecordFileStore {
       record.revision += 1
       record.counts = recoveredCounts(record.scripts)
       await this.writeRecord(record)
-      return structuredClone(record)
+      return includeRecord ? structuredClone(record) : null
     })
   }
 
   // Results are already redacted by the server. Keep the batch open for frontend
   // variable extraction/validation; reconciliation finalizes it only after a grace period.
-  async saveRunnerStepResult(recordId, scriptId, result, { replace = false } = {}) {
+  async saveRunnerStepResult(recordId, scriptId, result, { replace = false, includeRecord = true } = {}) {
     return this.mutate(async () => {
-      const source = this.records.get(recordId)
+      const source = await this.readDetail(recordId)
       if (!source || source.status !== 'running') return null
-      if (!replace && source.runnerTracking?.completedScriptIds?.includes(scriptId)) return structuredClone(source)
-      const record = structuredClone(source)
+      if (!replace && source.runnerTracking?.completedScriptIds?.includes(scriptId)) return includeRecord ? structuredClone(source) : null
+      const record = copyForMutation(source)
       const script = record.scripts.find((item) => item.id === scriptId)
       if (!script) return null
       const timestamp = this.now().toISOString()
@@ -550,13 +594,13 @@ export class RunRecordFileStore {
         : ['passed', 'partial', 'failed'].includes(result.status) ? result.status
           : result.ok ? 'passed' : 'failed'
       script.durationMs = result.durationMs ?? 0
-      script.logs = (result.logs ?? []).map((log) => ({ ...log, id: this.logIdFactory(),
+      script.logs = structuredClone(result.logs ?? []).map((log) => ({ ...log, id: this.logIdFactory(),
         scope: 'script', scriptRecordId: script.recordId, scriptName: script.name }))
       for (const field of ['assertions', 'apiResponses', 'resourceResponses', 'networkSummary']) {
         if (result[field] !== undefined) script[field] = structuredClone(result[field])
       }
       const artifacts = new Map((script.artifacts ?? []).map((artifact) => [`${artifact.attemptId}:${artifact.relativePath}`, artifact]))
-      for (const artifact of result.artifacts ?? []) artifacts.set(`${artifact.attemptId}:${artifact.relativePath}`, artifact)
+      for (const artifact of structuredClone(result.artifacts ?? [])) artifacts.set(`${artifact.attemptId}:${artifact.relativePath}`, artifact)
       script.artifacts = [...artifacts.values()]
       if (result.result && typeof result.result === 'object') script.output = structuredClone(result.result)
       if (result.error) script.error = result.error
@@ -570,16 +614,16 @@ export class RunRecordFileStore {
       record.durationMs = durationBetween(record.startedAt, timestamp)
       record.counts = recoveredCounts(record.scripts)
       record.analysis = recoveredAnalysis(record.scripts, record.logs)
-      await this.writeRecord(validateRunRecord(record))
-      return structuredClone(record)
+      await this.writeRecord(validateRunRecord(record, { clone: false }))
+      return includeRecord ? structuredClone(record) : null
     })
   }
 
   async appendRunnerLog(id, { level = 'info', scope = 'runner', message }) {
     return this.mutate(async () => {
-      const source = this.records.get(id)
+      const source = await this.readDetail(id)
       if (!source || source.status !== 'running') return
-      const record = structuredClone(source)
+      const record = copyForMutation(source)
       record.logs.push({ id: this.logIdFactory(), timestamp: this.now().toISOString(), level, scope, message })
       record.updatedAt = this.now().toISOString()
       record.revision += 1
@@ -588,41 +632,77 @@ export class RunRecordFileStore {
     })
   }
 
-  async updateRunnerProgress(id, scriptId, result) {
-    return this.mutate(async () => {
-      const source = this.records.get(id)
-      if (!source || source.status !== 'running') return
-      const record = structuredClone(source)
-      const script = record.scripts.find(item => item.id === scriptId)
-      if (!script || !['queued', 'running'].includes(script.status)) return
-      if (script.logs.length === result.logs.length && result.durationMs - (script.durationMs ?? 0) < 5000) return
-      script.status = 'running'
-      script.durationMs = result.durationMs
-      script.logs = result.logs.map(log => ({ ...log, id: this.logIdFactory(), scope: 'script',
-        scriptRecordId: script.recordId, scriptName: script.name }))
-      record.logs = [...record.logs.filter(log => log.scope !== 'script'), ...record.scripts.flatMap(item => item.logs)]
-      record.updatedAt = this.now().toISOString()
-      record.revision += 1
-      record.durationMs = durationBetween(record.startedAt, record.updatedAt)
-      record.counts = recoveredCounts(record.scripts)
-      record.analysis = recoveredAnalysis(record.scripts, record.logs)
-      await this.writeRecord(record)
-    })
+  shouldUpdateRunnerProgress(id, scriptId, { durationMs, logCount }) {
+    const record = this.records.get(id)
+    const script = record?.scripts.find(item => item.id === scriptId)
+    if (!record || record.status !== 'running' || !script || !['queued', 'running'].includes(script.status)) return false
+    const previous = this.progressStates.get(`${id}:${scriptId}`) ?? { logCount: 0, durationMs: script.durationMs ?? 0 }
+    return previous.logCount !== logCount || durationMs - previous.durationMs >= this.progressFlushIntervalMs
   }
 
-  async finishRunnerPipeline(id, finalState = {}, { onCommitted } = {}) {
+  updateRunnerProgress(id, scriptId, result) {
+    assertSafeRunRecordId(id)
+    if (this.initialization.status === 'ready' && !this.shouldUpdateRunnerProgress(id, scriptId, { durationMs: result.durationMs, logCount: result.logs.length })) return Promise.resolve()
+    const key = `${id}:${scriptId}`
+    // Capture only the small progress payload; completed step evidence stays shared.
+    if (this.pendingProgress.has(key)) this.writeStats.coalescedProgress += 1
+    this.pendingProgress.set(key, { id, scriptId, result: { durationMs: result.durationMs, logs: structuredClone(result.logs) } })
+    if (this.progressJobs.has(key)) return this.progressJobs.get(key)
+    const previous = this.progressStates.get(key)
+    if (previous && this.now().getTime() - previous.savedAt < this.progressFlushIntervalMs) return Promise.resolve()
+    const job = this.mutate(() => this.flushProgress(key)).finally(() => this.progressJobs.delete(key))
+    this.progressJobs.set(key, job)
+    return job
+  }
+
+  async flushProgress(key) {
+    const pending = this.pendingProgress.get(key)
+    if (!pending) return
+    const { id, scriptId, result } = pending
+    const summary = this.records.get(id)
+    const summaryScript = summary?.scripts.find(script => script.id === scriptId)
+    if (!summary || summary.status !== 'running' || !['queued', 'running'].includes(summaryScript?.status)) {
+      this.pendingProgress.delete(key)
+      return
+    }
+    const source = await this.readDetail(id)
+    const previousScript = source.scripts.find(item => item.id === scriptId)
+    if (previousScript.logs.length === result.logs.length && result.durationMs - (previousScript.durationMs ?? 0) < this.progressFlushIntervalMs) {
+      if (this.pendingProgress.get(key) === pending) this.pendingProgress.delete(key)
+      return
+    }
+    const record = copyForMutation(source)
+    const script = record.scripts.find(item => item.id === scriptId)
+    script.status = 'running'
+    script.durationMs = result.durationMs
+    script.logs = result.logs.map(log => ({ ...log, id: this.logIdFactory(), scope: 'script',
+      scriptRecordId: script.recordId, scriptName: script.name }))
+    record.logs = [...record.logs.filter(log => log.scope !== 'script'), ...record.scripts.flatMap(item => item.logs)]
+    record.updatedAt = this.now().toISOString()
+    record.runnerTracking = { ...record.runnerTracking, lastSeenAt: record.updatedAt }
+    record.revision += 1
+    record.durationMs = durationBetween(record.startedAt, record.updatedAt)
+    record.counts = recoveredCounts(record.scripts)
+    record.analysis = recoveredAnalysis(record.scripts, record.logs)
+    await this.writeRecord(record)
+    this.progressStates.set(key, { logCount: result.logs.length, durationMs: result.durationMs, savedAt: this.now().getTime() })
+    if (this.pendingProgress.get(key) === pending) this.pendingProgress.delete(key)
+  }
+
+  async finishRunnerPipeline(id, finalState = {}, { onCommitted, includeRecord = true } = {}) {
     return this.mutate(async () => {
-      const source = this.records.get(id)
+      const source = await this.readDetail(id)
       const readFinalState = typeof finalState === 'function' ? finalState : () => finalState
       if (!source || source.status !== 'running') {
         if (source) onCommitted?.()
-        return source ? structuredClone(source) : null
+        return source && includeRecord ? structuredClone(source) : null
       }
+      this.pendingTerminalSources.set(id, source)
       let revision = source.revision
       while (true) {
         const terminal = readFinalState()
         const { status, error, stage = 'runner' } = terminal
-        const record = structuredClone(source)
+        const record = copyForMutation(source)
         record.status = status ?? recoveredTerminalStatus(record.scripts)
         if (error) { record.error = error; record.failureStage = stage }
         record.scripts = record.scripts.map(script => ['queued', 'running'].includes(script.status)
@@ -640,32 +720,33 @@ export class RunRecordFileStore {
         // Hold the mutation queue and the execution lease until a stop received
         // during disk I/O is durable, so readers cannot observe the superseded result.
         if (readFinalState() === terminal) {
-          this.records.set(record.id, record)
+          this.publishRecord(record)
           onCommitted?.()
-          return structuredClone(record)
+          await this.writeSummary(record.id)
+          return includeRecord ? structuredClone(record) : null
         }
       }
     })
   }
 
-  async failPipelineStep(recordId, scriptId, result) {
+  async failPipelineStep(recordId, scriptId, result, { includeRecord = true } = {}) {
     assertSafeRunRecordId(recordId)
     return this.mutate(async () => {
-      const current = this.records.get(recordId)
-      if (!current || current.status !== 'running') return current ? structuredClone(current) : null
+      const current = await this.readDetail(recordId)
+      if (!current || current.status !== 'running') return current && includeRecord ? structuredClone(current) : null
       if (!current.scripts.some((script) => script.id === scriptId)) return null
-      const record = structuredClone(current)
+      const record = copyForMutation(current)
       const finishedAt = this.now().toISOString()
       record.scripts = record.scripts.map((script) => {
         if (script.id !== scriptId) return script.status === 'queued'
           ? { ...script, status: 'skipped', error: '前序步骤失败，未执行' } : script
-        const logs = (result.logs ?? []).map((log) => ({ ...log, id: this.logIdFactory(),
+        const logs = structuredClone(result.logs ?? []).map((log) => ({ ...log, id: this.logIdFactory(),
           scope: 'script', scriptRecordId: script.recordId, scriptName: script.name }))
         return { ...script, status: 'failed', durationMs: result.durationMs, logs,
-          error: result.error || '脚本执行失败', assertions: result.assertions ?? [],
-          apiResponses: result.apiResponses ?? [], resourceResponses: result.resourceResponses ?? [],
-          ...(result.networkSummary ? { networkSummary: result.networkSummary } : {}),
-          artifacts: result.artifacts ?? script.artifacts ?? [] }
+          error: result.error || '脚本执行失败', assertions: structuredClone(result.assertions ?? []),
+          apiResponses: structuredClone(result.apiResponses ?? []), resourceResponses: structuredClone(result.resourceResponses ?? []),
+          ...(result.networkSummary ? { networkSummary: structuredClone(result.networkSummary) } : {}),
+          artifacts: structuredClone(result.artifacts ?? script.artifacts ?? []) }
       })
       record.status = 'failed'
       record.failureStage = 'runner'
@@ -680,28 +761,28 @@ export class RunRecordFileStore {
           message: 'Runner 已保存自动化批次失败终态，后续步骤不再执行' }]
       record.counts = recoveredCounts(record.scripts)
       record.analysis = recoveredAnalysis(record.scripts, record.logs)
-      validateRunRecord(record)
+      validateRunRecord(record, { clone: false })
       await this.writeRecord(record)
-      return structuredClone(record)
+      return includeRecord ? structuredClone(record) : null
     })
   }
 
-  async mergeScriptArtifacts(recordId, scriptId, artifacts) {
+  async mergeScriptArtifacts(recordId, scriptId, artifacts, { includeRecord = true } = {}) {
     assertSafeRunRecordId(recordId)
     assertString(scriptId, 'scriptId')
     if (!Array.isArray(artifacts)) throw new RunRecordStoreError('artifacts必须是数组')
 
     return this.mutate(async () => {
-      const current = this.records.get(recordId)
+      const current = await this.readDetail(recordId)
       if (!current) return null
       const scriptIndex = current.scripts.findIndex((script) => script.id === scriptId)
       if (scriptIndex < 0) return null
       artifacts.forEach((artifact, artifactIndex) => (
         validateArtifact(artifact, scriptIndex, artifactIndex, recordId, scriptId)
       ))
-      if (artifacts.length === 0) return structuredClone(current)
+      if (artifacts.length === 0) return includeRecord ? structuredClone(current) : null
 
-      const record = structuredClone(current)
+      const record = copyForMutation(current)
       const script = record.scripts[scriptIndex]
       const merged = new Map(script.artifacts.map((artifact) => [
         `${artifact.attemptId}:${artifact.relativePath}`,
@@ -711,13 +792,13 @@ export class RunRecordFileStore {
         merged.set(`${artifact.attemptId}:${artifact.relativePath}`, structuredClone(artifact))
       }
       const nextArtifacts = [...merged.values()]
-      if (JSON.stringify(nextArtifacts) === JSON.stringify(script.artifacts)) return structuredClone(current)
+      if (JSON.stringify(nextArtifacts) === JSON.stringify(script.artifacts)) return includeRecord ? structuredClone(current) : null
 
       script.artifacts = nextArtifacts
       record.revision += 1
       record.updatedAt = this.now().toISOString()
       await this.writeRecord(record)
-      return structuredClone(record)
+      return includeRecord ? structuredClone(record) : null
     })
   }
 
@@ -727,21 +808,156 @@ export class RunRecordFileStore {
   }
 
   async loadFromDisk() {
-    await this.fileSystem.mkdir(this.directory, { recursive: true, mode: 0o700 })
-    const entries = await this.fileSystem.readdir(this.directory, { withFileTypes: true })
-    for (const entry of entries) {
-      if (!entry.isFile() || !entry.name.endsWith('.json')) continue
-      const id = entry.name.slice(0, -'.json'.length)
-      if (!SAFE_RUN_RECORD_ID_PATTERN.test(id)) continue
-      try {
-        const raw = await this.fileSystem.readFile(join(this.directory, entry.name), 'utf8')
-        const record = validateRunRecord(JSON.parse(raw))
-        if (record.id !== id) throw new Error('文件名与记录 ID 不一致')
-        this.records.set(id, record)
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        this.warningLogger(`[runner] 跳过无效运行记录 ${entry.name}: ${message}`)
+    this.initialization.status = 'loading'
+    try {
+      await this.fileSystem.mkdir(this.directory, { recursive: true, mode: 0o700 })
+      const entries = await this.fileSystem.readdir(this.directory, { withFileTypes: true })
+      for (const entry of entries) {
+        if (!entry.isFile() || !entry.name.endsWith('.json')) continue
+        const id = entry.name.slice(0, -'.json'.length)
+        if (!SAFE_RUN_RECORD_ID_PATTERN.test(id)) continue
+        try {
+          const info = await this.fileSystem.stat(join(this.directory, entry.name))
+          this.setFileInfo(id, info)
+          let indexed = null
+          try {
+            const path = join(this.directory, '.summaries', `${id}.json`)
+            if ((await this.fileSystem.stat(path)).size <= MAX_SUMMARY_BYTES) {
+              indexed = JSON.parse(await this.fileSystem.readFile(path, 'utf8'))
+            }
+          } catch { /* An absent/corrupt disposable summary is rebuilt from the full record. */ }
+          if (indexed?.version === SUMMARY_VERSION && indexed.source?.size === info.size
+            && indexed.source?.mtimeMs === info.mtimeMs && indexed.source?.ctimeMs === info.ctimeMs) {
+            try {
+              const summary = validateRunRecord(indexed.summary, { clone: false })
+              if (summary.id !== id) throw new Error('摘要与记录 ID 不一致')
+              this.setSummary(summary)
+              this.initialization.summaryReads += 1
+            } catch { await this.indexLegacyRecord(id) }
+          } else {
+            // One legacy detail at a time; do not populate the detail cache at startup.
+            await this.indexLegacyRecord(id)
+          }
+        } catch (error) {
+          this.initialization.invalidRecords += 1
+          this.warningLogger(`[runner] 跳过无效运行记录 ${entry.name}: ${error.message}`)
+        }
       }
+      this.initialization.status = 'ready'
+    } catch (error) {
+      this.initialization.status = 'failed'
+      throw error
+    }
+  }
+
+  async indexLegacyRecord(id) {
+    const record = await this.readRecordFile(id)
+    this.setSummary(record)
+    this.initialization.legacyReads += 1
+    await this.writeSummary(id)
+  }
+
+  setSummary(summary) {
+    summary = this.internalSummary(summary)
+    this.records.set(summary.id, summary)
+    const bytes = Buffer.byteLength(JSON.stringify(summary))
+    this.summaryBytes += bytes - (this.summarySizes.get(summary.id) ?? 0)
+    this.summarySizes.set(summary.id, bytes)
+  }
+
+  setFileInfo(id, info) {
+    this.historyDiskBytes += info.size - (this.fileStats.get(id)?.size ?? 0)
+    this.fileStats.set(id, { size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs })
+  }
+
+  internalSummary(record) {
+    return { ...runRecordSummary(record), ...(record.runnerTracking ? { runnerTracking: structuredClone(record.runnerTracking) } : {}) }
+  }
+
+  async readRecordFile(id) {
+    const raw = await this.fileSystem.readFile(join(this.directory, `${id}.json`), 'utf8')
+    const record = validateRunRecord(JSON.parse(raw), { clone: false })
+    if (record.id !== id) throw new RunRecordStoreError('文件名与记录 ID 不一致')
+    return record
+  }
+
+  async readDetail(id) {
+    if (!this.records.has(id)) return null
+    const pendingTerminal = this.pendingTerminalSources.get(id)
+    if (pendingTerminal) return pendingTerminal
+    const cached = this.details.get(id)
+    if (cached) {
+      this.cacheStats.hits += 1
+      this.details.delete(id)
+      this.details.set(id, cached)
+      return cached.record
+    }
+    this.cacheStats.misses += 1
+    const record = await this.readRecordFile(id)
+    this.cacheDetail(record)
+    return record
+  }
+
+  cacheDetail(record) {
+    const previous = this.details.get(record.id)
+    if (previous) this.detailCacheBytes -= previous.bytes
+    this.details.delete(record.id)
+    const bytes = this.fileStats.get(record.id)?.size ?? Infinity
+    if (!this.detailCacheEntries || bytes > this.detailCacheLimitBytes) {
+      this.cacheStats.oversized += 1
+      return
+    }
+    while (this.details.size >= this.detailCacheEntries || this.detailCacheBytes + bytes > this.detailCacheLimitBytes) {
+      const [id, entry] = this.details.entries().next().value
+      this.details.delete(id)
+      this.detailCacheBytes -= entry.bytes
+      this.cacheStats.evictions += 1
+    }
+    this.details.set(record.id, { record, bytes })
+    this.detailCacheBytes += bytes
+  }
+
+  publishRecord(record) {
+    this.pendingTerminalSources.delete(record.id)
+    this.setSummary(record)
+    this.cacheDetail(record)
+    for (const script of record.scripts) {
+      if (record.status !== 'running' || !['queued', 'running'].includes(script.status)) {
+        const key = `${record.id}:${script.id}`
+        this.pendingProgress.delete(key)
+        this.progressStates.delete(key)
+      }
+    }
+  }
+
+  async writeSummary(id) {
+    // Failure cannot invalidate a successful authoritative record commit. On
+    // restart the file identity check detects a stale index and rebuilds it.
+    const directory = join(this.directory, '.summaries')
+    const temporary = join(directory, `.${id}.${this.temporaryIdFactory()}.tmp`)
+    try {
+      const serialized = JSON.stringify({ version: SUMMARY_VERSION, source: this.fileStats.get(id), summary: this.records.get(id) })
+      if (Buffer.byteLength(serialized) > MAX_SUMMARY_BYTES) return
+      await this.fileSystem.mkdir(directory, { recursive: true, mode: 0o700 })
+      await this.fileSystem.writeFile(temporary, serialized, { encoding: 'utf8', flag: 'wx', mode: 0o600 })
+      await this.fileSystem.rename(temporary, join(directory, `${id}.json`))
+      this.writeStats.indexWrites += 1
+    } catch {
+      this.writeStats.indexFailures += 1
+      this.writeStats.lastIndexFailureAt = this.now().toISOString()
+      await this.fileSystem.unlink(temporary).catch(() => undefined)
+    }
+  }
+
+  diagnostics() {
+    return {
+      initialization: { ...this.initialization },
+      history: { records: this.records.size, diskBytes: this.historyDiskBytes, summaryBytes: this.summaryBytes },
+      cache: { entries: this.details.size, serializedBytes: this.detailCacheBytes, maxEntries: this.detailCacheEntries,
+        maxSerializedBytes: this.detailCacheLimitBytes, ...this.cacheStats },
+      writes: { ...this.writeStats, pendingTerminalSnapshots: this.pendingTerminalSources.size, pendingProgress: this.pendingProgress.size },
+      limits: { progressFlushIntervalMs: this.progressFlushIntervalMs, heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
+        staleAfterMs: this.staleAfterMs, recoveryGraceMs: this.runnerRecoveryGraceMs },
     }
   }
 
@@ -753,8 +969,8 @@ export class RunRecordFileStore {
       // Presence is stronger evidence than elapsed time or missing log output.
       if (this.runnerActivityProvider?.().some((run) => run.executionId === source.id && !run.settled)) {
         const heartbeatAt = Date.parse(source.runnerTracking?.lastSeenAt ?? '')
-        if (!Number.isFinite(heartbeatAt) || checkedAt.getTime() - heartbeatAt >= 10_000) {
-          const active = structuredClone(source)
+        if (!Number.isFinite(heartbeatAt) || checkedAt.getTime() - heartbeatAt >= HEARTBEAT_INTERVAL_MS) {
+          const active = copyForMutation(await this.readDetail(source.id))
           active.runnerTracking = { ...active.runnerTracking, lastSeenAt: checkedAt.toISOString() }
           active.updatedAt = checkedAt.toISOString()
           active.durationMs = durationBetween(active.startedAt, active.updatedAt)
@@ -771,7 +987,7 @@ export class RunRecordFileStore {
         : lastUpdate + this.staleAfterMs
       if (!Number.isFinite(deadline) || checkedAt.getTime() <= deadline) continue
 
-      const record = structuredClone(source)
+      const record = copyForMutation(await this.readDetail(source.id))
       const finishedAt = checkedAt.toISOString()
       const allResultsKnown = runnerManaged && record.scripts.every((script) => ['passed', 'partial', 'failed'].includes(script.status))
       record.status = allResultsKnown && !record.runnerTracking?.interrupted
@@ -806,32 +1022,50 @@ export class RunRecordFileStore {
   }
 
   async mutate(operation) {
+    this.writeStats.queuedMutations += 1
     const pending = this.mutationTail.then(async () => {
       await this.ensureReady()
       return operation()
-    })
+    }).finally(() => { this.writeStats.queuedMutations -= 1 })
     this.mutationTail = pending.then(() => undefined, () => undefined)
     return pending
   }
 
   async writeRecord(record, { publish = true } = {}) {
-    const serialized = `${JSON.stringify(record)}\n`
+    const started = performance.now()
+    this.writeStats.writing = true
     const targetPath = join(this.directory, `${record.id}.json`)
     const temporaryPath = join(
       this.directory,
       `.${record.id}.${process.pid}.${this.temporaryIdFactory()}.tmp`,
     )
     try {
+      const serialized = `${JSON.stringify(record)}\n`
       await this.fileSystem.writeFile(temporaryPath, serialized, {
         encoding: 'utf8',
         flag: 'wx',
         mode: 0o600,
       })
       await this.fileSystem.rename(temporaryPath, targetPath)
+      const info = await this.fileSystem.stat(targetPath).catch(() => ({
+        size: Buffer.byteLength(serialized), mtimeMs: null, ctimeMs: null,
+      }))
+      this.setFileInfo(record.id, info)
+      this.writeStats.writes += 1
+      this.writeStats.bytesWritten += Buffer.byteLength(serialized)
+      this.writeStats.lastSuccessAt = this.now().toISOString()
     } catch (error) {
+      this.writeStats.failures += 1
+      this.writeStats.lastFailureAt = this.now().toISOString()
       await this.fileSystem.unlink(temporaryPath).catch(() => undefined)
       throw error
+    } finally {
+      this.writeStats.writing = false
+      this.writeStats.lastWriteDurationMs = performance.now() - started
     }
-    if (publish) this.records.set(record.id, record)
+    if (publish) {
+      this.publishRecord(record)
+      await this.writeSummary(record.id)
+    }
   }
 }

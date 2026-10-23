@@ -27,6 +27,14 @@ const MAX_API_RESPONSES = 500
 const MAX_RESOURCE_RESPONSES = 2_000
 const MAX_NETWORK_FAILURE_LOGS = 200
 const MAX_CAPTURE_TEXT_LENGTH = 1_200
+let scriptModuleImportAttempts = 0
+export function scriptRuntimeDiagnostics() {
+  return { scriptModuleImportAttempts, defaultScriptTimeoutMs: DEFAULT_SCRIPT_TIMEOUT_MS,
+    minScriptTimeoutMs: MIN_SCRIPT_TIMEOUT_MS, maxScriptTimeoutMs: MAX_SCRIPT_TIMEOUT_MS,
+    abortCleanupTimeoutMs: DEFAULT_ABORT_CLEANUP_TIMEOUT_MS, maxApiResponses: MAX_API_RESPONSES,
+    maxResourceResponses: MAX_RESOURCE_RESPONSES, maxNetworkFailureLogs: MAX_NETWORK_FAILURE_LOGS,
+    maxCaptureTextLength: MAX_CAPTURE_TEXT_LENGTH }
+}
 const SENSITIVE_CAPTURE_KEY = /authorization|token|password|passwd|secret|cookie|verify[_-]?code|mobile|signature|credential|session|api[_-]?key|x-amz|expires?/i
 const CAPTURE_STRING_KEY_PATTERN = '(?:authorization|token|password|passwd|secret|cookie|verify[_-]?code|mobile|signature|credential|session|api[_-]?key|x-amz[^"\'\\s:=&]*|expires?)'
 const HTTP_CAPTURE_PROTOCOLS = new Set(['http:', 'https:'])
@@ -822,6 +830,7 @@ export async function executeRegisteredScript(payload, {
     const result = await runWithScriptRejectionBoundary(async () => {
       const scriptImportUrl = new URL(scriptUrl)
       scriptImportUrl.searchParams.set('runner-attempt', attemptId)
+      scriptModuleImportAttempts += 1
       const scriptModule = await waitWithAbort(loadScript(scriptImportUrl), abortGate)
       if (typeof scriptModule.run !== 'function') throw new Error('脚本入口未导出 run 函数')
       scriptRunPromise = Promise.resolve().then(() => runWithAssertionRecorder(
