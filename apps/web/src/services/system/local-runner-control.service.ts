@@ -17,14 +17,15 @@ export class LocalRunnerControlService implements RunnerControlService {
     private readonly healthTimeoutMs = 2_000,
   ) {}
 
-  async getStatus(): Promise<RunnerServiceState> {
+  async getStatus(signal?: AbortSignal): Promise<RunnerServiceState> {
     const controller = new AbortController()
+    const requestSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
     const timeout = globalThis.setTimeout(() => controller.abort(), this.healthTimeoutMs)
     let online = false
     try {
       const response = await this.fetcher(this.healthUrl, {
         headers: { Accept: 'application/json' },
-        signal: controller.signal,
+        signal: requestSignal,
       })
       if (response.ok) {
         const body = await response.json() as { ok?: unknown }
@@ -43,16 +44,18 @@ export class LocalRunnerControlService implements RunnerControlService {
     }
   }
 
-  async getResources(): Promise<RunnerResourceSnapshot> {
+  async getResources(signal?: AbortSignal): Promise<RunnerResourceSnapshot> {
     const controller = new AbortController()
+    const requestSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
     const timeout = globalThis.setTimeout(() => controller.abort(), this.healthTimeoutMs)
     try {
       const response = await this.fetcher(new URL('/runner/resources', this.healthUrl).href, {
-        headers: { Accept: 'application/json' }, signal: controller.signal, cache: 'no-store',
+        headers: { Accept: 'application/json' }, signal: requestSignal, cache: 'no-store',
       })
       if (!response.ok) throw new Error(`资源采集失败（HTTP ${response.status}），请检查 Runner 版本及状态`)
       return parseRunnerResources(await response.json())
     } catch (error) {
+      if (signal?.aborted) throw signal.reason
       if (controller.signal.aborted) throw new Error('资源采集超时，请稍后手动刷新')
       if (error instanceof TypeError) throw new Error('无法连接 Runner，资源数据不可用')
       throw error

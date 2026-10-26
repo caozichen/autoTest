@@ -2,8 +2,8 @@
 import { formatDateTime } from '@/utils/date-time'
 import { formatRunnerMetric, type RunnerResourceSnapshot } from '@/services/system/runner-resources'
 
-defineProps<{ snapshot: RunnerResourceSnapshot | null; loading: boolean; error: string | null }>()
-defineEmits<{ refresh: [] }>()
+defineProps<{ snapshot: RunnerResourceSnapshot | null; loading: boolean; error: string | null; autoRefreshEnabled: boolean }>()
+defineEmits<{ refresh: []; toggleAutoRefresh: [] }>()
 </script>
 
 <template>
@@ -11,9 +11,12 @@ defineEmits<{ refresh: [] }>()
     <header class="resources-heading">
       <div>
         <h2 id="runner-resources-title">资源与运行参数</h2>
-        <p>首次打开时采集，之后请手动刷新。此页面不会自动刷新或处置任务。</p>
+        <p>{{ autoRefreshEnabled ? '自动刷新已开启，每秒更新；离开页面或切到后台时暂停。' : '首次打开时采集，可手动刷新或开启每秒自动刷新。' }}</p>
       </div>
-      <el-button :loading="loading" :disabled="loading" @click="$emit('refresh')">{{ loading ? '正在采集' : '手动刷新' }}</el-button>
+      <div class="resources-actions">
+        <el-button :loading="loading" :disabled="loading" @click="$emit('refresh')">{{ loading ? '正在采集' : '手动刷新' }}</el-button>
+        <el-button :type="autoRefreshEnabled ? 'primary' : 'default'" :aria-pressed="autoRefreshEnabled" @click="$emit('toggleAutoRefresh')">{{ autoRefreshEnabled ? '停止自动刷新' : '自动刷新' }}</el-button>
+      </div>
     </header>
     <p class="sample-time" aria-live="polite">
       <template v-if="snapshot">采样时间：{{ formatDateTime(new Date(snapshot.sampledAt)) }} · 采集耗时 {{ snapshot.collectionDurationMs.toFixed(1) }} ms · {{ loading ? '采集中，显示上次快照' : error ? '上次成功快照（已过期）' : '本次采样快照' }}</template>
@@ -40,6 +43,8 @@ defineEmits<{ refresh: [] }>()
 <style scoped>
 .runner-resources { margin-top: 20px; color: var(--color-text-primary, #1f2a44); }
 .resources-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.resources-actions { display: flex; flex-shrink: 0; gap: 8px; }
+.resources-actions .el-button + .el-button { margin-left: 0; }
 h2, h3, p { margin: 0; }
 h2 { font-size: 17px; line-height: 26px; font-weight: 650; }
 .resources-heading p, .sample-time, .group-description { color: var(--color-text-secondary, #64748b); font-size: 12px; line-height: 20px; }
@@ -60,5 +65,5 @@ dd { margin: 4px 0 0; font-size: 17px; line-height: 25px; font-weight: 600; font
 small { display: block; color: #64748b; font-size: 11px; line-height: 17px; }
 .resource-groups--stale { opacity: .65; }
 @media (max-width: 1000px) { .resource-groups { grid-template-columns: 1fr; } .resource-group[data-group="storage"] .resource-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 600px) { .resource-group { padding: 16px; } .resources-heading { align-items: flex-start; } .resources-heading .el-button { flex-shrink: 0; } }
+@media (max-width: 600px) { .resource-group { padding: 16px; } .resources-heading { flex-direction: column; align-items: flex-start; gap: 10px; } }
 </style>

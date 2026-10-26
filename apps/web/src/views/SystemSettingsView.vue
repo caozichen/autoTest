@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { formatDateTime } from '@/utils/date-time'
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
+import { storeToRefs } from 'pinia'
 import { Connection, VideoPlay } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 
@@ -8,24 +9,67 @@ import type { RunnerServiceState } from '@/services/system/runner-control-servic
 import RunnerResourcesPanel from '@/components/RunnerResourcesPanel.vue'
 import type { RunnerResourceSnapshot } from '@/services/system/runner-resources'
 import { services } from '@/services/container'
+import { useRunnerResourcesStore } from '@/stores/runner-resources'
 
-const runner = ref<RunnerServiceState | null>(null)
+const { autoRefreshEnabled } = storeToRefs(useRunnerResourcesStore())
+const runner = shallowRef<RunnerServiceState | null>(null)
 const checking = ref(true)
 const starting = ref(false)
-const resources = ref<RunnerResourceSnapshot | null>(null)
+const resources = shallowRef<RunnerResourceSnapshot | null>(null)
 const resourceError = ref<string | null>(null)
 const collecting = ref(false)
+let disposed = false
+let refreshTimer: ReturnType<typeof setTimeout> | undefined
+let collection: { controller: AbortController; automatic: boolean } | null = null
 
-async function refreshResources(): Promise<void> {
-  if (collecting.value) return
+function clearRefreshTimer(): void {
+  clearTimeout(refreshTimer)
+  refreshTimer = undefined
+}
+
+function canAutoRefresh(): boolean {
+  return !disposed && autoRefreshEnabled.value && document.visibilityState !== 'hidden'
+}
+
+async function refreshResources(automatic = false): Promise<void> {
+  if (disposed || collecting.value) return
+  clearRefreshTimer()
+  const controller = new AbortController()
+  collection = { controller, automatic }
   collecting.value = true
   try {
-    const [, snapshot] = await Promise.all([refreshStatus(), services.runnerControl.getResources()])
-    resources.value = snapshot
-    resourceError.value = null
-  } catch (error) {
-    resourceError.value = error instanceof Error ? error.message : 'Runner 资源采集失败'
-  } finally { collecting.value = false }
+    // Wait for both requests even if one fails, so a slow request cannot overlap
+    // the next sample. Only the latest snapshot is retained.
+    const [status, snapshot] = await Promise.allSettled([
+      refreshStatus(controller.signal), services.runnerControl.getResources(controller.signal),
+    ])
+    if (disposed || controller.signal.aborted) return
+    if (snapshot.status === 'fulfilled' && status.status === 'fulfilled') {
+      resources.value = snapshot.value
+      resourceError.value = null
+    } else {
+      const error = snapshot.status === 'rejected' ? snapshot.reason : status.status === 'rejected' ? status.reason : null
+      resourceError.value = error instanceof Error ? error.message : 'Runner 资源采集失败'
+    }
+  } finally {
+    collecting.value = false
+    collection = null
+    if (canAutoRefresh()) {
+      refreshTimer = setTimeout(() => { void refreshResources(true) }, 1_000)
+    }
+  }
+}
+
+watch(autoRefreshEnabled, enabled => {
+  clearRefreshTimer()
+  if (enabled && canAutoRefresh()) void refreshResources(true)
+  else if (collection?.automatic) collection.controller.abort()
+})
+
+function handleVisibilityChange(): void {
+  clearRefreshTimer()
+  if (document.visibilityState === 'hidden') collection?.controller.abort()
+  else if (canAutoRefresh() || !resources.value) void refreshResources(autoRefreshEnabled.value)
 }
 
 const statusLabel = computed(() => {
@@ -42,11 +86,11 @@ const checkedAt = computed(() => {
   return Number.isNaN(value.getTime()) ? '尚未检查' : formatDateTime(value)
 })
 
-async function refreshStatus(): Promise<RunnerServiceState> {
+async function refreshStatus(signal?: AbortSignal): Promise<RunnerServiceState> {
   checking.value = true
   try {
-    const latestState = await services.runnerControl.getStatus()
-    runner.value = latestState
+    const latestState = await services.runnerControl.getStatus(signal)
+    if (!disposed && !signal?.aborted) runner.value = latestState
     return latestState
   } finally {
     checking.value = false
@@ -70,7 +114,16 @@ async function startRunner(): Promise<void> {
   }
 }
 
-onMounted(() => { void refreshResources() })
+onMounted(() => {
+  document.addEventListener('visibilitychange', handleVisibilityChange)
+  if (document.visibilityState !== 'hidden') void refreshResources(autoRefreshEnabled.value)
+})
+onBeforeUnmount(() => {
+  disposed = true
+  clearRefreshTimer()
+  collection?.controller.abort()
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
+})
 </script>
 
 <template>
@@ -118,7 +171,10 @@ onMounted(() => { void refreshResources() })
         {{ buttonLabel }}
       </el-button>
     </section>
-    <RunnerResourcesPanel :snapshot="resources" :loading="collecting" :error="resourceError" @refresh="refreshResources" />
+    <RunnerResourcesPanel
+      :snapshot="resources" :loading="collecting" :error="resourceError" :auto-refresh-enabled="autoRefreshEnabled"
+      @refresh="refreshResources()" @toggle-auto-refresh="autoRefreshEnabled = !autoRefreshEnabled"
+    />
   </div>
 </template>
 

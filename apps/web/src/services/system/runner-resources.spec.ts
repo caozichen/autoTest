@@ -22,6 +22,28 @@ describe('resource service contract', () => {
     const fetcher = vi.fn((_url, options) => new Promise<Response>((_, reject) => options?.signal?.addEventListener('abort', () => reject(new Error('aborted'))))) as typeof fetch
     await expect(new LocalRunnerControlService(fetcher, undefined, undefined, 5).getResources()).rejects.toThrow('超时')
   })
+  it('cancels health and resource requests together and clears their timeout handles', async () => {
+    vi.useFakeTimers()
+    try {
+      const signals: AbortSignal[] = []
+      const fetcher = vi.fn((_url, options) => new Promise<Response>((_, reject) => {
+        const signal = options!.signal!
+        signals.push(signal)
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+      })) as typeof fetch
+      const controller = new AbortController()
+      const service = new LocalRunnerControlService(fetcher)
+      const status = service.getStatus(controller.signal)
+      const resources = service.getResources(controller.signal)
+      const outcome = expect(resources).rejects.toMatchObject({ name: 'AbortError' })
+      expect(vi.getTimerCount()).toBe(2)
+      controller.abort()
+      await outcome
+      await expect(status).resolves.toMatchObject({ status: 'offline' })
+      expect(signals.every(signal => signal.aborted)).toBe(true)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally { vi.useRealTimers() }
+  })
   it('uses binary memory units and preserves unavailable values', () => {
     expect(formatRunnerMetric({ id: 'rss', label: 'RSS', value: 1073741824, unit: 'bytes' })).toBe('1 GiB')
     expect(formatRunnerMetric({ id: 'rss', label: 'RSS', value: null, unit: 'bytes' })).toBe('不可用')

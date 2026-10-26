@@ -14,7 +14,7 @@ export interface RunnerStartResult {
 }
 
 export interface RunnerControlService {
-  getResources(): Promise<RunnerResourceSnapshot>
-  getStatus(): Promise<RunnerServiceState>
+  getResources(signal?: AbortSignal): Promise<RunnerResourceSnapshot>
+  getStatus(signal?: AbortSignal): Promise<RunnerServiceState>
   start(): Promise<RunnerStartResult>
 }

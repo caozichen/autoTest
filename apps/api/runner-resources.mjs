@@ -21,7 +21,7 @@ export function createRunnerResourceSampler({ records, capacity, limits, directo
         groups.push({ id, title, description, metrics: [], unavailableReason: reason ?? '当前运行环境无法采集此组指标' })
       }
     }
-    await collect('process', 'Runner 进程', '仅 Node 进程；不包含 Chrome 子进程。CPU 为两次手动采样间隔的单核占用，首次为进程启动以来均值。', () => {
+    await collect('process', 'Runner 进程', '仅 Node 进程；不包含 Chrome 子进程。CPU 为两次采样间隔的单核占用，首次为进程启动以来均值。', () => {
       const memory = processSource.memoryUsage()
       const cpu = processSource.cpuUsage()
       const uptime = processSource.uptime()
