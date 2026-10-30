@@ -86,7 +86,7 @@ test(`registered editor waits for original answers and persists ${editMode} valu
         const shell = body => { main.innerHTML = '<h2>联动表单</h2><span><span aria-hidden="true"></span> 已提交 </span><h3>提报信息</h3>' + body }
         async function detail() {
           const result = await fetch(apiPath, { headers }).then(r => r.json())
-          shell(labels.map(key => '<div class="reply-kv__row"><span class="reply-kv__label">姓名</span><span class="reply-kv__value">' + escape(result.data.items.find(item => item.item_key === key).value[0].answer) + '</span></div>').join('') + '<button id="edit">编辑</button>')
+          shell(labels.map(key => '<div class="reply-kv__row"' + (key === 'groupUsername' ? ' data-group-code="group-fixture" data-group-index="1"' : '') + '><span class="reply-kv__label">' + (key === 'groupUsername' ? '题组 / 第 1 组 / 姓名' : '姓名') + '</span><span class="reply-kv__value">' + escape(result.data.items.find(item => item.item_key === key).value[0].answer) + '</span></div>').join('') + '<button id="edit">编辑</button>')
           document.querySelector('#edit').onclick = edit
         }
         async function edit() {
@@ -117,6 +117,10 @@ test(`registered editor waits for original answers and persists ${editMode} valu
   const submissionAssertions = {
     title: '联动表单', primaryContactName: original.username, groupContactName: original.groupUsername,
     fields: { '姓名[1]': original.username, '姓名[2]': original.groupUsername },
+    fieldIdentities: {
+      '姓名[1]': { itemKey: 'username', groupCode: '', groupIndex: null },
+      '姓名[2]': { itemKey: 'groupUsername', groupCode: 'group-fixture', groupIndex: 1 },
+    },
   }
   const variables = {
     FORM_ID: formId, SUBMISSION_ID: submissionId, SUBMISSION_ASSERTIONS: JSON.stringify(submissionAssertions),

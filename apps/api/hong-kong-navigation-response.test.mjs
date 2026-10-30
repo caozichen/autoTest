@@ -69,10 +69,10 @@ async function assertPending(promise) {
   assert.equal(await Promise.race([promise.then(() => 'settled'), delay(30, 'pending')]), 'pending')
 }
 
-test('Hong Kong waits for an existing headerless poll and its delayed workspace refresh before navigating', async t => {
+for (const environmentCode of ['TEST', 'CN_PROD', 'HK_PROD']) test(`${environmentCode} waits for an existing headerless poll and its delayed workspace refresh before navigating`, async t => {
   const f = await fixture(t)
   const drain = waitForPageResponsesBeforeNavigation(f.page, f.observer, {
-    origins: [f.origin], environmentCode: 'HK_PROD', quietMs: 100, timeoutMs: 3000,
+    origins: [f.origin], environmentCode, timeoutMs: 3000,
   })
   await assertPending(drain)
   f.release(poll)
@@ -92,20 +92,31 @@ test('Hong Kong waits for an existing headerless poll and its delayed workspace 
   assert.equal([...f.counts.keys()].some(key => /^(POST|PUT|PATCH|DELETE) /.test(key)), false)
 })
 
-test('Hong Kong isolation keeps TEST and CN_PROD headerless polling behavior unchanged during concurrent waits', async t => {
+test('concurrent navigation waits drain each environment independently', async t => {
   const [hk, cn, testEnvironment] = await Promise.all([fixture(t), fixture(t), fixture(t)])
   const wait = (f, environmentCode) => withEnvironmentTimeouts(environmentCode, () => waitForPageResponsesBeforeNavigation(f.page, f.observer, {
     origins: [f.origin], environmentCode, timeoutMs: 3000,
   }))
   const hkWait = wait(hk, 'HK_PROD')
-  assert.deepEqual(await Promise.all([wait(cn, 'CN_PROD'), wait(testEnvironment, 'TEST')]), [true, true])
+  const cnWait = wait(cn, 'CN_PROD')
+  const testWait = wait(testEnvironment, 'TEST')
   await assertPending(hkWait)
+  await assertPending(cnWait)
+  await assertPending(testWait)
   hk.release(poll)
   await hk.received(workspace)
   hk.release(workspace)
   assert.equal(await hkWait, true)
+  await assertPending(cnWait)
+  await assertPending(testWait)
   assert.equal(cn.counts.has(`GET ${workspace}`), false)
   assert.equal(testEnvironment.counts.has(`GET ${workspace}`), false)
+  for (const f of [cn, testEnvironment]) {
+    f.release(poll)
+    await f.received(workspace)
+    f.release(workspace)
+  }
+  assert.deepEqual(await Promise.all([cnWait, testWait]), [true, true])
 })
 
 test('Hong Kong admin navigation drains the configured public-form origin before replacing its document', async t => {
@@ -150,17 +161,17 @@ test('Hong Kong admin navigation drains the configured public-form origin before
   assert.equal(count, 1)
 })
 
-for (const [name, status, body] of [
+for (const environmentCode of ['TEST', 'HK_PROD']) for (const [name, status, body] of [
   ['HTTP 500', 500, { code: 50000, message: '服务故障原文' }],
   ['business rejection', 200, { code: 30001, message: '业务拒绝原文' }],
-]) test(`Hong Kong navigation retains ${name} from the follow-up GET without replaying it`, async t => {
+]) test(`${environmentCode} navigation retains ${name} from the follow-up GET without replaying it`, async t => {
   const f = await fixture(t, { status, body })
   const tracker = createPageCompletionTracker(f.page.context(), {
     origins: [f.origin], networkObserver: f.observer, trackDocumentCommits: true, timeoutMs: 1000,
   })
   t.after(() => tracker.dispose())
   const drain = waitForPageResponsesBeforeNavigation(f.page, f.observer, {
-    origins: [f.origin], environmentCode: 'HK_PROD', quietMs: 100, timeoutMs: 3000,
+    origins: [f.origin], environmentCode, quietMs: 100, timeoutMs: 3000,
   })
   f.release(poll)
   await f.received(workspace)

@@ -50,7 +50,8 @@ test('contact-only form requires the three original contact fields', () => {
   ], '测试'))
 })
 
-test('preserves the existing user email copy and adds the mail test description', () => {
+test('preserves the existing user email copy and adds the mail test description', t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-29T02:00:00Z') })
   const args = { title: '邮件测试表单', formId: 'form-101', siteBaseUrl: 'https://test.admin.lingxi360.com' }
   const original = createFormSettingsContent(args).automationNotification
   const content = emailTestContent(args.title, args.formId, args.siteBaseUrl)

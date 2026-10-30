@@ -142,6 +142,7 @@ async function submitOneEmail({ browser, siteBaseUrl, formId, title, revisionNo,
     locale: 'zh-CN',
   })
   const observer = attachNetworkObserver(context, {
+    imageDrainTimeoutMs: 10_000,
     initialPhase: `邮箱 ${index}：公开表单加载`,
     onApiResponse: recordApiResponse,
     onResourceResponse: recordResourceResponse,
@@ -217,7 +218,7 @@ async function submitOneEmail({ browser, siteBaseUrl, formId, title, revisionNo,
     }
     await expect(page, `第 ${index} 次提交后应进入结果页`)
       .toHaveURL(/\/form\/submission-result\/?(?:[?#]|$)/, { timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) })
-    const resultId = await assertVisibleSubmissionResult(page, formId)
+    const resultId = await assertVisibleSubmissionResult(page, formId, { formPayload: config })
     const responseId = String(submission.body?.data?.submission_id ?? submission.body?.data?.id ?? '')
     if (responseId) expect(resultId, `第 ${index} 次结果页 ID 应与接口一致`).toBe(responseId)
     expect(submissionRequestCount, `第 ${index} 次应且只应提交一次`).toBe(1)
@@ -270,6 +271,7 @@ export async function run(options, { mainland = false } = {}) {
       timezoneId: 'Asia/Shanghai',
     })
     observer = attachNetworkObserver(context, {
+      imageDrainTimeoutMs: 10_000,
       initialPhase: '浏览器初始化',
       onApiResponse: recordApiResponse,
       onResourceResponse: recordResourceResponse,

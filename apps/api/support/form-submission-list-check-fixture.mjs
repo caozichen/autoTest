@@ -334,7 +334,10 @@ export function createSubmissionListFixture({
       message: 'success',
       data: {
         ...record,
-        items: [primaryContactName, groupContactName].map((name) => ({
+        items: [primaryContactName, groupContactName].map((name, index) => ({
+          item_key: index ? 'group_username_fixture' : 'username_fixture',
+          group_code: index ? 'field_group_fixture' : '',
+          ...(index ? { group_index: 1 } : {}),
           type_code: 'username',
           value: [{ answer: { collect_mode: 'name_zh', name_zh: name } }],
         })),
@@ -477,7 +480,7 @@ export function createSubmissionListHtml({
       <img src="/fixture-assets/detail-image.png" alt="提报图片">
       <section class="reply-kv">
         <div class="reply-kv__row"><span class="reply-kv__label">姓名</span><div class="reply-kv__value">${escapeHtml(fixture.primaryContactName)} Mr.（先生）</div></div>
-        <div class="reply-kv__row"><span class="reply-kv__label">姓名</span><div class="reply-kv__value">${escapeHtml(fixture.groupContactName)}</div></div>
+        <div class="reply-kv__row" data-group-code="field_group_fixture" data-group-index="1"><span class="reply-kv__label">题组 / 第 1 组 / 姓名</span><div class="reply-kv__value">${escapeHtml(fixture.groupContactName)}</div></div>
       </section>
     </div></div>`,
     choiceSamples: fixture.additionalSearchFields ? Object.fromEntries(
@@ -954,7 +957,7 @@ export function createSubmissionDetailHtml({ fixture, locale = 'zh-TW' } = {}) {
     <img src="/fixture-assets/detail-image.png" alt="提报图片">
     <section class="reply-kv">
       <div class="reply-kv__row"><span class="reply-kv__label">姓名</span><div class="reply-kv__value">${escapeHtml(fixture.primaryContactName)} Mr.（先生）</div></div>
-      <div class="reply-kv__row"><span class="reply-kv__label">姓名</span><div class="reply-kv__value">${escapeHtml(fixture.groupContactName)}</div></div>
+      <div class="reply-kv__row" data-group-code="field_group_fixture" data-group-index="1"><span class="reply-kv__label">题组 / 第 1 组 / 姓名</span><div class="reply-kv__value">${escapeHtml(fixture.groupContactName)}</div></div>
     </section>
     <span>${escapeHtml(ui.submissionTab)}</span>
   </main>

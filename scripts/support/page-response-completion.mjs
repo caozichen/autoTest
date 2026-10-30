@@ -19,9 +19,8 @@ export function isRequiredPageRequest({ url, category, resourceType, responseHea
 
 export async function waitForPageResponsesBeforeNavigation(page, networkObserver, {
   origins, signal, timeoutMs = scaleTimeout(45_000), logger = () => undefined,
-  environmentCode, quietMs = /hk/i.test(environmentCode ?? '') ? 500 : 0,
+  quietMs = 500,
 } = {}) {
-  const waitForPendingAi = /hk/i.test(environmentCode ?? '')
   const allowedOrigins = new Set(origins)
   const completed = await networkObserver.waitForIdle({
     timeoutMs,
@@ -36,10 +35,10 @@ export async function waitForPageResponsesBeforeNavigation(page, networkObserver
       if (isRequiredPageRequest(candidate, allowedOrigins)) return true
       // Static fetches need their terminal event, not an API response body.
       if (candidate.category === 'resource' && ['fetch', 'xhr'].includes(candidate.resourceType)) return true
-      // Slow Hong Kong polls can receive headers only after the navigation
-      // check. Drain existing polls and their follow-up reads before leaving.
-      // Other environments retain the existing headers-only prerequisite.
-      return candidate.category === 'api' && (waitForPendingAi || Boolean(candidate.response))
+      // A poll can schedule workspace/prompt reads after its body is processed.
+      // Drain it even before headers arrive, then require a quiet interval so
+      // those follow-up reads finish before the document is replaced.
+      return candidate.category === 'api'
         && allowedOrigins.has(candidate.url.origin)
         && /\/translation\/ai\/status\/?$/.test(candidate.url.pathname)
     },

@@ -1,6 +1,4 @@
 import {
-  CONTACT_DIALOG_TEXT,
-  CONTACT_PRESET_TYPES,
   chooseContactCollectionInDesigner,
   enterBasicSettings,
   ensureIgnoreStrategyInSettings,
@@ -9,48 +7,23 @@ import {
   waitForContactPageReady,
 } from './form-all-fields-publish.ui.spec.mjs'
 import { expect as flowExpect, scaleTimeout } from './support/environment-timeouts.mjs'
-import { clickWhenReady } from './support/ui-readiness.mjs'
 import { openFormSettingsMenu } from './support/form-navigation.mjs'
 import { configurePostCollectionSettings } from './support/form-post-collection-settings.mjs'
 import { assertClassificationTagOptionsAvailable } from './support/form-settings-channels.mjs'
 
-// Mainland production adds the three contact fields directly. Do not wait for
-// the international collection/replacement dialogs as a required success signal.
+// Both mainland entry points create a new, unconfigured ordinary form. The
+// restored onboarding dialog must finish even if preset fields render first.
 export async function initializeMainlandContactFields(page, logger, timeoutMs = scaleTimeout(45_000)) {
   const deadline = Date.now() + timeoutMs
   const remaining = () => Math.max(1, deadline - Date.now())
-  const dialogs = page.locator('[role="dialog"]:visible').filter({ hasText: CONTACT_DIALOG_TEXT })
-  await waitForContactPageReady(page, remaining)
-
-  if (await dialogs.count()) {
-    await chooseContactCollectionInDesigner(page, logger, remaining())
-  }
-  if (!await hasPresetContactFields(page)) {
-    // Partial initialization must not cause another click and duplicate fields.
-    for (const type of CONTACT_PRESET_TYPES) {
-      await flowExpect(page.locator(`.form-field[data-container-path=""][data-component-type="${type}"]`),
-        `添加联系人前不应残留不完整的 ${type} 预设题`).toHaveCount(0, { timeout: remaining() })
-    }
-    await flowExpect(page.locator('.fb-dialog-overlay[data-state="open"]'),
-      '添加联系人前页面不应存在遮罩弹窗').toHaveCount(0, { timeout: remaining() })
-    await clickWhenReady(page.locator('button[data-component-type="contactGroup"]'), { timeout: remaining() })
-    await flowExpect.poll(async () => (await dialogs.count()) > 0 || await hasPresetContactFields(page), {
-      timeout: remaining(),
-      intervals: [100, 200, 300],
-      message: '内地联系人快捷项应生成姓名、手机号、邮箱，或显示需处理的收录弹窗',
-    }).toBe(true)
-    await waitForContactPageReady(page, remaining)
-    if (await dialogs.count()) {
-      await chooseContactCollectionInDesigner(page, logger, remaining())
-    }
-  }
-
+  logger('info', '内地新建表单等待首次联系人收录弹窗，完成“确认收录 → 忽略，不替换”')
+  await chooseContactCollectionInDesigner(page, logger, remaining())
+  // Keep this a flow blocker even when the shared helper records soft assertions.
   await flowExpect.poll(() => hasPresetContactFields(page), {
     timeout: remaining(),
     message: '内地设计器应各有一道姓名、手机号和邮箱预设题',
   }).toBe(true)
-  await flowExpect(dialogs, '配置题目前联系人弹窗应全部关闭').toHaveCount(0, { timeout: remaining() })
-  logger('success', '内地联系人题初始化完成：姓名、手机号、邮箱已生成')
+  logger('success', '内地联系人题初始化完成：收录及“忽略，不替换”已确认，姓名、手机号、邮箱各一道')
 }
 
 export async function configureMainlandContactSettings(page, logger) {
@@ -69,7 +42,7 @@ export async function configureMainlandContactSettings(page, logger) {
     return
   }
   await flowExpect(contactMenu, '当前内地版不提供全局收录联系人设置入口').toHaveCount(0)
-  logger('info', '内地基础设置没有全局收录联系人及冲突策略入口；联系人收录使用已配置的题级开关')
+  logger('info', '内地基础设置没有全局收录联系人及冲突策略入口；收录及“忽略，不替换”已在设计器确认')
 }
 
 export function assertMainlandClassificationTagOptionsAvailable(selectedCategory, selectedTag) {

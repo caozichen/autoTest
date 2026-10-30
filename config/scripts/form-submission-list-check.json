@@ -26,7 +26,7 @@
       "id": "submission-list-assertions",
       "key": "SUBMISSION_ASSERTIONS",
       "value": "{}",
-      "description": "本次提报断言 JSON，支持 title、primaryContactName 和 groupContactName。"
+      "description": "本次提报断言 JSON，支持 title、primaryContactName、groupContactName、fields 和 fieldIdentities（itemKey/groupCode/groupIndex），不按同名字段显示顺序定位。"
     },
     {
       "id": "form-submission-list-check-admin-locale",

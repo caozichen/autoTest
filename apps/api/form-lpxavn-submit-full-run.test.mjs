@@ -33,12 +33,12 @@ async function close(server) {
   })
 }
 
-async function runPublicSubmissionFixture(t, { withSettings = false, withQuota = false, acceptsSecondSubmission = false } = {}) {
+async function runPublicSubmissionFixture(t, { withSettings = false, withQuota = false, acceptsSecondSubmission = false, environmentCode } = {}) {
   const formId = 'full-run-form-id'
   const formCode = 'legacy-full-run-code'
   assert.notEqual(formId, formCode)
   const token = 'Bearer full-run-sensitive-token'
-  const fixture = createPublishedFormFixture()
+  const fixture = createPublishedFormFixture({ mainland: environmentCode === 'CN_PROD' })
   fixture.data.form.form_id = formId
   fixture.data.form.form_code = formCode
   remapFixtureKeys(fixture)
@@ -233,6 +233,7 @@ async function runPublicSubmissionFixture(t, { withSettings = false, withQuota =
     executionId: 'execution-full-run-001',
     scriptId: SCRIPT_ID,
     context: {
+      environmentCode,
       siteBaseUrl,
       apiBaseUrl: `${siteBaseUrl}/api`,
       requestPath: `/form/?id=${formId}`,
@@ -272,6 +273,7 @@ async function runPublicSubmissionFixture(t, { withSettings = false, withQuota =
   assert.match(result.result.submissionAssertions.groupContactName, /^题组联系人\d{6}$/)
   assert.match(result.result.submissionAssertions.fields['姓名[1]'], /^自动化测试用户\d{6}$/)
   assert.match(result.result.submissionAssertions.fields['姓名[2]'], /^题组联系人\d{6}$/)
+  assert.deepEqual(result.result.submissionAssertions.fieldIdentities['姓名[2]'], { itemKey: result.result.fieldKeys.groupUsername, groupCode: result.result.fieldKeys.fieldGroup, groupIndex: 1 })
   assert.equal(
     result.result.submissionAssertions.primaryContactName,
     result.result.submissionAssertions.fields['姓名[1]'],
@@ -354,6 +356,10 @@ async function runPublicSubmissionFixture(t, { withSettings = false, withQuota =
 
 test('registered production entry uses formId for public GET, validation, submission and result', async (t) => {
   await runPublicSubmissionFixture(t)
+})
+
+test('mainland public submission passes four document types through both quota attempts', async (t) => {
+  await runPublicSubmissionFixture(t, { environmentCode: 'CN_PROD', withSettings: true, withQuota: true })
 })
 
 test('public submission remains compatible with a passive agreement, rich feedback, promotion and additive settings contract', async (t) => {

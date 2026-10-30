@@ -1,3 +1,5 @@
+import { assertGreenContribution } from './support/form-green-contribution.mjs'
+import { contactFieldIdentities } from './support/submission-detail-fields.mjs'
 // 本次新增提交一致性检查保持注释：
 // import { readCommittedSubmissionIds, assertSubmissionOutcomeConsistency } from './support/submission-outcome-consistency.mjs'
 import { clickWhenReady, observeUiReadiness } from './support/ui-readiness.mjs'
@@ -210,6 +212,7 @@ function optionValueMap(choices, label, keyName = 'name', valueName = 'value') {
 
 function assertUploadContract(item, { label, mediaType, extensions }) {
   expect(Number(item?.common_config?.max_size), `${label}最大文件大小应为 20 MB`).toBe(20)
+  expect(Number(item?.common_config?.min_file_quantity), `${label}最少应上传 1 个文件`).toBe(1)
   expect(Number(item?.common_config?.max_file_quantity), `${label}最多应上传 1 个文件`).toBe(1)
   const media = item?.common_config?.media_type
   expect(Array.isArray(media), `${label}应包含文件类型限制`).toBeTruthy()
@@ -219,7 +222,7 @@ function assertUploadContract(item, { label, mediaType, extensions }) {
   }
 }
 
-function assertPublishedFormContract(payload, expectedFormId = FORM_ID, linkedContract = null) {
+function assertPublishedFormContract(payload, expectedFormId = FORM_ID, linkedContract = null, { environmentCode } = {}) {
   const validPayload = isRecord(payload)
   expect(validPayload, '公开表单配置接口应返回有效 JSON 对象').toBe(true)
   const safePayload = validPayload ? payload : {}
@@ -316,7 +319,12 @@ function assertPublishedFormContract(payload, expectedFormId = FORM_ID, linkedCo
     idCard?.common_config?.collect_mode?.choices,
     '身份证件类型选项',
   )
-  expect(idCardChoices.length, '身份证件应包含完整证件类型集合').toBeGreaterThanOrEqual(10)
+  if (environmentCode === 'CN_PROD') {
+    expect(idCardChoices.map((choice) => choice?.code ?? '').sort(), '内地身份证件应包含且仅包含四种指定证件类型')
+      .toEqual(['id_card', 'passport', 'hk_macau_mainland_travel_permit', 'taiwan_mainland_travel_permit'].sort())
+  } else {
+    expect(idCardChoices.length, '身份证件应包含完整证件类型集合').toBeGreaterThanOrEqual(10)
+  }
   expect(idCard?.common_config?.collect_mode?.selected, '身份证件已选证件类型应与可用选项一致')
     .toEqual(idCardChoices.map((choice) => choice?.code ?? ''))
 
@@ -521,7 +529,7 @@ function createTestData(now = Date.now(), emailOptions) {
   }
 }
 
-function createSubmissionAssertions(title, data) {
+function createSubmissionAssertions(title, data, fieldKeys = FIELD_KEYS) {
   const primaryContactName = String(data?.username ?? '')
   const groupContactName = String(data?.groupUsername ?? '')
   return {
@@ -532,6 +540,7 @@ function createSubmissionAssertions(title, data) {
       '姓名[1]': primaryContactName,
       '姓名[2]': groupContactName,
     },
+    fieldIdentities: contactFieldIdentities(fieldKeys),
   }
 }
 
@@ -1189,7 +1198,7 @@ async function assertVisibleSubmissionResult(
   const expectedFormId = typeof expectedFormIdOrOptions === 'string'
     ? expectedFormIdOrOptions
     : FORM_ID
-  const { timeout = scaleTimeout(NAVIGATION_TIMEOUT_MS) } = typeof expectedFormIdOrOptions === 'string'
+  const { timeout = scaleTimeout(NAVIGATION_TIMEOUT_MS), formPayload } = typeof expectedFormIdOrOptions === 'string'
     ? options
     : expectedFormIdOrOptions
   const result = page.locator(SUBMISSION_RESULT_SELECTOR)
@@ -1212,6 +1221,7 @@ async function assertVisibleSubmissionResult(
   await expect(screen, '提交结果必须显示唯一业务结果视图').toHaveCount(1, { timeout })
   await expect(screen, '提交结果必须是成功态，读取失败标题不得当作提交成功').toHaveAttribute('data-submit-status', 'success', { timeout })
   await flowExpect(screen, '提交结果读取失败时必须停止后续流程').toHaveAttribute('data-submit-status', 'success', { timeout })
+  if (formPayload) await assertGreenContribution(page, formPayload)
   return result.getAttribute('submission-id')
 }
 
@@ -1455,6 +1465,7 @@ export function assertSubmissionQuotaRejection(submission, expected) {
 export async function run({
   scriptId = SCRIPT_ID,
   scriptName = scriptId,
+  environmentCode,
   artifactWriter,
   siteBaseUrl,
   apiBaseUrl,
@@ -1593,6 +1604,7 @@ export async function run({
         publishedConfigBody,
         configuredFormId,
         linkedFormContract,
+        { environmentCode },
       )
       if (submissionQuota) {
         assertSubmissionQuotaPersistence(publishedConfigBody.data?.form?.submit_config?.submission_quota,
@@ -1982,7 +1994,7 @@ export async function run({
       await expect(page, '提交后应进入普通表单结果页').toHaveURL(SUBMISSION_RESULT_URL_PATTERN, {
         timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS),
       })
-      const renderedSubmissionId = await assertVisibleSubmissionResult(page, configuredFormId)
+      const renderedSubmissionId = await assertVisibleSubmissionResult(page, configuredFormId, { formPayload: publishedConfigBody })
       if (responseSubmissionId) {
         expect(renderedSubmissionId, '结果页组件的提交 ID 应与提交接口响应一致').toBe(responseSubmissionId)
       }
@@ -2000,7 +2012,7 @@ export async function run({
         page.reload({ waitUntil: 'domcontentloaded' }),
       ])
       await assertSubmissionResultRead(refreshedRead[0], { formId: configuredFormId, submissionId, credential: resultCredential })
-      expect(await assertVisibleSubmissionResult(page, configuredFormId), '刷新后必须保持同一提报并显示成功态').toBe(submissionId)
+      expect(await assertVisibleSubmissionResult(page, configuredFormId, { formPayload: publishedConfigBody }), '刷新后必须保持同一提报并显示成功态').toBe(submissionId)
       flowExpect(await networkObserver.waitForIdle({ timeoutMs: scaleTimeout(NAVIGATION_TIMEOUT_MS), signal }),
         '刷新后的结果页接口和资源必须加载完成后才能结束').toBe(true)
       expect(authorizationLeaks, '公开表单域名的所有请求都不应携带后台环境 Token').toEqual([])
@@ -2026,7 +2038,7 @@ export async function run({
         formUrl,
         title: EXPECTED_FORM_TITLE,
         submissionId,
-        submissionAssertions: createSubmissionAssertions(EXPECTED_FORM_TITLE, data),
+        submissionAssertions: createSubmissionAssertions(EXPECTED_FORM_TITLE, data, FIELD_KEYS),
         status: 'submitted',
         browser: 'chrome',
         headless: true,

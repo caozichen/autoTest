@@ -379,6 +379,7 @@ export async function run({
       locale: resolveAdminLocale(variables), timezoneId: 'Asia/Shanghai',
     })
     observer = attachNetworkObserver(context, {
+      imageDrainTimeoutMs: 10_000,
       initialPhase: '打开表单列表',
       onApiResponse: entry => { network.api.push(entry); recordApiResponse?.(entry) },
       onResourceResponse: entry => { network.resources.push(entry); recordResourceResponse?.(entry) },

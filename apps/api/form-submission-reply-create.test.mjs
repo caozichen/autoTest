@@ -68,8 +68,8 @@ async function readJsonBody(request) {
   return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')
 }
 
-function fixtureContract(formId) {
-  const fixture = createPublishedFormFixture()
+function fixtureContract(formId, environmentCode) {
+  const fixture = createPublishedFormFixture({ mainland: environmentCode === 'CN_PROD' })
   fixture.data.form.form_id = formId
   fixture.data.form.form_code = `legacy-${formId}`
   remapFixtureKeys(fixture)
@@ -194,11 +194,11 @@ test('records a create business failure and keeps returning a safe response outc
   )))
 })
 
-test('creates one complete all-fields submission on the admin page with the environment Token', async (t) => {
+async function runManualSubmissionFixture(t, environmentCode) {
   const formId = 'manual-create-form-id'
   const submissionId = 'manual-submission-001'
   const token = 'Bearer manual-create-sensitive-token'
-  const { fixture, contract } = fixtureContract(formId)
+  const { fixture, contract } = fixtureContract(formId, environmentCode)
   const artifactRoot = await mkdtemp(join(tmpdir(), 'autotest-manual-create-full-run-'))
   const observedRequests = []
   const createRequests = []
@@ -281,6 +281,7 @@ test('creates one complete all-fields submission on the admin page with the envi
     executionId: 'execution-manual-create-001',
     scriptId: SCRIPT_ID,
     context: {
+      environmentCode,
       siteBaseUrl,
       apiBaseUrl: `${siteBaseUrl}/api`,
       requestPath: `/form-activity/submission/preview/reply/create?fid=${formId}`,
@@ -356,7 +357,13 @@ test('creates one complete all-fields submission on the admin page with the envi
   assert.ok(result.artifacts.every(({ type }) => type === 'fixture'))
   assert.ok(result.artifacts.every(({ stepId }) => stepId === SCRIPT_ID))
   assert.ok(result.artifacts.every(({ absolutePath }) => absolutePath.startsWith(`${expectedAttemptDirectory}/`)))
-})
+}
+
+for (const environmentCode of [undefined, 'CN_PROD']) {
+  test(`creates one complete all-fields submission on the admin page with the environment Token (${environmentCode ?? 'default'})`, async (t) => {
+    await runManualSubmissionFixture(t, environmentCode)
+  })
+}
 
 test('stops after an empty-form validation unexpectedly sends one create POST', async (t) => {
   const formId = 'manual-create-empty-validation-post'

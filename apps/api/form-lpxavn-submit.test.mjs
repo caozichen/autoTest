@@ -162,6 +162,48 @@ test('validates the published-form contract against a configured form ID', () =>
   )
 })
 
+test('accepts exactly the four mainland document codes regardless of option order', () => {
+  const fixture = createPublishedFormFixture({ mainland: true })
+  const collectMode = fixture.data.items.find((item) => item.item_key === FIELD_KEYS.idCard).common_config.collect_mode
+  collectMode.choices.reverse()
+  collectMode.selected.reverse()
+
+  assert.equal(assertPublishedFormContract(fixture, FORM_ID, null, { environmentCode: 'CN_PROD' }).formId, FORM_ID)
+})
+
+test('rejects missing, substituted, duplicate and extra mainland document types', async () => {
+  for (const variant of ['missing', 'substituted', 'duplicate', 'extra']) {
+    const fixture = createPublishedFormFixture({ mainland: true })
+    const collectMode = fixture.data.items.find((item) => item.item_key === FIELD_KEYS.idCard).common_config.collect_mode
+    if (variant === 'missing') collectMode.choices.pop()
+    if (variant === 'substituted') collectMode.choices[3] = { code: 'unexpected_document', title: '其他证件' }
+    if (variant === 'duplicate') collectMode.choices[3] = { ...collectMode.choices[0] }
+    if (variant === 'extra') collectMode.choices.push({ code: 'unexpected_document', title: '其他证件' })
+    collectMode.selected = collectMode.choices.map(({ code }) => code)
+    const assertions = []
+    await runWithAssertionRecorder('form-lpxavn-submit', (entry) => assertions.push(entry), () => (
+      assertPublishedFormContract(fixture, FORM_ID, null, { environmentCode: 'CN_PROD' })
+    ))
+    assert.ok(assertions.some((entry) => entry.status === 'failed'
+      && entry.name === '内地身份证件应包含且仅包含四种指定证件类型'), variant)
+  }
+})
+
+test('preserves the existing Hong Kong, TEST and unspecified-environment document count rule', () => {
+  for (const environmentCode of ['HK_PROD', 'TEST', undefined]) {
+    assert.throws(() => assertPublishedFormContract(
+      createPublishedFormFixture({ mainland: true }), FORM_ID, null, { environmentCode },
+    ), /身份证件应包含完整证件类型集合/)
+    for (const count of [10, 11]) {
+      const fixture = createPublishedFormFixture()
+      const collectMode = fixture.data.items.find((item) => item.item_key === FIELD_KEYS.idCard).common_config.collect_mode
+      if (count === 11) collectMode.choices.push({ code: 'document_11', title: '证件11' })
+      collectMode.selected = collectMode.choices.map(({ code }) => code)
+      assert.equal(assertPublishedFormContract(fixture, FORM_ID, null, { environmentCode }).formId, FORM_ID)
+    }
+  }
+})
+
 test('resolves every generated question key and verifies the linked form contract', () => {
   const fixture = createPublishedFormFixture()
   const keyMap = remapFixtureKeys(fixture)
@@ -471,6 +513,10 @@ test('builds the downstream submission assertion contract with both contact name
     fields: {
       '姓名[1]': '自动化测试用户650389',
       '姓名[2]': '题组联系人650389',
+    },
+    fieldIdentities: {
+      '姓名[1]': { itemKey: FIELD_KEYS.username, groupCode: '', groupIndex: null },
+      '姓名[2]': { itemKey: FIELD_KEYS.groupUsername, groupCode: FIELD_KEYS.fieldGroup, groupIndex: 1 },
     },
   })
 })

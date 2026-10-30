@@ -242,7 +242,7 @@ export function createManualSubmissionFormHtml({
             .replaceAll('<', '&lt;')
             .replaceAll('>', '&gt;')
             .replaceAll('"', '&quot;')
-          const replyRow = (label, value) => '<div class="reply-kv__row"><span class="reply-kv__label">' + escapeDetail(label) + '</span><div class="reply-kv__value">' + escapeDetail(value) + '</div></div>'
+          const replyRow = (label, value, group = false) => '<div class="reply-kv__row"' + (group ? ' data-group-code="' + keys.fieldGroup + '" data-group-index="1"' : '') + '><span class="reply-kv__label">' + escapeDetail(group ? '题组 / 第 1 组 / ' + label : label) + '</span><div class="reply-kv__value">' + escapeDetail(value) + '</div></div>'
           const checkedLabels = [...document.querySelectorAll('.fb-ui-checkbox-root[data-state="checked"]')]
             .map((control) => control.textContent.trim()).join(' ')
           const matrixAnswers = [...document.querySelectorAll('[data-matrix-cell]')]
@@ -274,9 +274,9 @@ export function createManualSubmissionFormHtml({
             replyRow('文件上传', state.fileName),
             replyRow('级联选择', '华东区 江苏省 南京市'),
             '<div class="reply-kv__row"><span class="reply-kv__label">手写签名</span><div class="reply-kv__value"><img src="/fixture-assets/radio-option.png" alt="手写签名"></div></div>',
-            replyRow('姓名', valueOf('#group-username-input')),
-            replyRow('手机号', valueOf('#group-mobile-input')),
-            replyRow('邮箱', valueOf('#group-email-input')),
+            replyRow('姓名', valueOf('#group-username-input'), true),
+            replyRow('手机号', valueOf('#group-mobile-input'), true),
+            replyRow('邮箱', valueOf('#group-email-input'), true),
             '<div class="reply-kv__row"><span class="reply-kv__label">矩阵题</span><div class="reply-kv__value"><button class="reply-kv__matrix-view" type="button" data-modal-id="matrix-detail-modal">点击查看</button></div></div>',
             '<div class="reply-kv__row"><span class="reply-kv__label">矩阵选择</span><div class="reply-kv__value"><button class="reply-kv__matrix-view" type="button" data-modal-id="matrix-choice-detail-modal">点击查看</button></div></div>',
             replyRow('排序题', state.ranking.join(' ')),

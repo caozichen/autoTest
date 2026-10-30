@@ -148,28 +148,27 @@ for (const [name, status, payload] of [
   assert.equal(f.requests.get(`POST ${path}`), 1)
 })
 
-test('navigation excludes another page, persistent streams, telemetry and AI polling without headers', async t => {
+test('navigation excludes another page, persistent streams and telemetry', async t => {
   const stream = '/api/f/events'
   const telemetry = '/telemetry'
-  const poll = '/api/be/form/waiting/translation/ai/status'
   const other = '/api/f/other-page'
   const f = await fixture(t, {
     [stream]: { contentType: 'text/event-stream' }, [telemetry]: {},
-    [poll]: { holdHeaders: true }, [other]: {},
+    [other]: {},
   })
   const otherPage = await f.context.newPage()
   await otherPage.goto(f.origin)
   await startFetches(otherPage, [{ path: other }])
-  await startFetches(f.page, [{ path: stream }, { path: telemetry }, { path: poll, holdHeaders: true }])
+  await startFetches(f.page, [{ path: stream }, { path: telemetry }])
   const warnings = []
   assert.equal(await waitForPageResponsesBeforeNavigation(f.page, f.observer, {
-    origins: [f.origin], timeoutMs: 150, logger: (...args) => warnings.push(args),
+    origins: [f.origin], timeoutMs: 150, quietMs: 0, logger: (...args) => warnings.push(args),
   }), true)
   assert.equal(f.observer.stopped, false)
   assert.deepEqual(warnings, [])
   // A scoped navigation wait must not discard unrelated in-flight evidence.
   const result = await f.observer.stop({ signal: AbortSignal.abort() })
-  for (const path of [stream, telemetry, poll, other]) {
+  for (const path of [stream, telemetry, other]) {
     const entry = result.api.find(candidate => new URL(candidate.url).pathname === path)
     assert.equal(entry?.incomplete, true, path)
     assert.equal(entry?.failureKind, 'aborted', path)

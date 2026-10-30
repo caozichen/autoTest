@@ -152,7 +152,7 @@ function mockReplyPageHtml() {
           '<span class="reply-kv__value">姓名</span></section>' +
           '<section class="reply-kv__row"><span class="reply-kv__label">姓名</span>' +
           '<span class="reply-kv__value">' + escapeHtml(state.username) + '</span></section>' +
-          '<section class="reply-kv__row"><span class="reply-kv__label">姓名</span>' +
+          '<section class="reply-kv__row" data-group-code="group-fixture" data-group-index="1"><span class="reply-kv__label">题组 / 第 1 组 / 姓名</span>' +
           '<span class="reply-kv__value">' + escapeHtml(state.groupUsername) + '</span></section>',
         '<button id="edit" type="button">編輯</button>',
       )
@@ -430,7 +430,7 @@ test('records a configured detail-field assertion failure and still submits the 
       apiBaseUrl: `${origin}/api`,
       extraHTTPHeaders: { Authorization: 'Bearer reply-edit-token' },
       variables: {
-        SUBMISSION_ASSERTIONS: JSON.stringify({ fields: { 姓名: '姓名' } }),
+        SUBMISSION_ASSERTIONS: JSON.stringify({ fields: { 姓名: '应当不存在的姓名值' } }),
         SUBMISSION_EDIT_VALUES: JSON.stringify({ '姓名[1]': '断言失败后仍提交的姓名' }),
       },
       logger: (level, message, details) => logs.push({ level, message, details }),
@@ -448,7 +448,7 @@ test('records a configured detail-field assertion failure and still submits the 
     assert.equal(screenshotCaptures.length, 0)
     const failedAssertionIndex = assertions.findIndex((assertion) => (
       assertion.status === 'failed'
-      && assertion.name.includes('提报详情应唯一显示字段“姓名”')
+      && assertion.name.includes('提报详情字段“姓名”应显示配置值')
     ))
     const completedAssertionIndex = assertions.findIndex((assertion) => (
       assertion.status === 'passed'

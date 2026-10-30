@@ -1,3 +1,4 @@
+import { detailFieldRows, parseFieldIdentities } from './support/submission-detail-fields.mjs'
 import { resolveAdminLocale } from './support/admin-locale.mjs'
 import { parseSearchSamples, assertPersistedSearchSamples } from './support/submission-search-samples.mjs'
 import { scaleTimeout } from './support/environment-timeouts.mjs'
@@ -135,7 +136,7 @@ function parseSubmissionAssertions(value) {
   const fields = normalizeFieldAssertions(parsed.fields)
   const editFields = normalizeEditFieldAssertions(parsed.editFields)
   const unknownKeys = Object.keys(parsed).filter((key) => (
-    !['title', 'status', 'texts', 'fields', 'editFields', 'primaryContactName', 'groupContactName', 'searchSamples'].includes(key)
+    !['title', 'status', 'texts', 'fields', 'editFields', 'primaryContactName', 'groupContactName', 'searchSamples', 'fieldIdentities'].includes(key)
   ))
   if (unknownKeys.length > 0) {
     throw new Error(`SUBMISSION_ASSERTIONS 包含不支持的配置项：${unknownKeys.join(', ')}`)
@@ -146,6 +147,7 @@ function parseSubmissionAssertions(value) {
     texts,
     fields,
     editFields,
+    ...(parsed.fieldIdentities === undefined ? {} : { fieldIdentities: parseFieldIdentities(parsed.fieldIdentities, Object.fromEntries(fields.map(field => [field.label, field.expectedText]))) }),
     ...(parsed.searchSamples === undefined ? {} : { searchSamples: parseSearchSamples(parsed.searchSamples) }),
     configuredAssertionCount: Number(Boolean(title))
       + Number(Boolean(status))
@@ -204,13 +206,8 @@ function fieldHeading(page, reference) {
   return occurrence === null ? headings : headings.nth(occurrence - 1)
 }
 
-function detailFieldRow(page, reference) {
-  const { label, occurrence } = parseFieldReference(reference)
-  const labelPattern = new RegExp(`^\\s*${escapeRegExp(label)}\\s*$`)
-  const rows = page.locator('.reply-kv__row').filter({
-    has: page.locator('.reply-kv__label').filter({ hasText: labelPattern }),
-  })
-  return occurrence === null ? rows : rows.nth(occurrence - 1)
+async function detailFieldRow(page, reference, identity) {
+  return detailFieldRows(page, reference, { identity })
 }
 
 async function detailFieldValue(row) {
@@ -308,7 +305,7 @@ async function assertInitialDetailStructure(page, {
     ).toBeVisible()
   }
   for (const field of verifyConfiguredAssertions ? assertions.fields : []) {
-    const replyRows = detailFieldRow(page, field.label)
+    const replyRows = await detailFieldRow(page, field.label, assertions.fieldIdentities?.[field.label])
     const useReplyRow = await replyRows.count() > 0
     const fieldTarget = useReplyRow ? replyRows : fieldHeading(page, field.label)
     await expect(fieldTarget, `提报详情应唯一显示字段“${field.label}”`).toHaveCount(1)
@@ -417,7 +414,7 @@ async function applyEditValues(page, editValues) {
 
 async function assertAppliedDetailValues(page, editValues) {
   for (const [field, value] of Object.entries(editValues)) {
-    const row = detailFieldRow(page, field)
+    const row = await detailFieldRow(page, field)
     await expect(row, `提交成功后详情态应唯一显示字段“${field}”`).toHaveCount(1)
     if (await row.count() !== 1) continue
     await expect(row, `提交成功后详情态字段“${field}”应可见`).toBeVisible()

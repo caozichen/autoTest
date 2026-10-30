@@ -17,7 +17,7 @@ function option(name, value) {
   return { name, value }
 }
 
-export function createPublishedFormFixture() {
+export function createPublishedFormFixture({ mainland = false } = {}) {
   const requiredKeys = new Set(REQUIRED_ROOT_FIELD_KEYS)
   const items = Object.entries(PUBLISHED_FIELD_TYPES).map(([itemKey, typeCode]) => ({
     item_key: itemKey,
@@ -39,7 +39,12 @@ export function createPublishedFormFixture() {
     },
   })
   field(FIELD_KEYS.email).rule_config.regex_format = { enabled: 1 }
-  const documentTypes = Array.from({ length: 10 }, (_, index) => ({
+  const documentTypes = mainland ? [
+    { code: 'id_card', title: '身份证' },
+    { code: 'passport', title: '护照' },
+    { code: 'hk_macau_mainland_travel_permit', title: '港澳居民来往内地通行证' },
+    { code: 'taiwan_mainland_travel_permit', title: '台湾居民来往大陆通行证' },
+  ] : Array.from({ length: 10 }, (_, index) => ({
     code: `document_${index + 1}`,
     title: `证件${index + 1}`,
   }))
@@ -86,6 +91,7 @@ export function createPublishedFormFixture() {
   }
   field(FIELD_KEYS.imageUpload).common_config = {
     max_size: 20,
+    min_file_quantity: 1,
     max_file_quantity: 1,
     media_type: [{
       type: 'image',
@@ -94,6 +100,7 @@ export function createPublishedFormFixture() {
   }
   field(FIELD_KEYS.fileUpload).common_config = {
     max_size: 20,
+    min_file_quantity: 1,
     max_file_quantity: 1,
     media_type: [{ type: 'unlimited', extensions: [] }],
   }

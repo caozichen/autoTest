@@ -311,6 +311,7 @@ export function attachNetworkObserver(target, {
   responseDrainTimeoutMs = scaleTimeout(DEFAULT_RESPONSE_DRAIN_TIMEOUT_MS, {
     hongKongMs: HONG_KONG_RESPONSE_DRAIN_TIMEOUT_MS,
   }),
+  imageDrainTimeoutMs = responseDrainTimeoutMs,
   initialPhase = DEFAULT_NETWORK_PHASE,
   includeApi = true,
   includeResources = true,
@@ -1118,9 +1119,21 @@ export function attachNetworkObserver(target, {
     stopPromise = (async () => {
       stopping = true
       const timeoutMs = Math.max(0, Number(responseDrainTimeoutMs) || 0)
+      const imageTimeoutMs = timeoutMs > 0 && !discardPending
+        ? Math.max(timeoutMs, Number(imageDrainTimeoutMs) || 0)
+        : timeoutMs
+      const drainStartedAt = Date.now()
+      const isImage = ({ request, category, resourceType }) => category === 'resource'
+        && resourceType === 'image' && ['GET', 'HEAD'].includes(request.method())
       let cancelled = false
       try {
         await waitUntilIdle(timeoutMs, signal, shouldWaitFor)
+        // Opted-in images share one total deadline; unrelated background traffic cannot extend it.
+        if (imageTimeoutMs > timeoutMs) {
+          await waitUntilIdle(Math.max(0, imageTimeoutMs - (Date.now() - drainStartedAt)), signal,
+            candidate => isImage(candidate)
+              && (typeof shouldWaitFor !== 'function' || shouldWaitFor(candidate) !== false))
+        }
       } catch (error) {
         if (!signal?.aborted) throw error
         cancelled = true
@@ -1168,7 +1181,7 @@ export function attachNetworkObserver(target, {
           }),
           error: cancelled
             ? '运行取消时网络请求仍未完成，网络观察器已立即封账'
-            : `网络观察器封账时请求仍未完成（已等待 ${timeoutMs}ms）`,
+            : `网络观察器封账时请求仍未完成（已等待 ${isImage(state) ? imageTimeoutMs : timeoutMs}ms）`,
           failureKind: cancelled ? 'aborted' : 'timeout',
           incomplete: true,
         }, state.diagnostics))

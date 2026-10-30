@@ -1,3 +1,4 @@
+import { detailFieldRows } from './support/submission-detail-fields.mjs'
 import { resolveAdminLocale } from './support/admin-locale.mjs'
 import { clickWhenReady, observeUiReadiness } from './support/ui-readiness.mjs'
 import { scaleTimeout } from './support/environment-timeouts.mjs'
@@ -538,25 +539,21 @@ async function fillAllFields(page, fieldKeys, data, fixtures, logger) {
   })
 }
 
-function replyRows(page, label) {
-  const pattern = new RegExp(`^\\s*${escapeRegExp(label)}\\s*$`)
-  return page.locator('.reply-kv__row').filter({
-    has: page.locator('.reply-kv__label').filter({ hasText: pattern }),
-  })
+async function replyRows(page, label, occurrence = null, identity) {
+  return detailFieldRows(page, occurrence === null ? label : `${label}[${occurrence}]`, { identity })
 }
 
-async function assertReplyValue(page, label, value, occurrence = 1) {
-  const rows = replyRows(page, label)
-  await expect(rows, `详情态应显示第 ${occurrence} 个“${label}”字段`).not.toHaveCount(0)
-  if (await rows.count() < occurrence) return 0
-  const row = rows.nth(occurrence - 1)
+async function assertReplyValue(page, label, value, occurrence = 1, identity) {
+  const row = await replyRows(page, label, occurrence, identity)
+  await expect(row, `详情态应唯一显示第 ${occurrence} 个“${label}”字段`).toHaveCount(1)
+  if (await row.count() !== 1) return 0
   await expect(row, `详情态第 ${occurrence} 个“${label}”字段应可见`).toBeVisible()
   await expect(row.locator('.reply-kv__value'), `详情态“${label}”应回显创建值`).toContainText(String(value))
   return 1
 }
 
 async function openMatrixDetail(page, label) {
-  const row = replyRows(page, label).first()
+  const row = (await replyRows(page, label)).first()
   await expect(row, `详情态应显示“${label}”字段`).toBeVisible()
   const button = row.locator('.reply-kv__matrix-view')
   await expect(button, `详情态“${label}”应提供“点击查看”操作`).toHaveCount(1)
@@ -576,7 +573,7 @@ async function closeMatrixDetail(modal, label) {
   await expect(modal, `关闭后“${label}”详情弹层应隐藏`).toBeHidden()
 }
 
-async function assertDetailState(page, { formId, submissionId, title, data, fixtures }) {
+async function assertDetailState(page, { formId, submissionId, title, data, fixtures, fieldKeys }) {
   await expect(page.getByRole('heading', { level: 2 }).first(), '创建成功后详情态应显示表单标题')
     .toContainText(title, { timeout: scaleTimeout(ACTION_TIMEOUT_MS) })
   const summaryStatuses = page.locator('.reply-detail-page__summary-status')
@@ -592,7 +589,7 @@ async function assertDetailState(page, { formId, submissionId, title, data, fixt
   expect(new URL(page.url()).searchParams.get('fid'), '详情态 URL 应保留目标 fid').toBe(formId)
 
   let assertedValueCount = 0
-  for (const [label, value, occurrence] of [
+  const plannedFields = [
     ['姓名', data.username, 1],
     ['手机号', data.mobile, 1],
     ['邮箱', data.email, 1],
@@ -605,32 +602,36 @@ async function assertDetailState(page, { formId, submissionId, title, data, fixt
     ['数字', data.number, 1],
     ['日期', data.selectedDate, 1],
     ['时间', data.selectedTime, 1],
-    ['姓名', data.groupUsername, 2],
-    ['手机号', data.groupMobile, 2],
-    ['邮箱', data.groupEmail, 2],
+    ['姓名', data.groupUsername, 2, fieldKeys?.groupUsername],
+    ['手机号', data.groupMobile, 2, fieldKeys?.groupMobile],
+    ['邮箱', data.groupEmail, 2, fieldKeys?.groupEmail],
     ['评分题', data.rating, 1],
     ['NPS', data.nps, 1],
-  ]) {
-    assertedValueCount += await assertReplyValue(page, label, value, occurrence)
+  ]
+  for (const [label, value, occurrence, itemKey] of plannedFields) {
+    const identity = itemKey ? { itemKey, groupCode: fieldKeys.fieldGroup, groupIndex: 1 } : undefined
+    assertedValueCount += await assertReplyValue(page, label, value, occurrence, identity)
   }
-  const addressRow = replyRows(page, '地址').first()
+  expect(assertedValueCount, '详情态必须完成全部计划字段值校验，不能跳过缺失的题组字段').toBe(plannedFields.length)
+  flowExpect(assertedValueCount, '缺少必检字段时必须终止详情校验').toBe(plannedFields.length)
+  const addressRow = (await replyRows(page, '地址')).first()
   await expect(addressRow, '详情态应显示地址字段').toBeVisible()
   for (const value of [data.province, data.city, data.district, data.street]) {
     await expect(addressRow, `详情态地址应回显“${value}”`).toContainText(value)
     assertedValueCount += 1
   }
-  const birthdayRow = replyRows(page, '生日').first()
+  const birthdayRow = (await replyRows(page, '生日')).first()
   await expect(birthdayRow, '详情态应显示生日字段').toBeVisible()
   for (const value of Object.values(data.birthday)) {
     await expect(birthdayRow, `详情态生日应包含“${value}”`).toContainText(String(Number(value)))
     assertedValueCount += 1
   }
-  const checkboxRow = replyRows(page, '多项选择').first()
+  const checkboxRow = (await replyRows(page, '多项选择')).first()
   for (const value of data.checkbox) {
     await expect(checkboxRow, `详情态多项选择应回显“${value}”`).toContainText(value)
     assertedValueCount += 1
   }
-  const cascaderRow = replyRows(page, '级联选择').first()
+  const cascaderRow = (await replyRows(page, '级联选择')).first()
   for (const value of data.cascader) {
     await expect(cascaderRow, `详情态级联选择应回显“${value}”`).toContainText(value)
     assertedValueCount += 1
@@ -658,7 +659,7 @@ async function assertDetailState(page, { formId, submissionId, title, data, fixt
     }
     await closeMatrixDetail(matrixChoiceModal, '矩阵选择')
   }
-  const rankingRow = replyRows(page, '排序题').first()
+  const rankingRow = (await replyRows(page, '排序题')).first()
   const rankingText = await rankingRow.innerText().catch(() => '')
   let cursor = -1
   for (const value of data.ranking) {
@@ -667,11 +668,11 @@ async function assertDetailState(page, { formId, submissionId, title, data, fixt
     cursor = index
     assertedValueCount += 1
   }
-  const signatureRow = replyRows(page, '手写签名').first()
+  const signatureRow = (await replyRows(page, '手写签名')).first()
   await expect(signatureRow.locator('img'), '详情态手写签名应回显图片').not.toHaveCount(0)
-  const imageRow = replyRows(page, '图片上传').first()
+  const imageRow = (await replyRows(page, '图片上传')).first()
   await expect(imageRow.locator('img'), '详情态图片上传应回显图片').not.toHaveCount(0)
-  const fileRow = replyRows(page, '文件上传').first()
+  const fileRow = (await replyRows(page, '文件上传')).first()
   await expect(fileRow, '详情态文件上传应回显原文件名').toContainText(fixtures.filePath.split(/[\\/]/).pop())
   return assertedValueCount + 3
 }
@@ -741,6 +742,7 @@ function createOutput({
 export async function run({
   scriptId = SCRIPT_ID,
   scriptName = scriptId,
+  environmentCode,
   siteBaseUrl,
   apiBaseUrl,
   requestPath = DEFAULT_REQUEST_PATH,
@@ -883,6 +885,7 @@ export async function run({
       normalizeAdminFormPayload(formBody),
       formId,
       linkedFormContract,
+      { environmentCode },
     )
     const fieldKeys = publishedContract.fieldKeys
     const title = publishedContract.title
@@ -998,6 +1001,7 @@ export async function run({
         title,
         data,
         fixtures,
+        fieldKeys: publishedContract.fieldKeys,
       })
     }
 
@@ -1062,6 +1066,7 @@ export async function run({
 }
 
 export {
+  assertReplyValue,
   DEFAULT_REQUEST_PATH,
   buildCreateUrl,
   detailSubmissionId,

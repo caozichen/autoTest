@@ -843,7 +843,7 @@ function mockApplicationHtml({ mainland = false } = {}) {
           '<div class="form-activity-step-nav"><span class="form-activity-step" id="settings">' +
             '<span class="form-activity-step__text">基础设置</span></span></div>',
           '<header><span>基础设置</span></header>',
-          ${mainland} ? '' : '<div role="dialog" id="collect-dialog"><h2>是否收录联系人</h2>' +
+          '<div role="dialog" id="collect-dialog"><h2>是否收录联系人</h2>' +
             button('确认收录到联系人', 'id="confirm-collect"') + '</div>',
         ].join('')
         document.querySelectorAll('.palette [data-component-type]').forEach((element) => {
@@ -907,13 +907,20 @@ function mockApplicationHtml({ mainland = false } = {}) {
             richEditor.focus()
           }
         })
-        if (!${mainland}) document.querySelector('#confirm-collect').onclick = () => {
+        document.querySelector('#confirm-collect').onclick = () => {
           document.querySelector('#collect-dialog').innerHTML = [
             '<h2>联系人信息替换确认</h2>',
             '<label><input type="radio" name="initial-strategy" value="ignore">忽略，不替换</label>',
             button('确定', 'id="confirm-initial-strategy"'),
           ].join('')
-          document.querySelector('#confirm-initial-strategy').onclick = () => {
+          document.querySelector('#confirm-initial-strategy').onclick = async () => {
+            if (${mainland}) {
+              await api('/be/form/202/config', { method: 'PUT', body: JSON.stringify({
+                submitted_config: { contact_collect_mode: {
+                  enabled: 1, selected: document.querySelector('#collect-dialog input:checked').value, default: 'ignore',
+                } },
+              }) })
+            }
             addType('contactGroup')
             document.querySelector('#collect-dialog').remove()
           }
@@ -1232,7 +1239,7 @@ async function checkCompleteForm({ mainland, execute }) {
       if (body.revision_no) savedConfigPayload = body
       assert.equal(body.expected_edit_token, editToken())
       editVersion += 1
-      strategy = body.selected || strategy
+      strategy = body.submitted_config?.contact_collect_mode?.selected || body.selected || strategy
       sendJson(response, { code: 0, message: 'success', data: { revision_no: 1, edit_token: editToken() } })
       return
     }
@@ -1488,11 +1495,20 @@ async function checkCompleteForm({ mainland, execute }) {
     assert.equal(savedConfigPayload.theme_config.submit_button.background_color, '#2563eb')
     assert.equal(savedConfigPayload.theme_config.form_container.background_color, '#e2e8f0')
     assert.equal(savedConfigPayload.theme_config.wallpaper.background_color.color, '#0f766e')
-    assert.equal(strategy, mainland ? '' : 'ignore')
+    assert.equal(strategy, 'ignore')
+    const initialContactConfigs = requests.filter(entry => entry.body.submitted_config?.contact_collect_mode)
+    if (mainland) {
+      assert.equal(initialContactConfigs.length, 1, '内地首次联系人策略只保存一次')
+      const [initialContactConfig] = initialContactConfigs
+      assert.deepEqual(initialContactConfig?.body.submitted_config.contact_collect_mode,
+        { enabled: 1, selected: 'ignore', default: 'ignore' }, '内地设计器首次弹窗必须保存收录和忽略策略')
+      assert.ok(requests.indexOf(initialContactConfig) < requests.findIndex(entry => entry.body.theme_config),
+        '首次联系人策略必须在保存完整草稿前完成')
+    }
     assert.equal(
       requests.filter((entry) => entry.path === '/api/be/form/202/config' && entry.body.selected === 'ignore').length,
       mainland ? 0 : 1,
-      mainland ? '内地不存在全局策略菜单，不应伪造策略写入' : '设置页负责持久化忽略策略',
+      mainland ? '内地策略已在设计器保存，不应伪造设置菜单写入' : '设置页负责持久化忽略策略',
     )
     assert.equal(published, true)
 
@@ -1548,7 +1564,7 @@ async function checkCompleteForm({ mainland, execute }) {
 
 for (const { mainland, execute, name } of [
   { mainland: false, execute: run, name: 'creates, configures, uploads, saves, and publishes the complete three-page form' },
-  { mainland: true, execute: runMainland, name: 'mainland: publishes the same complete form without collection dialogs or global collection settings' },
+  { mainland: true, execute: runMainland, name: 'mainland: confirms collection onboarding and publishes without a global collection settings menu' },
 ]) {
   test(name, () => checkCompleteForm({ mainland, execute }))
 }

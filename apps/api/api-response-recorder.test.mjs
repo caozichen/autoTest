@@ -211,6 +211,115 @@ for (const attach of [attachNetworkObserver, attachApiResponseRecorder]) {
   })
 }
 
+test('opt-in image drain accepts a slow image without waiting longer for unrelated traffic', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+  const flush = () => new Promise(resolve => setImmediate(resolve))
+  const runs = [undefined, 10_000].map(imageDrainTimeoutMs => {
+    const target = new FakeNetworkTarget()
+    const observer = attachNetworkObserver(target, { responseDrainTimeoutMs: 2_000, imageDrainTimeoutMs })
+    const image = fakeRequest({ resourceType: 'image', url: 'https://example.test/slow.png' })
+    target.emit('request', image)
+    target.emit('response', fakeResponse(image, { headers: { 'content-type': 'image/png' } }))
+    target.emit('request', fakeRequest({ url: 'https://example.test/api/telemetry' }))
+    const run = { target, observer, image, result: null }
+    run.stopping = observer.stop().then(result => { run.result = result })
+    return run
+  })
+  t.mock.timers.tick(2_000)
+  await flush()
+  assert.equal(runs[0].result.resources[0].incomplete, true)
+  assert.match(runs[0].result.resources[0].error, /已等待 2000ms/)
+  assert.equal(runs[1].result, null)
+  t.mock.timers.tick(1_000)
+  runs[1].target.emit('requestfinished', runs[1].image)
+  await flush()
+  assert.equal(runs[1].result.resources[0].ok, true)
+  assert.equal(runs[1].result.api[0].incomplete, true)
+  await Promise.all(runs.map(run => run.stopping))
+})
+
+test('image drain has one total deadline and preserves real HTTP and transport failures', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+  const flush = () => new Promise(resolve => setImmediate(resolve))
+  const target = new FakeNetworkTarget()
+  const observer = attachNetworkObserver(target, { responseDrainTimeoutMs: 2_000, imageDrainTimeoutMs: 10_000 })
+  const images = ['pending', 'missing', 'failed'].map(name => fakeRequest({
+    resourceType: 'image', url: `https://example.test/${name}.png`, failure: { errorText: 'net::ERR_TIMED_OUT' },
+  }))
+  for (const image of images) target.emit('request', image)
+  let result
+  const stopping = observer.stop().then(value => { result = value })
+  t.mock.timers.tick(2_000)
+  await flush()
+  t.mock.timers.tick(1_000)
+  target.emit('response', fakeResponse(images[1], { status: 404, headers: { 'content-type': 'image/png' } }))
+  target.emit('requestfinished', images[1])
+  target.emit('requestfailed', images[2])
+  await flush()
+  t.mock.timers.tick(6_999)
+  await flush()
+  assert.equal(result, undefined)
+  t.mock.timers.tick(1)
+  await stopping
+  const pending = result.resources.find(entry => entry.url.endsWith('/pending.png'))
+  assert.equal(pending.incomplete, true)
+  assert.match(pending.error, /已等待 10000ms/)
+  const missing = result.resources.find(entry => entry.url.endsWith('/missing.png'))
+  assert.equal(missing.ok, false)
+  assert.equal(missing.failureKind, 'http')
+  const failed = result.resources.find(entry => entry.url.endsWith('/failed.png'))
+  assert.equal(failed.ok, false)
+  assert.equal(failed.error, 'net::ERR_TIMED_OUT')
+})
+
+test('cancellation interrupts the extra image drain and removes listeners', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+  const target = new FakeNetworkTarget()
+  const observer = attachNetworkObserver(target, { responseDrainTimeoutMs: 2_000, imageDrainTimeoutMs: 10_000 })
+  target.emit('request', fakeRequest({ resourceType: 'image', url: 'https://example.test/pending.png' }))
+  const controller = new AbortController()
+  const stopping = observer.stop({ signal: controller.signal })
+  t.mock.timers.tick(2_000)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(getEventListeners(controller.signal, 'abort').length, 1)
+  controller.abort()
+  const result = await stopping
+  assert.equal(result.resources[0].failureKind, 'aborted')
+  assert.equal(getEventListeners(controller.signal, 'abort').length, 0)
+  for (const event of ['request', 'response', 'requestfinished', 'requestfailed']) {
+    assert.equal(target.listenerCount(event), 0)
+  }
+})
+
+test('extra image drain respects zero timeout, discard, scope, and API-only traffic', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+  const runs = [
+    { timeout: 0 },
+    { stop: { discardPending: true } },
+    { stop: { shouldWaitFor: () => false } },
+    { resourceType: 'fetch' },
+  ].map(options => {
+    const target = new FakeNetworkTarget()
+    const observer = attachNetworkObserver(target, {
+      responseDrainTimeoutMs: options.timeout ?? 2_000, imageDrainTimeoutMs: 10_000,
+    })
+    target.emit('request', fakeRequest({
+      resourceType: options.resourceType ?? 'image',
+      url: options.resourceType ? 'https://example.test/api/pending' : 'https://example.test/pending.png',
+    }))
+    return observer.stop(options.stop)
+  })
+  // Let the zero-timeout and scoped waits settle before advancing the normal deadline.
+  t.mock.timers.tick(0)
+  await new Promise(resolve => setImmediate(resolve))
+  t.mock.timers.tick(2_000)
+  const results = await Promise.all(runs)
+  assert.match(results[0].resources[0].error, /已等待 0ms/)
+  assert.equal(results[1].summary.discardedPending, 1)
+  assert.equal(results[2].summary.discardedPending, 1)
+  assert.match(results[3].api[0].error, /已等待 2000ms/)
+})
+
 test('context observer separates APIs and resources and snapshots request phase and location', async () => {
   const context = new FakeNetworkTarget()
   const apiResponses = []

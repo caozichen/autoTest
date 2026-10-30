@@ -1,3 +1,4 @@
+import { detailFieldRows, parseFieldIdentities } from './support/submission-detail-fields.mjs'
 import { resolveAdminLocale } from './support/admin-locale.mjs'
 import { parseSearchSamples } from './support/submission-search-samples.mjs'
 import { clickWhenReady, observeUiReadiness } from './support/ui-readiness.mjs'
@@ -136,7 +137,7 @@ function assertConsistentName(explicitName, fieldName, label) {
 function parseSubmissionAssertions(value) {
   const parsed = parseJsonObject(value, 'SUBMISSION_ASSERTIONS')
   const unknownKeys = Object.keys(parsed).filter((key) => (
-    !['title', 'primaryContactName', 'groupContactName', 'fields', 'searchSamples'].includes(key)
+    !['title', 'primaryContactName', 'groupContactName', 'fields', 'searchSamples', 'fieldIdentities'].includes(key)
   ))
   if (unknownKeys.length > 0) {
     throw new Error(`SUBMISSION_ASSERTIONS 包含不支持的配置项：${unknownKeys.join(', ')}`)
@@ -167,6 +168,7 @@ function parseSubmissionAssertions(value) {
     primaryContactName,
     groupContactName,
     fields,
+    ...(parsed.fieldIdentities === undefined ? {} : { fieldIdentities: parseFieldIdentities(parsed.fieldIdentities, fields) }),
     ...(parsed.searchSamples === undefined ? {} : { searchSamples: parseSearchSamples(parsed.searchSamples) }),
     configuredAssertionCount: Number(Boolean(title))
       + Number(Boolean(primaryContactName))
@@ -495,15 +497,21 @@ async function targetRowFromIndex(page, targetIndex) {
   return row
 }
 
-async function detailNameValues(page, scope = page) {
-  const rows = scope.locator('.reply-kv__row').filter({
-    has: page.locator('.reply-kv__label').filter({ hasText: NAME_LABEL_PATTERN }),
-  })
-  await expect(rows, '提报详情页应显示题组外和题组内两个姓名字段').toHaveCount(2)
-  await flowExpect.poll(() => rows.count(), { message: '后续联系人校验至少需要两个姓名字段' }).toBeGreaterThanOrEqual(2)
+async function detailNameValues(page, scope = page, fieldIdentities = {}) {
+  const allRows = scope.locator('.reply-kv__row')
+  const modern = await allRows.locator('xpath=self::*[@data-group-code and string-length(@data-group-code)>0]').count() > 0
+  const legacyRows = allRows.filter({ has: page.locator('.reply-kv__label').filter({ hasText: NAME_LABEL_PATTERN }) })
+  if (!modern) {
+    await expect(legacyRows, '提报详情页应显示题组外和题组内两个姓名字段').toHaveCount(2)
+    await flowExpect.poll(() => legacyRows.count(), { message: '后续联系人校验至少需要两个姓名字段' }).toBeGreaterThanOrEqual(2)
+  }
   const names = []
-  for (let index = 0; index < 2; index += 1) {
-    const value = normalizeWhitespace(await rows.nth(index).locator('.reply-kv__value').innerText())
+  for (const [index, reference] of ['姓名[1]', '姓名[2]'].entries()) {
+    const identity = fieldIdentities[reference] ?? fieldIdentities[`Name[${index + 1}]`]
+    const row = modern ? await detailFieldRows(page, reference, { scope, identity }) : legacyRows.nth(index)
+    await expect(row, `提报详情${index ? '题组内' : '题组外'}姓名字段应唯一`).toHaveCount(1)
+    await flowExpect(row, '姓名字段身份不明确时必须停止后续联系人检查').toHaveCount(1)
+    const value = normalizeWhitespace(await row.locator('.reply-kv__value').innerText())
     expect(value, `提报详情第 ${index + 1} 个姓名值不能为空`).not.toBe('')
     names.push(value)
   }
@@ -568,7 +576,7 @@ async function openAndInspectDetail(page, {
   expect(submission?.form_id, '详情接口答卷所属表单 ID 应与当前表单完全一致').toBe(formId)
   await flowExpect(submission?.form_id, '答卷所属表单不匹配时应停止后续详情检查').toBe(formId)
 
-  const names = await detailNameValues(page, detailRoot)
+  const names = await detailNameValues(page, detailRoot, assertions.fieldIdentities)
   const answerNames = []
   const collectNames = (value) => {
     if (!value || typeof value !== 'object') return
@@ -577,14 +585,29 @@ async function openAndInspectDetail(page, {
         const answer = entry.answer
         const name = typeof answer === 'string' ? answer
           : answer?.[answer.collect_mode] || answer?.name_zh || answer?.name_en
-        if (name) answerNames.push(normalizeWhitespace(name))
+        if (name) answerNames.push({
+          name: normalizeWhitespace(name),
+          itemKey: value.base_item_key ?? value.item_key,
+          groupCode: value.group_code ?? '',
+          groupIndex: Number(value.group_index ?? entry.group_index ?? 1),
+        })
       }
       return
     }
     for (const child of Object.values(value)) collectNames(child)
   }
   collectNames(detailInspection.body)
-  const [actualPrimaryName, actualGroupName] = answerNames.length === 2 ? answerNames : names
+  const hasGroupIdentity = answerNames.some(answer => answer.groupCode)
+  const apiNames = hasGroupIdentity ? ['姓名[1]', '姓名[2]'].map((reference, index) => {
+    const identity = assertions.fieldIdentities?.[reference]
+    const matches = answerNames.filter(answer => identity
+      ? answer.itemKey === identity.itemKey && answer.groupCode === identity.groupCode
+        && (!identity.groupCode || answer.groupIndex === identity.groupIndex)
+      : index === 0 ? !answer.groupCode : Boolean(answer.groupCode) && answer.groupIndex === 1)
+    flowExpect(matches, `详情接口必须唯一返回${index ? '目标题组内' : '题组外'}姓名答案`).toHaveLength(1)
+    return matches[0].name
+  }) : answerNames.map(answer => answer.name)
+  const [actualPrimaryName, actualGroupName] = apiNames.length === 2 ? apiNames : names
   expect(names[0], '详情页应显示接口中的题组外姓名，允许附加称谓').toContain(actualPrimaryName)
   expect(names[1], '详情页应显示接口中的题组内姓名，允许附加称谓').toContain(actualGroupName)
   if (assertions.primaryContactName) {

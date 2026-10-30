@@ -346,6 +346,10 @@ async function createFixtureRun(t, {
                 '姓名[1]': fixture.primaryContactName,
                 '姓名[2]': fixture.groupContactName,
               },
+              fieldIdentities: {
+                '姓名[1]': { itemKey: 'username_fixture', groupCode: '', groupIndex: null },
+                '姓名[2]': { itemKey: 'group_username_fixture', groupCode: 'field_group_fixture', groupIndex: 1 },
+              },
             }),
       },
       authorizationOrigin: siteBaseUrl,
