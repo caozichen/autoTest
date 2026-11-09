@@ -1,3 +1,4 @@
+import { getFormListRecords } from './support/form-list-response.mjs'
 import { assertPublicLanguageControl, inspectLanguageControlVariants } from './support/public-language-control.mjs'
 import { createPageCompletionTracker, isRequiredPageRequest, waitForPageResponsesBeforeNavigation } from './support/page-response-completion.mjs'
 import { resolveAdminLocale } from './support/admin-locale.mjs'
@@ -1226,13 +1227,15 @@ function assertTranslationWorkspace(payload, {
   return workspace
 }
 
-function structureOnly(value, parentKey = '') {
-  if (Array.isArray(value)) return value.map((entry) => structureOnly(entry, parentKey))
+function structureOnly(value, path = [], translateChoiceRemarks = false) {
+  if (Array.isArray(value)) return value.map((entry) => structureOnly(entry, [...path, '*'], translateChoiceRemarks))
   if (!isRecord(value)) return value
   const result = {}
   for (const key of Object.keys(value).sort()) {
     if (VOLATILE_STRUCTURE_KEYS.has(key) || TEXTUAL_STRUCTURE_KEYS.has(key)) continue
-    result[key] = structureOnly(value[key], key || parentKey)
+    // Only choice hints are translatable; unrelated remark metadata stays structural.
+    if (translateChoiceRemarks && key === 'remark' && path.join('.') === 'option.choices.*') continue
+    result[key] = structureOnly(value[key], [...path, key], translateChoiceRemarks)
   }
   return result
 }
@@ -1266,7 +1269,7 @@ function structuralSignature(payload, { draft = false } = {}) {
       private: numericValue(item.private),
       rule_config: structureOnly(item.rule_config),
       common_config: structureOnly(item.common_config),
-      option: structureOnly(item.option),
+      option: structureOnly(item.option, ['option'], ['radio', 'checkbox', 'select'].includes(item.type_code)),
     })),
   }
 }
@@ -2519,11 +2522,7 @@ async function completeAndPublish(page, formId, workspace, formTitle, logger) {
 
 function assertPublishedListRecord(payload, formId, formTitle, expectedRevision) {
   const body = isRecord(payload) ? payload : {}
-  const records = Array.isArray(body.data?.list)
-    ? body.data.list
-    : Array.isArray(body.data?.records)
-      ? body.data.records
-      : []
+  const records = getFormListRecords(body, '多语言发布后列表')
   const recordIndex = records.findIndex((candidate) => (
     [candidate?.id, candidate?.form_id].some((value) => String(value ?? '') === formId)
   ))
@@ -2541,10 +2540,23 @@ function assertPublishedListRecord(payload, formId, formTitle, expectedRevision)
   return { record, recordIndex }
 }
 
-async function assertPublishedListUi(page, formTitle, formId, recordIndex) {
-  const rows = page.locator('tbody > tr.arco-table-tr')
-  await flowExpect(rows.nth(recordIndex), 'API 定位的目标 FORM_ID 必须映射到同序号列表行').toBeVisible()
-  const row = rows.nth(recordIndex)
+async function assertPublishedListUi(page, formTitle, formId) {
+  flowExpect(/^[a-zA-Z0-9]+$/.test(formId), '目标 FORM_ID 必须有效才能定位列表行').toBe(true)
+  const operationLinks = page.locator('tbody > tr.arco-table-tr .form-activity-list-operation-bar a')
+  let idSelectors = ''
+  await flowExpect.poll(async () => {
+    idSelectors = await operationLinks.evaluateAll((links, id) => {
+      const hrefs = links.filter(link => new URL(link.href).searchParams.get('id') === id)
+        .map(link => link.getAttribute('href'))
+      return [...new Set(hrefs)].map(href => `[href=${CSS.escape(href)}]`).join(',')
+    }, formId)
+    return Boolean(idSelectors)
+  }, { message: '必须找到查询参数 id 精确匹配目标表单的操作链接' }).toBe(true)
+  const row = page.locator('tbody > tr.arco-table-tr').filter({
+    has: page.locator(`.form-activity-list-operation-bar a:is(${idSelectors})`),
+  })
+  await flowExpect(row, '必须按目标 FORM_ID 唯一定位列表行').toHaveCount(1)
+  await flowExpect(row, '目标表单列表行必须可见').toBeVisible()
   const titleLink = row.locator('.form-activity-list__title-link')
   await expect(titleLink, '多语言发布后目标行应显示一个表单标题').toHaveCount(1)
   await expect(titleLink, '多语言发布后目标行标题应完全匹配').toHaveText(formTitle)
@@ -2582,8 +2594,8 @@ function tryParseShareLink(rawValue) {
   }
 }
 
-async function waitForShareLink(rows, index, label) {
-  const value = rows.locator('.share-link-display-value').nth(index)
+async function waitForShareLink(row, label) {
+  const value = row.locator('.share-link-display-value')
   await flowExpect(value, `${label}展示区域必须可见`).toBeVisible()
   await flowExpect.poll(async () => tryParseShareLink(await value.innerText()), {
     message: `${label}必须在分享页异步生成完成后显示有效绝对 URL`,
@@ -2762,8 +2774,14 @@ async function inspectShareSettingsPage({
   const card = channelCards.first()
   const rows = card.locator('.share-link-display-row')
   await flowExpect(rows, '目标分享渠道必须同时显示长链和短链').toHaveCount(2)
-  const rawLongUrl = await waitForShareLink(rows, 0, '分享长链')
-  const rawShortUrl = await waitForShareLink(rows, 1, '分享短链')
+  const longLabel = /^(长链|长链接|長鏈|長連結|Long link)$/i
+  const shortLabel = /^(短链|短链接|短鏈|短連結|Short link)$/i
+  const longRow = rows.filter({ has: page.locator('.share-link-variant-label').filter({ hasText: longLabel }) })
+  const shortRow = rows.filter({ has: page.locator('.share-link-variant-label').filter({ hasText: shortLabel }) })
+  await flowExpect(longRow, '分享长链必须按类型标识唯一定位').toHaveCount(1)
+  await flowExpect(shortRow, '分享短链必须按类型标识唯一定位').toHaveCount(1)
+  const rawLongUrl = await waitForShareLink(longRow, '分享长链')
+  const rawShortUrl = await waitForShareLink(shortRow, '分享短链')
   const longUrl = parseShareLink(rawLongUrl, '分享长链')
   const shortUrl = parseShareLink(rawShortUrl, '分享短链')
   flowExpect(longUrl, '必须提取有效分享长链，才能继续公开页验证').toBeTruthy()
@@ -2790,8 +2808,26 @@ async function inspectShareSettingsPage({
   }
 
   const qrImage = card.locator('.share-link-qr-image')
-  await expect(qrImage, '分享渠道应显示二维码图片').toHaveCount(1)
-  await expect(qrImage, '分享二维码应可见').toBeVisible()
+  await flowExpect(qrImage, '分享渠道必须显示一个二维码图片').toHaveCount(1)
+  await flowExpect(qrImage, '分享二维码必须可见').toBeVisible()
+  const segmentedButtons = card.locator('.share-link-segmented-button')
+  await flowExpect(segmentedButtons, '二维码必须提供长链和短链两种模式').toHaveCount(2)
+  const longButton = segmentedButtons.filter({ hasText: longLabel })
+  const shortButton = segmentedButtons.filter({ hasText: shortLabel })
+  await flowExpect(longButton, '二维码长链模式必须按名称唯一定位').toHaveCount(1)
+  await flowExpect(shortButton, '二维码短链模式必须按名称唯一定位').toHaveCount(1)
+  await flowExpect(card.locator('.share-link-segmented-button[aria-pressed="true"]'),
+    '二维码必须且只能选择一种模式').toHaveCount(1)
+  // ShareLinkSection.getSelectedQrVariant defaults to short for existing and new channels.
+  expect(await shortButton.getAttribute('aria-pressed'), '二维码默认应选择短链').toBe('true')
+  const initiallyLong = await longButton.getAttribute('aria-pressed') === 'true'
+  const initialMode = initiallyLong
+    ? { button: longButton, value: rawLongUrl, label: '分享长链' }
+    : { button: shortButton, value: rawShortUrl, label: '分享短链' }
+  const otherMode = initiallyLong
+    ? { button: shortButton, value: rawShortUrl, label: '分享短链' }
+    : { button: longButton, value: rawLongUrl, label: '分享长链' }
+  const decodedInitialQr = await decodeQrImage(qrImage, initialMode.value, initialMode.label)
   const qrState = await qrImage.evaluate((image) => ({
     alt: image.getAttribute('alt') ?? '',
     src: image.getAttribute('src') ?? '',
@@ -2804,25 +2840,20 @@ async function inspectShareSettingsPage({
   expect(qrState.naturalWidth, '分享二维码宽度应大于 0').toBeGreaterThan(0)
   expect(qrState.naturalHeight, '分享二维码高度应大于 0').toBeGreaterThan(0)
   expect(qrState.alt, '分享二维码应包含可访问文本').toMatch(/\S+/)
-  const decodedLongQr = await decodeQrImage(qrImage, rawLongUrl, '分享长链')
+  await clickWhenReady(otherMode.button)
+  await expect(otherMode.button, `二维码应能切换到${otherMode.label}模式`).toHaveAttribute('aria-pressed', 'true')
+  await expect(initialMode.button, '切换二维码后原模式应取消选中').toHaveAttribute('aria-pressed', 'false')
+  await expect(qrImage, '长短链二维码图片内容应不同').not.toHaveAttribute('src', qrState.src)
+  const decodedOtherQr = await decodeQrImage(qrImage, otherMode.value, otherMode.label)
+  expect(decodedOtherQr, '长短链二维码不得错误编码为同一链接').not.toBe(decodedInitialQr)
+  await clickWhenReady(initialMode.button)
+  await expect(initialMode.button, `二维码应能切回${initialMode.label}模式`).toHaveAttribute('aria-pressed', 'true')
+  await expect(otherMode.button, '切回二维码后另一模式应取消选中').toHaveAttribute('aria-pressed', 'false')
+  await expect(qrImage, '切回后二维码应恢复原链接图片').toHaveAttribute('src', qrState.src)
+  await decodeQrImage(qrImage, initialMode.value, `切回后的${initialMode.label}`)
 
-  const segmentedButtons = card.locator('.share-link-segmented-button')
-  await expect(segmentedButtons, '二维码应提供长链和短链两种模式').toHaveCount(2)
-  if (await segmentedButtons.count() === 2) {
-    await expect(segmentedButtons.nth(0), '二维码默认应选择长链').toHaveAttribute('aria-pressed', 'true')
-    const longQrSource = qrState.src
-    await clickWhenReady(segmentedButtons.nth(1))
-    await expect(segmentedButtons.nth(1), '二维码应能切换到短链模式').toHaveAttribute('aria-pressed', 'true')
-    await expect(qrImage, '长短链二维码图片内容应不同').not.toHaveAttribute('src', longQrSource)
-    const decodedShortQr = await decodeQrImage(qrImage, rawShortUrl, '分享短链')
-    expect(decodedShortQr, '短链二维码不得错误编码成长链').not.toBe(decodedLongQr)
-    await clickWhenReady(segmentedButtons.nth(0))
-    await expect(segmentedButtons.nth(0), '二维码应能切回长链模式').toHaveAttribute('aria-pressed', 'true')
-    await decodeQrImage(qrImage, rawLongUrl, '切回后的分享长链')
-  }
-
-  await inspectDirectOpenButton(page, rows.nth(0), longUrl, longUrl, '分享长链', completionTracker)
-  const shortOpenedUrl = await inspectDirectOpenButton(page, rows.nth(1), shortUrl, longUrl, '分享短链', completionTracker)
+  await inspectDirectOpenButton(page, longRow, longUrl, longUrl, '分享长链', completionTracker)
+  const shortOpenedUrl = await inspectDirectOpenButton(page, shortRow, shortUrl, longUrl, '分享短链', completionTracker)
   if (shortOpenedUrl) {
     expect(new URL(shortOpenedUrl).searchParams.get('channel_code'), '短链重定向后应落到同一分享渠道')
       .toBe(longUrl.searchParams.get('channel_code'))
@@ -3332,7 +3363,6 @@ export async function run({
       page,
       String(source.form.title ?? ''),
       formId,
-      publishedMatch.recordIndex,
     )
 
     adminNetworkObserver.setPhase('发布后回读与原文保护')
@@ -3635,6 +3665,7 @@ export {
   TARGET_LANGUAGES,
   analyzeTranslationWorkspace,
   assertPublishedListRecord,
+  assertPublishedListUi,
   assertPublishedSourceFormDetail,
   assertShareShortLinkOrigin,
   assertSourceFormDetail,
@@ -3649,6 +3680,7 @@ export {
   disposeRequestContextWithin,
   ensureOriginalTranslationRestored,
   findShareUrlSecretLeaks,
+  inspectShareSettingsPage,
   languageQualityIssues,
   languageCodeForDisplayLabel,
   languageLabelPattern,

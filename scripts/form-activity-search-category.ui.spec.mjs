@@ -1,3 +1,4 @@
+import { getFormListRecords } from './support/form-list-response.mjs'
 import { resolveAdminLocale } from './support/admin-locale.mjs'
 import { attachNetworkObserver } from './support/api-response-recorder.mjs'
 import { expect as flowExpect, scaleTimeout } from './support/environment-timeouts.mjs'
@@ -79,7 +80,7 @@ async function businessResponse(response, label) {
 }
 
 function listRecords(body, label) {
-  const records = body?.data?.list
+  const records = getFormListRecords(body, label)
   expect(Array.isArray(records), `${label}应包含 data.list 数组`).toBe(true)
   flowExpect(Array.isArray(records), `${label}必须返回列表数组`).toBe(true)
   return records
@@ -99,11 +100,15 @@ async function fetchJson(page, apiBaseUrl, authorization, path, label) {
 
 async function sampleRecords(page, apiBaseUrl, authorization) {
   const records = []
+  const seen = new Set()
   for (let pageNumber = 1; pageNumber <= 10; pageNumber += 1) {
     const body = await fetchJson(page, apiBaseUrl, authorization,
       `/be/form/list?page=${pageNumber}&per_page=100`, `样本列表第 ${pageNumber} 页`)
     const batch = listRecords(body, '样本列表')
-    records.push(...batch)
+    for (const record of batch) {
+      if (!seen.has(recordId(record))) records.push(record)
+      seen.add(recordId(record))
+    }
     if (batch.length === 0 || (records.some(record => dayOf(record.end_time))
       && records.some(record => record.time_range === 'in_progress'))) break
   }
@@ -153,10 +158,11 @@ async function assertPageRows(page, records, label) {
   }
 }
 
-function assertFilteredRecords(records, key, value, label) {
+export function assertFilteredRecords(records, key, value, label) {
   for (const record of records) {
     let matched = true
-    if (key === 'filter[title]') matched = String(record.title ?? '').includes(value)
+    if (key === 'filter[title]') matched = [record.title, record.remark]
+      .some(text => String(text ?? '').includes(value))
     if (key === 'filter[creator_name]') {
       matched = String(record.creator_name ?? '').includes(value)
     }
@@ -198,20 +204,62 @@ async function resetSearch(page) {
   return card
 }
 
-async function openAllSearchFields(page) {
+export async function openAllSearchFields(page) {
+  const basicKeys = {
+    'filter[created_at_between]': 'created_at', 'filter[title]': 'title',
+    'filter[form_type]': 'is_activity', 'filter[creator_name]': 'creator_name',
+    'filter[time_range]': 'submission_status', 'filter[end_time_between]': 'end_time',
+    'filter[status]': 'status_text', 'filter[updated_at_between]': 'updated_at',
+  }
+  const trigger = page.locator('.table-toolbar').getByRole('button', {
+    name: /^(?:自定义列表字段|自訂(?:列表|清單)欄位|Custom(?:ize)? (?:List )?Fields)$/i,
+  })
+  await flowExpect(trigger, '表单列表必须提供唯一的自定义栏位按钮').toHaveCount(1)
+  await clickWhenReady(trigger)
+  const modal = page.locator('.arco-modal:visible').filter({ has: page.locator('.fields-modal-content') })
+  await flowExpect(modal, '自定义栏位弹窗必须唯一显示').toHaveCount(1)
+  const definitions = []
+  for (const key of SEARCH_KEYS) {
+    const basic = modal.locator(`.basic-setting-list input[type="checkbox"][value=${JSON.stringify(basicKeys[key])}]`)
+    await flowExpect(basic, `${key}必须有唯一关联基础栏位`).toHaveCount(1)
+    if (!await basic.isChecked()) await clickWhenReady(basic.locator('xpath=ancestor::label[1]'))
+    await flowExpect(basic, `${key}对应基础栏位必须启用`).toBeChecked()
+    const search = modal.locator(`.search-setting-list input[type="checkbox"][value=${JSON.stringify(key)}]`)
+    await flowExpect(search, `${key}必须有唯一检索栏位`).toHaveCount(1)
+    if (!await search.isChecked()) await clickWhenReady(search.locator('xpath=ancestor::label[1]'))
+    await flowExpect(search, `${key}检索栏位必须启用`).toBeChecked()
+    const label = (await search.locator('xpath=ancestor::label[1]').innerText()).trim()
+    flowExpect(label, `${key}检索栏位必须有标签`).not.toBe('')
+    definitions.push({ key, label })
+  }
+  await clickWhenReady(modal.getByRole('button', { name: /^(确认|確認|确定|確定|Confirm|OK)$/i }))
+  await flowExpect(modal, '保存栏位后弹窗必须关闭').toHaveCount(0)
+
+  // Reopen through the UI to verify the committed configuration, including linked columns.
+  await clickWhenReady(trigger)
+  for (const { key } of definitions) {
+    await flowExpect(modal.locator(`.basic-setting-list input[value=${JSON.stringify(basicKeys[key])}]`),
+      `${key}基础栏位保存后必须保持选中`).toBeChecked()
+    await flowExpect(modal.locator(`.search-setting-list input[value=${JSON.stringify(key)}]`),
+      `${key}检索栏位保存后必须保持选中`).toBeChecked()
+  }
+  await clickWhenReady(modal.getByRole('button', { name: /^(取消|Cancel)$/i }))
+  await flowExpect(modal, '验证配置后弹窗必须关闭').toHaveCount(0)
   const card = page.locator('.custom-filter .comp-filter-card')
   const expand = card.locator('.filter-card-expand')
-  if (await expand.count() && /展开|展開|Expand/i.test(await expand.innerText())) {
-    await clickWhenReady(expand)
-  }
+  if (await expand.count() && /展开|展開|Expand/i.test(await expand.innerText())) await clickWhenReady(expand)
   const fields = card.locator('.filter-card-field')
-  await flowExpect(fields, '搜索项必须恰好为 8 个').toHaveCount(SEARCH_KEYS.length)
-  for (let index = 0; index < SEARCH_KEYS.length; index += 1) {
-    await flowExpect(fields.nth(index), `${SEARCH_KEYS[index]} 必须可见`).toBeVisible()
-    await flowExpect(fields.nth(index).locator('.filter-card-control'),
-      `${SEARCH_KEYS[index]} 必须有输入控件`).toHaveCount(1)
+  await flowExpect(fields, '主动启用全部搜索项后必须恰好为 8 个').toHaveCount(SEARCH_KEYS.length)
+  const byKey = new Map()
+  for (const { key, label } of definitions) {
+    const exactLabel = new RegExp(`^\\s*${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`)
+    const field = fields.filter({ has: page.locator('.filter-card-label').filter({ hasText: exactLabel }) })
+    await flowExpect(field, `${key}必须按标签唯一定位`).toHaveCount(1)
+    await flowExpect(field, `${key}必须可见`).toBeVisible()
+    await flowExpect(field.locator('.filter-card-control'), `${key}必须有输入控件`).toHaveCount(1)
+    byKey.set(key, field)
   }
-  return fields
+  return byKey
 }
 
 async function fillDateRange(field, date) {
@@ -255,11 +303,11 @@ async function chooseOption(page, field, desiredText) {
 
 async function runSearchCase(page, fields, key, sample, label, { reset = true, targetFormId = '' } = {}) {
   if (reset) await resetSearch(page)
-  const index = SEARCH_KEYS.indexOf(key)
-  const field = fields.nth(index)
+  const field = fields.get(key)
+  flowExpect(Boolean(field), `${key}必须已配置并定位`).toBe(true)
   const submissionEndDate = targetFormId && key === 'filter[time_range]' ? dayOf(sample.end_time) : ''
   if (submissionEndDate) {
-    await fillDateRange(fields.nth(SEARCH_KEYS.indexOf('filter[end_time_between]')), submissionEndDate)
+    await fillDateRange(fields.get('filter[end_time_between]'), submissionEndDate)
   }
   const sampleValue = key === 'filter[title]' ? String(sample.title ?? '').trim()
     : key === 'filter[creator_name]' ? String(sample.creator_name ?? '').trim()

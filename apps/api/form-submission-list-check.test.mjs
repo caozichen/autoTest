@@ -15,7 +15,9 @@ import {
   normalizeRequestPath,
   parseSubmissionAssertions,
   resolveListContext,
+  rowValuesByHeader,
 } from '../../scripts/form-submission-list-check.ui.spec.mjs'
+import { launchGoogleChrome } from '../../scripts/support/google-chrome.mjs'
 import { executeRegisteredScript } from './script-runner.mjs'
 import {
   BASIC_SUBMISSION_FIELDS,
@@ -121,6 +123,8 @@ async function createFixtureRun(t, {
   detailMismatch = '',
   choiceDropdownBehavior = '',
   channelDropdownBehavior = '',
+  remarkAddControl = '',
+  submissionTab = '',
 } = {}) {
   const fixture = createSubmissionListFixture({
     formId: `list-check-${scenario}`,
@@ -172,6 +176,8 @@ async function createFixtureRun(t, {
           detailPresentation,
           choiceDropdownBehavior,
           channelDropdownBehavior,
+          remarkAddControl,
+          submissionTab,
         })
         if (scenario === 'slow-checkbox-navigation') {
           html = html.replace('</body>', `<script>
@@ -708,9 +714,10 @@ test('checks all submission/contact filters with contains probes, exact ids, Tok
   assert.doesNotMatch(JSON.stringify(result), /submission-list-success-sensitive-token/)
 })
 
-test('checks all 24 basic and 20 search fields including channel and remarks', async (t) => {
+test('checks current feedback record tab with counts, all 24 basic and 20 search fields including channel and remarks', async (t) => {
   const { result, observedRequests, fixture } = await createFixtureRun(t, {
     scenario: 'extended-fields', extendedFields: true, locale: 'zh-CN',
+    remarkAddControl: 'button', submissionTab: '反馈记录',
   })
   assert.equal(result.ok, true, JSON.stringify(failureAssertions(result)))
   assert.equal(result.result.basicFieldCount, 24)
@@ -726,9 +733,46 @@ test('checks all 24 basic and 20 search fields including channel and remarks', a
   assert.ok(result.logs.some((log) => log.message.includes('目标记录该字段为空')))
 })
 
-test('prepared channel uses exact codes while remarks use fuzzy matches, with exclusion and cleared-filter recovery', async t => {
+for (const [locale, submissionTab] of [['zh-TW', '回饋記錄'], ['en', 'Feedback Records']]) {
+  test(`checks renamed ${locale} feedback tab through contact switching and detail verification`, async (t) => {
+    const { result, observedRequests, fixture } = await createFixtureRun(t, {
+      scenario: `feedback-${locale}`, locale, submissionTab,
+    })
+    assert.equal(result.ok, true, [result.error, JSON.stringify(failureAssertions(result))].filter(Boolean).join('\n'))
+    assert.equal(result.result.submissionId, fixture.submissionId)
+    assert.equal(result.result.submissionSearchCount, SUBMISSION_SEARCH_FIELDS.length)
+    assert.equal(result.result.contactSearchCount, 3)
+    assert.ok(observedRequests.some(({ path }) => path === `/api/be/form/${fixture.formId}/submission/${fixture.submissionId}`))
+    assert.ok(observedRequests.filter(({ path }) => path.startsWith('/api/')).every(({ method }) => method === 'GET'))
+  })
+}
+
+test('remark cell text excludes old buttons and current add links while preserving business links', async () => {
+  const browser = await launchGoogleChrome()
+  try {
+    const page = await browser.newPage()
+    await page.setContent(`<main><table><thead><tr>
+      <th>旧版备注</th><th>新版备注</th><th>空备注</th><th>链接正文</th>
+      </tr></thead><tbody><tr>
+      <td><span>旧版完整备注</span><button class="submission-remark-add" aria-label="添加备注">添加备注<svg><title>添加图标</title></svg></button></td>
+      <td><span>新版完整备注</span><a class="arco-link submission-remark-add">点击添加</a></td>
+      <td><a class="arco-link submission-remark-add">点击添加</a></td>
+      <td><a class="arco-link" href="/business/document">业务链接文字</a><span>，</span><a href="/business/note">点击添加</a>
+        <a class="submission-remark-add">点击添加</a></td>
+      </tr></tbody></table></main>`)
+    const values = await rowValuesByHeader(page, page.locator('tbody > tr'))
+    assert.equal(values.get('旧版备注'), '旧版完整备注')
+    assert.equal(values.get('新版备注'), '新版完整备注')
+    assert.equal(values.get('空备注'), '')
+    assert.equal(values.get('链接正文'), '业务链接文字，点击添加')
+    assert.equal(await page.locator('.submission-remark-add').count(), 4, '文本提取不得修改页面 DOM')
+  } finally { await browser.close() }
+})
+
+test('prepared channel uses exact codes while remarks use fuzzy matches with the current add link, exclusion and cleared-filter recovery', async t => {
   const { result, observedRequests, fixture } = await createFixtureRun(t, {
     scenario: 'prepared-samples', extendedFields: true, preparedSamples: true, locale: 'zh-CN',
+    remarkAddControl: 'link',
   })
   assert.equal(result.ok, true, JSON.stringify(failureAssertions(result)))
   assert.equal(result.result.successfulSubmissionSearchCount, 20)

@@ -1,3 +1,4 @@
+import { getFormListRecords } from './support/form-list-response.mjs'
 import { observeFormEditTokens } from './support/form-edit-token-observer.mjs'
 import { resolveAdminLocale } from './support/admin-locale.mjs'
 import { clickWhenReady, observeUiReadiness, waitForUiReady } from './support/ui-readiness.mjs'
@@ -11,6 +12,7 @@ import { fileURLToPath } from 'node:url'
 import { deflateSync } from 'node:zlib'
 
 import { expect } from './support/recorded-expect.mjs'
+import { assertChoiceContentImages } from './support/form-choice-images.mjs'
 import { attachNetworkObserver } from './support/api-response-recorder.mjs'
 import {
   createFormLinkContract,
@@ -791,7 +793,11 @@ async function configureSecondPageFields(page, imagePath, today, endDate, logger
       { label: `单项选择第 ${index + 1} 个选项图片` },
     ))
   }
-  await expect(radioField.locator('img'), '单项选择前两个选项应显示已上传图片').toHaveCount(2)
+  await assertChoiceContentImages(radioField, 2)
+  for (let index = 0; index < 2; index += 1) {
+    await assertChoiceContentImages(optionImageInputs.nth(index).locator('xpath=..'), 1,
+      `单项选择第 ${index + 1} 个上传选项`)
+  }
 
   const checkboxField = fieldLocator(page, 'checkbox')
   await clickWhenReady(checkboxField)
@@ -1384,7 +1390,7 @@ export async function run({
     ])
     const listOutcome = await inspectBusinessResponse(listSearchResponse, '查询已发布表单列表')
     const listBody = listOutcome.body
-    const publishedRecords = Array.isArray(listBody?.data?.list) ? listBody.data.list : []
+    const publishedRecords = getFormListRecords(listBody, '查询已发布表单列表')
     if (listOutcome.bodyValid) {
       expect(Array.isArray(listBody?.data?.list), '列表接口 data.list 应为数组').toBe(true)
     }

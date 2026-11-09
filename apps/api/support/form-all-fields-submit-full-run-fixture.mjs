@@ -105,13 +105,15 @@ export function createFullRunFormHtml({
     card(fieldKeys.input, '单行文本', '<input id="single-line-input" type="text" maxlength="20">'),
     card(fieldKeys.textarea, '多行文本', '<textarea id="textarea-input"></textarea>'),
     card(fieldKeys.radio, '单项选择', `
-      <button class="fb-ui-radio-group-item" type="button" data-state="unchecked" data-value="option_1">
-        <img src="${escapeHtml(imageUrl)}" alt="选项1">选项1
-      </button>
-      <button class="fb-ui-radio-group-item" type="button" data-state="unchecked" data-value="option_2">
-        <img src="${escapeHtml(imageUrl)}" alt="选项2">选项2
-      </button>
-      <button class="fb-ui-radio-group-item" type="button" data-state="unchecked" data-value="option_other">其他</button>
+      ${['option_1', 'option_2', 'option_other'].map((value, index) => `
+        <label class="fixture-radio-card" for="radio-choice-${index}">
+          <button id="radio-choice-${index}" class="fb-ui-radio-group-item" role="radio" type="button" data-state="unchecked" data-value="${value}"></button>
+          ${index < 2 ? `<span>
+            <img src="${escapeHtml(imageUrl)}" alt="选项${index + 1}">
+            <button data-option-image-preview type="button" aria-label="预览图片"><img src="data:image/png;base64,${ONE_PIXEL_PNG.toString('base64')}" alt=""></button>
+          </span>` : `<img src="data:image/png;base64,${ONE_PIXEL_PNG.toString('base64')}" alt="">`}
+          <span>${index < 2 ? `选项${index + 1}` : '其他'}</span>
+        </label>`).join('')}
       <input id="custom-radio-input" type="text" hidden>`),
     card(fieldKeys.checkbox, '多项选择', [1, 2, 3].map((index) => `
       <button class="fb-ui-checkbox-root" type="button" data-state="unchecked" data-value="option_${index}">选项${index}</button>`).join('')),
@@ -202,6 +204,9 @@ export function createFullRunFormHtml({
       [role="option"] { cursor: pointer; padding: 6px 12px; }
       .fb-runtime-field-error { color: #b42318; }
       .fb-runtime-upload-image-preview img { height: 32px; width: 32px; }
+      .fixture-radio-card { display: inline-flex; position: relative; align-items: center; width: 160px; min-height: 100px; padding: 12px; cursor: pointer; }
+      .fb-ui-radio-group-item { position: absolute; width: 1px; height: 1px; min-height: 0; margin: 0; padding: 0; overflow: hidden; clip-path: inset(50%); }
+      [data-option-image-preview] img { width: 14px; height: 14px; }
       #signature-dialog { background: white; border: 1px solid #333; left: 25%; padding: 16px; position: fixed; top: 20%; z-index: 4; }
       #signature-dialog canvas { border: 1px solid #555; display: block; height: 220px; width: 500px; }
       .fb-runtime-cascader-checkbox { border: 1px solid #555; display: inline-block; height: 12px; margin-left: 6px; width: 12px; }
@@ -305,6 +310,9 @@ export function createFullRunFormHtml({
           state.radioIndex = index
           document.querySelector('#custom-radio-input').hidden = index !== 2
         })
+      })
+      document.querySelectorAll('[data-option-image-preview]').forEach((button) => {
+        button.addEventListener('click', event => { event.preventDefault(); event.stopPropagation() })
       })
       document.querySelectorAll('.fb-ui-checkbox-root').forEach((control) => {
         control.addEventListener('click', () => {

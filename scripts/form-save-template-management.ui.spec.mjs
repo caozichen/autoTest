@@ -1,3 +1,4 @@
+import { getFormListRecords } from './support/form-list-response.mjs'
 import { observeFormEditTokens } from './support/form-edit-token-observer.mjs'
 import { resolveAdminLocale } from './support/admin-locale.mjs'
 import { attachNetworkObserver } from './support/api-response-recorder.mjs'
@@ -248,7 +249,7 @@ export async function run({
     const sourceListBody = await businessResponse(await sourceListPromise, '源表单列表查询')
     expect(Array.isArray(sourceListBody?.data?.list), '源表单列表应包含 data.list').toBe(true)
     flowExpect(Array.isArray(sourceListBody?.data?.list), '源表单列表必须返回数组').toBe(true)
-    const sourceRecord = sourceListBody.data.list.find(record => recordId(record) === sourceId)
+    const sourceRecord = getFormListRecords(sourceListBody, '源表单列表').find(record => recordId(record) === sourceId)
     flowExpect(sourceRecord, '列表必须包含指定源表单').toBeTruthy()
     expect(sourceRecord.title, '列表源表单名称应与详情一致').toBe(sourceTitle)
     const sourceRow = page.locator('.arco-table-tr').filter({
@@ -494,7 +495,7 @@ export async function run({
     const publishedListBody = await businessResponse(await publishedListPromise, '模板生成表单发布后列表')
     expect(Array.isArray(publishedListBody?.data?.list), '发布后列表应包含 data.list').toBe(true)
     flowExpect(Array.isArray(publishedListBody?.data?.list), '发布后列表必须返回数组').toBe(true)
-    const publishedRecord = publishedListBody.data.list.find(record => recordId(record) === createdFormId)
+    const publishedRecord = getFormListRecords(publishedListBody, '模板生成表单列表').find(record => recordId(record) === createdFormId)
     flowExpect(publishedRecord, '发布后列表必须包含模板生成的表单').toBeTruthy()
     expect(publishedRecord.title, '发布后列表名称应继承修改后的模板').toBe(modifiedName)
     expect(publishedRecord.status, '发布后列表状态应为已发布').toBe('published')

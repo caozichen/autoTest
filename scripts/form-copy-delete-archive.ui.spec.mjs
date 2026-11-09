@@ -1,3 +1,4 @@
+import { getFormListRecords } from './support/form-list-response.mjs'
 import { observeFormEditTokens } from './support/form-edit-token-observer.mjs'
 import { resolveAdminLocale } from './support/admin-locale.mjs'
 import { attachNetworkObserver } from './support/api-response-recorder.mjs'
@@ -92,7 +93,7 @@ async function searchList(page, title, label) {
   const body = await businessResponse(response, `${label}列表查询`)
   expect(Array.isArray(body?.data?.list), `${label}列表响应应包含 data.list`).toBe(true)
   flowExpect(Array.isArray(body?.data?.list), `${label}列表必须返回数组`).toBe(true)
-  return body.data.list
+  return getFormListRecords(body, label)
 }
 
 function rowFor(page, id) {

@@ -5,10 +5,11 @@ import { launchGoogleChrome } from '../../scripts/support/google-chrome.mjs'
 import { preserveMutationResponseBeforeNavigation, readResponseText } from '../../scripts/support/navigation-response-body.mjs'
 import { attachNetworkObserver } from '../../scripts/support/api-response-recorder.mjs'
 
-test('keeps original business and HTTP failures across a full navigation without repeating the POST', async t => {
+test('keeps original success, business and HTTP failures across a full navigation without repeating the POST', async t => {
   const browser = await launchGoogleChrome()
   t.after(() => browser.close())
-  for (const [status, payload] of [[200, { code: 30001, message: '邮件内容不能为空' }], [503, { code: 50000, message: '服务不可用' }]]) {
+  for (const [status, payload] of [[200, { code: 0, data: { submission_id: 'original-submission' } }],
+    [200, { code: 30001, message: '邮件内容不能为空' }], [503, { code: 50000, message: '服务不可用' }]]) {
     let posts = 0
     const path = '/api/f/form/navigation-fixture/submission'
     const server = createServer((request, response) => {
@@ -49,7 +50,10 @@ test('keeps original business and HTTP failures across a full navigation without
       assert.deepEqual(await page.evaluate(() => JSON.parse(sessionStorage.getItem('actual-response'))), payload)
       await observer.stop()
       assert.equal(posts, 1)
-      assert.deepEqual(entries.find(entry => entry.method === 'POST').responseBody, payload)
+      const recorded = entries.find(entry => entry.method === 'POST')
+      assert.deepEqual(recorded.responseBody, payload)
+      assert.equal(recorded.warning, undefined)
+      assert.equal(recorded.bodyReadError, undefined)
     } finally {
       await observer.stop()
       await stop()

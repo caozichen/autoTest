@@ -8,6 +8,7 @@ import { scaleTimeout } from './support/environment-timeouts.mjs'
 import { expect as flowExpect } from './support/environment-timeouts.mjs'
 
 import { expect } from './support/recorded-expect.mjs'
+import { assertRadioChoiceImages, clickRadioOption, radioOptionControl } from './support/form-choice-images.mjs'
 import { attachNetworkObserver } from './support/api-response-recorder.mjs'
 import { launchGoogleChrome } from './support/google-chrome.mjs'
 import { readResponseText, preserveMutationResponseBeforeNavigation } from './support/navigation-response-body.mjs'
@@ -1715,19 +1716,15 @@ export async function run({
       const radio = await assertField(page, FIELD_KEYS.radio, '单项选择')
       const radioControls = radio.locator('.fb-ui-radio-group-item')
       await expect(radioControls, '单项选择应显示 3 个选项控件').toHaveCount(3)
-      const radioImages = radio.locator('img')
-      await expect(radioImages, '单项选择前两个选项应实际渲染图片').toHaveCount(2)
-      for (let index = 0; index < 2; index += 1) {
-        await expect(radioImages.nth(index), `单项选择第 ${index + 1} 张图片应包含地址`).toHaveAttribute('src', /^https?:\/\//)
-      }
-      const customizedRadio = radioControls.nth(2)
-      await clickWhenReady(customizedRadio)
+      await assertRadioChoiceImages(radio, publishedContract.optionValues.radio)
+      const customizedRadio = await radioOptionControl(radio, publishedContract.optionValues.radio['其他'], '单项选择“其他”')
+      await clickRadioOption(customizedRadio, '单项选择“其他”')
       await expect(customizedRadio, '单项选择“其他”应进入选中状态').toHaveAttribute('data-state', 'checked')
       const customizedRadioInput = radio.locator('input[type="text"]:visible')
       await expect(customizedRadioInput, '选择“其他”后应显示一个自定义文本输入框').toHaveCount(1)
       await fillAndAssert(customizedRadioInput, '其他边界选项', '单项选择-其他')
-      const radioChoice = radioControls.nth(data.radioIndex)
-      await clickWhenReady(radioChoice)
+      const radioChoice = await radioOptionControl(radio, publishedContract.optionValues.radio[data.radio], `单项选择“${data.radio}”`)
+      await clickRadioOption(radioChoice, `单项选择“${data.radio}”`)
       await expect(radioChoice, '单项选择应选中“选项1”').toHaveAttribute('data-state', 'checked')
       await expect(customizedRadio, '切回普通选项后“其他”应取消选中').toHaveAttribute('data-state', 'unchecked')
       const checkbox = await assertField(page, FIELD_KEYS.checkbox, '多项选择')

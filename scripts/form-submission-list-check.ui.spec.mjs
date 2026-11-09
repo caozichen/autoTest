@@ -21,13 +21,13 @@ const ACTION_TIMEOUT_MS = 30_000
 const SEARCH_RESPONSE_TIMEOUT_MS = 15_000
 const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
 
-const DETAILS_TAB_PATTERN = /(?:提报详情|提報詳情|Submission Details?|填报详情|填報詳情|填报记录|填報記錄|Responses)/i
+const DETAILS_TAB_PATTERN = /(?:提报详情|提報詳情|Submission Details?|填报详情|填報詳情|填报记录|填報記錄|反馈记录|回饋記錄|Feedback Records|Responses)/i
 const CONTACT_TAB_PATTERN = /(?:联系人信息|聯絡人資訊|聯繫人資訊|Contact Information)/i
 const CONTACT_TAG_PATTERN = /^(?:已关联联系人|已關聯聯絡人|已關聯聯繫人|Contact linked)$/i
 const VIEW_PATTERN = /^(?:查看|檢視|View)$/i
 const QUERY_PATTERN = /^(?:查询|查詢|搜索|搜尋|Search|Query)$/i
 const RESET_PATTERN = /^(?:重置|重设|重設|Reset)$/i
-const CONFIRM_PATTERN = /^(?:确认|確認|確定|保存|儲存|Apply|Save|OK)$/i
+const CONFIRM_PATTERN = /^(?:确认|確認|確定|保存|儲存|Confirm|Apply|Save|OK)$/i
 const NAME_LABEL_PATTERN = /^\s*(?:姓名|Name)\s*$/i
 
 function escapeRegExp(value) {
@@ -800,7 +800,8 @@ async function persistFieldSettings(page, state, mutationState) {
 async function textWithoutButtons(locator) {
   return normalizeWhitespace(await locator.evaluate((element) => {
     const clone = element.cloneNode(true)
-    clone.querySelectorAll('button, svg, img').forEach((node) => node.remove())
+    // The add-remark action is a link in the current UI; retain other links' business text.
+    clone.querySelectorAll('button, svg, img, .submission-remark-add').forEach((node) => node.remove())
     return clone.textContent ?? ''
   }))
 }
@@ -1750,4 +1751,5 @@ export {
   assertTopInformation,
   detailNameValues,
   assertNetworkEvidence,
+  rowValuesByHeader,
 }

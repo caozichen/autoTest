@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { basename } from 'node:path'
 import test from 'node:test'
+import { ONE_PIXEL_PNG } from './support/form-all-fields-submit-full-run-fixture.mjs'
 
 import { runWithAssertionRecorder } from '../../scripts/support/recorded-expect.mjs'
 import { run as runMainland } from '../../scripts/form-all-fields-publish-mainland.ui.spec.mjs'
@@ -423,10 +424,13 @@ function mockApplicationHtml({ mainland = false } = {}) {
       } else if (field.type === 'radio' && field.settings.allowImage) {
         inner += field.optionUploads.map((upload, index) =>
           '<label>选项' + (index + 1) + '<input type="file" accept="image/*" id="option-image-' +
-          field.key + '-' + index + '" data-option-index="' + index + '"></label>' +
-          (upload ? '<img src="' + escapeHtml(upload.full_path) + '" alt="选项图片">' : '')
+          field.key + '-' + index + '" data-option-index="' + index + '">' +
+          (upload ? '<img src="' + escapeHtml(upload.full_path) + '" alt="选项图片">' +
+            '<button type="button" data-option-image-preview><img src="data:image/png;base64,' +
+            ${JSON.stringify(ONE_PIXEL_PNG.toString('base64'))} + '" alt=""></button>' : '') + '</label>'
         ).join('')
-        inner += '<input type="file" accept="image/*" id="option-image-' + field.key + '--1">'
+        inner += '<label><input type="file" accept="image/*" id="option-image-' + field.key + '--1">' +
+          '<img src="data:image/png;base64,' + ${JSON.stringify(ONE_PIXEL_PNG.toString('base64'))} + '" alt=""></label>'
       } else if (field.type === 'checkbox') {
         inner += Array.from({ length: field.checkboxOptionCount }, (_, index) =>
           '<button type="button" class="checkbox-option-handle" data-option-handle="' + index + '">选项' + (index + 1) + '</button>'
@@ -1094,6 +1098,12 @@ async function checkCompleteForm({ mainland, execute }) {
   const server = createServer(async (request, response) => {
     const url = new URL(request.url, 'http://127.0.0.1')
 
+    if (request.method === 'GET' && url.pathname.startsWith('/fixture-assets/')) {
+      response.writeHead(200, { 'Content-Type': 'image/png' })
+      response.end(ONE_PIXEL_PNG)
+      return
+    }
+
     if (request.method === 'PUT' && url.pathname.startsWith('/storage/')) {
       const chunks = []
       for await (const chunk of request) chunks.push(chunk)
@@ -1174,7 +1184,7 @@ async function checkCompleteForm({ mainland, execute }) {
           size: intent.size,
           mime_type: intent.mime_type,
           original_name: intent.original_name,
-          full_path: 'https://files.example.test/develop/team-1/mock-' + uploadSequence + '.jpeg',
+          full_path: 'http://' + request.headers.host + '/fixture-assets/mock-' + uploadSequence + '.jpeg',
         },
       })
       return

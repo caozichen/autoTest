@@ -1,3 +1,4 @@
+import { getFormListRecords } from './support/form-list-response.mjs'
 import { observeFormEditTokens } from './support/form-edit-token-observer.mjs'
 import { resolveAdminLocale } from './support/admin-locale.mjs'
 import { publicOriginForSite } from '../shared/form-environment.mjs'
@@ -11,6 +12,7 @@ import {
   configureAutomationNotification,
 } from './support/form-settings-notifications.mjs'
 import { launchGoogleChrome } from './support/google-chrome.mjs'
+import { preserveMutationResponseBeforeNavigation } from './support/navigation-response-body.mjs'
 import { expect } from './support/recorded-expect.mjs'
 import { clickWhenReady, observeUiReadiness } from './support/ui-readiness.mjs'
 import { openFormSettingsStep } from './support/form-navigation.mjs'
@@ -153,6 +155,7 @@ async function submitOneEmail({ browser, siteBaseUrl, formId, title, revisionNo,
   page.setDefaultTimeout(scaleTimeout(ACTION_TIMEOUT_MS))
   page.setDefaultNavigationTimeout(scaleTimeout(NAVIGATION_TIMEOUT_MS))
   let submissionRequestCount = 0
+  let stopPreservingSubmission
   const authorizationLeaks = []
   page.on('request', request => {
     const url = new URL(request.url())
@@ -206,16 +209,18 @@ async function submitOneEmail({ browser, siteBaseUrl, formId, title, revisionNo,
     await expect(emailInput, `第 ${index} 次邮箱应回显`).toHaveValue(email)
 
     observer.setPhase(`邮箱 ${index}：提交及结果`)
+    stopPreservingSubmission = await preserveMutationResponseBeforeNavigation(page, {
+      origin: publicOrigin, path: `/f/form/${formId}/submission`,
+    })
     const submission = await waitForPublicMutation(page, publicOrigin,
       `/f/form/${formId}/submission`,
       () => clickWhenReady(page.locator('.fb-runtime-submit-button-wrap button.fb-runtime-submit-button')),
-      `第 ${index} 次提交表单`, { expectBusinessSuccess: false })
+      `第 ${index} 次提交表单`)
+    flowExpect(submission.bodyReadError, `第 ${index} 次应读取跳转前的真实提交响应`).toBeUndefined()
+    flowExpect(Number(submission.body?.code), `第 ${index} 次提交业务码必须为 0`).toBe(0)
     const body = requestBody(submission.response.request(), `第 ${index} 次提交`)
     assertContactSubmissionPayload(body, fieldKeys, { formId, revisionNo, name, mobile, email },
       `第 ${index} 次`, submission.response.request().url())
-    if (Object.hasOwn(submission.body, 'code')) {
-      expect(Number(submission.body.code), `第 ${index} 次提交业务码应为 0`).toBe(0)
-    }
     await expect(page, `第 ${index} 次提交后应进入结果页`)
       .toHaveURL(/\/form\/submission-result\/?(?:[?#]|$)/, { timeout: scaleTimeout(NAVIGATION_TIMEOUT_MS) })
     const resultId = await assertVisibleSubmissionResult(page, formId, { formPayload: config })
@@ -241,6 +246,7 @@ async function submitOneEmail({ browser, siteBaseUrl, formId, title, revisionNo,
   } finally {
     observer.setPhase(`邮箱 ${index}：结束清理`)
     await observer.stop({ signal })
+    await stopPreservingSubmission?.()
     await context.close()
   }
 }
@@ -403,7 +409,7 @@ export async function run(options, { mainland = false } = {}) {
     })
     await clickWhenReady(page.getByRole('button', { name: /查询|查詢|搜索|搜尋/ }))
     const list = await inspectBusinessResponse(await listPromise, '查询已发布表单')
-    const publishedRecord = (list.body?.data?.list ?? []).find(record => String(record.id) === String(formId))
+    const publishedRecord = getFormListRecords(list.body, '查询已发布表单').find(record => String(record.id) === String(formId))
     expect(publishedRecord?.title, '已发布列表标题应匹配').toBe(title)
     expect(publishedRecord?.status, '已发布列表状态应为 published').toBe('published')
     expect(Number(publishedRecord?.current_revision_no), '已发布列表版本应匹配').toBe(revisionNo)

@@ -8,6 +8,7 @@ import { attachNetworkObserver } from './support/api-response-recorder.mjs'
 import { launchGoogleChrome } from './support/google-chrome.mjs'
 import { parseFormLinkContract } from './support/form-link-contract.mjs'
 import { expect } from './support/recorded-expect.mjs'
+import { assertRadioChoiceImages, clickRadioOption, radioOptionControl } from './support/form-choice-images.mjs'
 import {
   closePlaywrightHandles,
   closePlaywrightOnAbort,
@@ -345,7 +346,7 @@ async function assertValidationMessage(card, message, label) {
   await expect(card.locator('.fb-runtime-field-error'), label).toContainText(message)
 }
 
-async function fillAllFields(page, fieldKeys, data, fixtures, logger) {
+async function fillAllFields(page, fieldKeys, data, fixtures, logger, radioOptionValues) {
   const username = await requiredField(page, fieldKeys.username, '姓名')
   await selectOption(page, username.locator('[role="combobox"]'), data.nameTitle, '姓名-称谓', logger)
   await fillAndAssert(username.locator('input').first(), data.username, '姓名')
@@ -400,20 +401,17 @@ async function fillAllFields(page, fieldKeys, data, fixtures, logger) {
   const radio = await requiredField(page, fieldKeys.radio, '单项选择')
   const radioControls = radio.locator('.fb-ui-radio-group-item')
   await expect(radioControls, '单项选择应显示三个选项').toHaveCount(3)
-  const radioImages = radio.locator('img')
-  await expect(radioImages, '单项选择前两个选项应渲染图片').toHaveCount(2)
-  for (let index = 0; index < 2; index += 1) {
-    await expect(radioImages.nth(index), `单项选择第 ${index + 1} 张图片应包含地址`).toHaveAttribute('src', /^https?:\/\//)
-  }
-  const customRadio = radioControls.nth(2)
-  await clickWhenReady(customRadio)
+  await assertRadioChoiceImages(radio, radioOptionValues)
+  const customRadio = await radioOptionControl(radio, radioOptionValues['其他'], '单项选择“其他”')
+  await clickRadioOption(customRadio, '单项选择“其他”')
   await expect(customRadio, '单项选择“其他”应可选中').toHaveAttribute('data-state', 'checked')
   const customRadioInput = radio.locator('input[type="text"]:visible')
   await expect(customRadioInput, '选择“其他”后应显示自定义文本框').toHaveCount(1)
   await fillAndAssert(customRadioInput, '其他边界选项', '单项选择-其他')
-  const radioChoice = radioControls.nth(data.radioIndex)
-  await clickWhenReady(radioChoice)
+  const radioChoice = await radioOptionControl(radio, radioOptionValues[data.radio], `单项选择“${data.radio}”`)
+  await clickRadioOption(radioChoice, `单项选择“${data.radio}”`)
   await expect(radioChoice, '单项选择应最终选中“选项1”').toHaveAttribute('data-state', 'checked')
+  await expect(customRadio, '切回普通选项后“其他”应取消选中').toHaveAttribute('data-state', 'unchecked')
 
   const checkbox = await requiredField(page, fieldKeys.checkbox, '多项选择')
   const checkboxControls = checkbox.locator('.fb-ui-checkbox-root')
@@ -903,7 +901,7 @@ export async function run({
     expect(validatePageRequestCount, '后台单页创建流程不应调用公开端分页校验接口').toBe(0)
 
     networkObserver.setPhase('单页全题型填写')
-    await fillAllFields(page, fieldKeys, data, fixtures, logger)
+    await fillAllFields(page, fieldKeys, data, fixtures, logger, publishedContract.optionValues.radio)
     expect(submissionRequestCount, '字段填写阶段不得提前发送创建 POST').toBe(0)
     await flowExpect(
       submissionRequestCount,

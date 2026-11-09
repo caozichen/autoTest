@@ -440,9 +440,11 @@ export function createSubmissionListHtml({
   detailPresentation = 'page',
   choiceDropdownBehavior = '',
   channelDropdownBehavior = '',
+  remarkAddControl = '',
+  submissionTab = '',
 } = {}) {
   if (!fixture) throw new Error('提报列表 HTML fixture 缺少业务数据')
-  const ui = UI_TEXT[locale] ?? UI_TEXT['zh-CN']
+  const ui = { ...(UI_TEXT[locale] ?? UI_TEXT['zh-CN']), ...(submissionTab ? { submissionTab } : {}) }
   const initiallyCheckedBasics = ['created_at', SEARCHABLE_SUBMISSION_FIELDS[0].basicKey]
   const initiallyCheckedSearches = [
     'filter[created_at_between]',
@@ -474,6 +476,7 @@ export function createSubmissionListHtml({
     detailPresentation,
     choiceDropdownBehavior,
     channelDropdownBehavior,
+    remarkAddControl,
     detailDrawerHtml: `<div class="arco-drawer-container submission-reply-detail-drawer" role="dialog" aria-label="填报详情"><div class="arco-drawer">
       <button type="button" class="arco-drawer-close-btn" aria-label="Close">×</button>
       <h2>${escapeHtml(fixture.title)}</h2>
@@ -802,7 +805,15 @@ export function createSubmissionListHtml({
           return record.answers?.find((answer) => answer.item_key === itemKey)?.answer ?? '-'
         }
         return '<tr class="arco-table-tr" data-submission-id="' + escapeText(record.id || record.submission_id) + '">'
-          + columns.map((field) => '<td>' + escapeText(answerFor(field.key)) + '</td>').join('')
+          + columns.map((field) => {
+            const value = escapeText(answerFor(field.key))
+            if (field.key !== 'dyn_remark' || !model.remarkAddControl) return '<td>' + value + '</td>'
+            const add = model.remarkAddControl === 'link'
+              ? '<a class="arco-link submission-remark-add">点击添加</a>'
+              : '<button type="button" class="submission-remark-add" aria-label="添加备注">添加备注</button>'
+            return '<td><div class="submission-remark-list"><span class="submission-remark-text">'
+              + value + '</span>' + add + '</div></td>'
+          }).join('')
           + '<td><button type="button" aria-label="' + escapeText(model.ui.view) + '" data-view-submission="'
           + escapeText(record.id || record.submission_id) + '">' + escapeText(model.ui.view) + '</button></td></tr>'
       }).join('')
